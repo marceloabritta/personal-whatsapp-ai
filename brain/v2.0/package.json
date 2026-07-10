@@ -1,0 +1,14 @@
+{
+  "name": "personal-whatsapp-ai",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "1. Orchestrator/server.js",
+  "scripts": {
+    "start": "node \"1. Orchestrator/server.js\""
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@anthropic-ai/sdk": "^0.30.1",
+    "googleapis": ">=140.0.0"
+  }
+}

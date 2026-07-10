@@ -1,0 +1,74 @@
+# ============================================================================
+#  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis + brain
+#  Runs on a single droplet. Everything talks over the internal "evolution-net".
+# ============================================================================
+services:
+  api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:latest
+    restart: always
+    depends_on:
+      - redis
+      - postgres
+    ports:
+      - "8080:8080"          # Evolution manager/API (exposed to the internet)
+    volumes:
+      - evolution_instances:/evolution/instances
+    env_file:
+      - .env                  # Evolution config (secrets, database, cache)
+    networks:
+      - evolution-net
+
+  redis:
+    container_name: evolution_redis
+    image: redis:latest
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - evolution_redis:/data
+    networks:
+      - evolution-net
+
+  postgres:
+    container_name: evolution_postgres
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command: postgres -c max_connections=1000
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - evolution-net
+
+  brain:
+    container_name: brain
+    image: node:20-alpine
+    restart: always
+    working_dir: /app
+    depends_on:
+      - api
+    volumes:
+      - /opt/brain:/app        # the brain code lives here, mounted from the host
+                               # (put the contents of brain/v2.0 in /opt/brain)
+    env_file:
+      - /opt/brain/.env        # brain secrets (Claude, Google, AssemblyAI)
+    command: sh -c "npm install --no-audit --no-fund && npm start"
+    environment:
+      EVOLUTION_URL: http://api:8080
+      EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
+      EVOLUTION_INSTANCE: secretary
+      SECRETARY_TAG: "@secretary"
+    networks:
+      - evolution-net
+
+volumes:
+  evolution_instances:
+  evolution_redis:
+  postgres_data:
+
+networks:
+  evolution-net:
+    driver: bridge
