@@ -1,0 +1,20 @@
+# Secrets — NEVER commit
+.env
+**/.env
+!**/.env.example
+
+# Dependencies
+node_modules/
+**/node_modules/
+package-lock.json
+
+# Reorg leftovers
+_to_delete/
+**/_to_delete/
+
+# Old scratch (abandoned Z-API approach)
+_deprecated_zapi_scaffold/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
