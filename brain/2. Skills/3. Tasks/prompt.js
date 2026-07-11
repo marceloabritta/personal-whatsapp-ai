@@ -178,19 +178,28 @@ Latest message: ${latest}`;
 
 const DUE_TZ = "America/Sao_Paulo";
 
-// Localized DATE-ONLY string for a task due. Google Tasks stores due as a date at
-// UTC midnight, so we render in UTC to show the same calendar date that was stored;
-// a fresh add passes the same normalized value, so display always matches storage.
+// Localized DATE-ONLY string for a task due, rendered as "dd/mmm" (e.g. 17/jul).
+// The month abbreviation follows ctx.lang (en "jul"/"may", pt "jul"/"mai"). Google
+// Tasks stores due at UTC midnight, so we render in UTC to show the same calendar
+// date that was stored; a fresh add passes the same normalized value, so display
+// always matches storage.
 export function localizeDueDate(lang, iso) {
   if (!iso) return null;
   const d = new Date(iso);
   if (isNaN(d.getTime())) return null;
   const locale = lang === "pt" ? "pt-BR" : "en-US";
-  return d.toLocaleDateString(locale, {
+  const day = new Intl.DateTimeFormat(locale, {
+    timeZone: "UTC",
+    day: "2-digit",
+  }).format(d);
+  const mon = new Intl.DateTimeFormat(locale, {
     timeZone: "UTC",
     month: "short",
-    day: "numeric",
-  });
+  })
+    .format(d)
+    .replace(/\.$/, "") // pt-BR yields "jul." — drop the trailing period
+    .toLowerCase();
+  return `${day}/${mon}`;
 }
 
 // A -03:00 date string for a task assigned to someone else: the due DATE (São
@@ -222,23 +231,13 @@ export function threePmOnDue(iso) {
   return `${dateStr}T15:00:00-03:00`;
 }
 
-function listEn(header, rows) {
-  return [header]
-    .concat(
-      rows.map(
-        (r, i) => `${i + 1}. ${r.title}${r.when ? ` — due ${r.when}` : ""}`
-      )
-    )
-    .join("\n");
+// One task line: "dd/mmm - title" when it has a due date, else just the title.
+// Language-agnostic (the date is pre-localized by localizeDueDate).
+function taskLine(r) {
+  return r.when ? `${r.when} - ${r.title}` : r.title;
 }
-function listPt(header, rows) {
-  return [header]
-    .concat(
-      rows.map(
-        (r, i) => `${i + 1}. ${r.title}${r.when ? ` — vence ${r.when}` : ""}`
-      )
-    )
-    .join("\n");
+function renderList(header, rows) {
+  return [header, ...rows.map(taskLine)].join("\n");
 }
 
 const REPLY = {
@@ -248,14 +247,12 @@ const REPLY = {
       "I didn't identify a task action (add, list, or complete).",
     needTitle: () => "What should the task say? Send me the task text.",
     added: ({ title, when }) =>
-      `Added to your list: "${title}"${
-        when ? ` · due ${when}` : ""
-      }. Tell me to change anything, or say "done".`,
+      `Added to your list:\n${taskLine({ title, when })}\n\nTell me if you need something to change, if not we are good.`,
     updated: ({ title, when }) =>
-      `Updated: "${title}"${when ? ` · due ${when}` : ""}.`,
+      `Updated your list:\n${taskLine({ title, when })}\n\nTell me if you need something to change, if not we are good.`,
     removed: ({ title }) => `Removed "${title}" from your list.`,
     empty: () => "Your list is empty — nothing open.",
-    formatList: (rows) => listEn(`Your list (${rows.length} open):`, rows),
+    formatList: (rows) => renderList("Here are your open tasks:", rows),
     notFound: () => "I couldn't tell which task you mean. Which one?",
     confirmComplete: ({ title }) =>
       `Mark this done?\n- ${title}\n\nReply "yes" to confirm.`,
@@ -272,14 +269,12 @@ const REPLY = {
       "Não identifiquei uma ação de tarefa (adicionar, listar ou concluir).",
     needTitle: () => "O que a tarefa deve dizer? Me envie o texto da tarefa.",
     added: ({ title, when }) =>
-      `Adicionei à sua lista: "${title}"${
-        when ? ` · vence ${when}` : ""
-      }. Me diga se quer mudar algo, ou diga "pronto".`,
+      `Adicionei à sua lista:\n${taskLine({ title, when })}\n\nMe diga se precisa mudar algo, senão está tudo certo.`,
     updated: ({ title, when }) =>
-      `Atualizado: "${title}"${when ? ` · vence ${when}` : ""}.`,
+      `Atualizei sua lista:\n${taskLine({ title, when })}\n\nMe diga se precisa mudar algo, senão está tudo certo.`,
     removed: ({ title }) => `Removi "${title}" da sua lista.`,
     empty: () => "Sua lista está vazia — nada em aberto.",
-    formatList: (rows) => listPt(`Sua lista (${rows.length} em aberto):`, rows),
+    formatList: (rows) => renderList("Aqui estão suas tarefas em aberto:", rows),
     notFound: () => "Não consegui identificar qual tarefa. Qual delas?",
     confirmComplete: ({ title }) =>
       `Marcar como concluída?\n- ${title}\n\nResponda "sim" para confirmar.`,
