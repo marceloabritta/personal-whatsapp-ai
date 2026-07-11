@@ -1,28 +1,35 @@
 # personal-whatsapp-ai
 
-Connect your WhatsApp to the [Evolution API](https://github.com/EvolutionAPI/evolution-api) and you get an AI secretary wired to your own frontier-model API keys. The project is deployed on DigitalOcean. The layout is an **orchestrator** called into action by a message you send in any chat (`@secretary`). The orchestrator detects the requested task and hands it off to one of many task-specific agents (**skills**).
+Connect your WhatsApp to the [Evolution API](https://github.com/EvolutionAPI/evolution-api) and you get an AI secretary wired to your own frontier-model API keys. The project is deployed on DigitalOcean. The layout is an **orchestrator** called into action by a message you send in any chat (`@brain`). The orchestrator detects the requested task and hands it off to one of many task-specific agents (**skills**).
 
-Everything is **self-hosted**: no third party sits between WhatsApp and you. Your conversations only ever leave your server when a skill deliberately calls an external API (Claude for reasoning, Google Calendar for invites, AssemblyAI for transcription) — and only for the one message where you invoked `@secretary`.
+Everything is **self-hosted**: no third party sits between WhatsApp and you. Your conversations only ever leave your server when a skill deliberately calls an external API (Claude for reasoning, Google Calendar for invites, AssemblyAI for transcription) — and only for the one message where you invoked `@brain`.
 
 ## How it works
 
-You type `@secretary <order>` in any WhatsApp chat (your own, a 1:1, or a group). The system:
+You type `@brain <order>` in any WhatsApp chat (your own, a 1:1, or a group). The system:
 
 1. receives the message through the Evolution API webhook;
-2. ignores everything that isn't **from you** and doesn't start with `@secretary`;
+2. a flow only **starts** on a message that is **from you** and begins with `@brain`;
 3. reads the recent context of that chat;
 4. asks the **router** (an LLM call) which task you're requesting;
 5. dispatches to the matching **skill**, which does the work and replies to you on WhatsApp.
 
+The brain is **stateful**: it keeps per-chat conversation state in Redis, so once a flow is
+running it can **continue without the tag** (for confirmations and clarifications). The brain
+uses the LLM to ignore normal chatter and watch for the answer it's waiting on — and that
+answer can come from the **other person** in the chat too (e.g. they type their email), so a
+non-owner message can be a valid continuation of an active session.
+
 ```
-You type "@secretary ..." in a chat
+You type "@brain ..." in a chat
               │
               ▼
      WhatsApp (your phone, linked device)
               │
               ▼
      Evolution API  ──webhook──►  brain (orchestrator)
-                                    │  1. filter: fromMe + @secretary
+                                    │  1. filter: start on fromMe + @brain
+                                    │     (or continue an active session)
                                     │  2. build context (chat history)
                                     │  3. ROUTER: classify the intent
                                     │  4. dispatch to the chosen SKILL
@@ -30,7 +37,7 @@ You type "@secretary ..." in a chat
                               ┌─────────────┐
                               │   Skills    │
                               ├─────────────┤
-                              │ schedule_meeting  → Google Calendar
+                              │ calendar_action   → Google Calendar
                               │ transcribe_audio  → AssemblyAI
                               └─────────────┘
                                     │
@@ -40,8 +47,8 @@ You type "@secretary ..." in a chat
 
 ## Skills (today)
 
-- **`schedule_meeting`** — reads the chat, extracts participants, date, time and duration, creates an event in your Google Calendar and fires the invite email to the attendees.
-- **`transcribe_audio`** — reply to a voice message and type `@secretary transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
+- **`calendar_action`** — reads the chat and either **creates** or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. (Edit/reschedule is planned, not yet built.)
+- **`transcribe_audio`** — reply to a voice message and type `@brain transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
 
 Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. See `brain/v2.0/README.md`.
 
@@ -54,10 +61,9 @@ Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with 
 ├── LICENSE
 ├── .gitignore
 ├── brain/                 # the "brain" (Node.js) — the AI app
-│   ├── v1.0/              #   first, single-agent version (historical snapshot)
 │   └── v2.0/              #   current: orchestrator + skills  ← run this
 │       ├── 1. Orchestrator/
-│       └── 2. Skills/
+│       └── 2. Skills/     #   (the earlier single-agent version lives in git history)
 └── evolution/             # the WhatsApp gateway (Docker)
     ├── docker-compose.yml #   Evolution API + Postgres + Redis + brain
     └── .env.example
@@ -85,7 +91,7 @@ Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with 
      -d '{"webhook":{"enabled":true,"url":"http://brain:3000/webhook","byEvents":false,"base64":false,"events":["MESSAGES_UPSERT"]}}'
    ```
 
-5. **Test.** In any chat, type `@secretary schedule a 30-min call with me tomorrow at 2pm, my email is you@example.com`.
+5. **Test.** In any chat, type `@brain schedule a 30-min call with me tomorrow at 2pm, my email is you@example.com`.
 
 > Note on code vs. secret changes: `docker compose restart brain` re-reads code, but **not** `.env`. After changing secrets use `docker compose up -d --force-recreate brain`.
 
@@ -101,8 +107,9 @@ The default reply strings and LLM prompts are in English. Each skill keeps its l
 ## Roadmap
 
 - More skills (reminders, lookups, etc.) — each a new folder under `2. Skills/`.
-- Reply privately when `@secretary` is called in a group.
-- A confirmation step before creating calendar events.
+- Reply privately when `@brain` is called in a group.
+- Smarter scheduling (name events by topic; detect & collect missing attendee emails, including asking the other person).
+- Edit/reschedule existing events by replying.
 
 ## Contributing
 

@@ -1,0 +1,317 @@
+# HANDOVER — personal-whatsapp-ai
+
+Continuation notes for picking this project up from Claude Code (VSCode) on a fresh
+machine. Written 2026-07-10. This file is secret-free (no IPs or keys) and safe to
+commit. The real droplet IP and all API keys live only in the DigitalOcean console
+and in local `.env` files, deliberately kept out of version control.
+
+---
+
+## 1. What this is
+
+A self-hosted personal AI secretary on WhatsApp. You type `@brain <order>` in any
+chat; the system reads that chat's recent context, an LLM **router** classifies the
+intent, and a task-specific **skill** does the work and replies to you on WhatsApp.
+The brain is **stateful**: a flow starts on `@brain` and can then continue without the
+tag (see §6 — the delete confirmation and, later, scheduling clarifications).
+
+Stack: **Evolution API** (WhatsApp gateway, self-hosted) + a Node app called the
+**brain** (orchestrator + skills) + **Claude** (reasoning) + **Redis** (per-chat session
+state, shared with Evolution's cache) + per-skill external APIs (Google Calendar,
+AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
+`ARCHITECTURE.md` for the full "what is sent to each service" data flow.
+
+Two skills exist today:
+- `calendar_action` — **creates** and **cancels/deletes** Google Calendar events
+  (edit/reschedule planned; see `brain/v2.0/ROADMAP.md`). Cancel is confirm-first: the
+  owner just types `yes`.
+- `transcribe_audio` — reply to a voice message + `@brain transcribe`; downloads the
+  audio from WhatsApp and transcribes it via AssemblyAI.
+
+---
+
+## 2. Current status (read this first)
+
+- **Code:** `brain/v2.0` (orchestrator + auto-discovered skills) is the only version now.
+  The original single-agent `brain/v1.0` was removed 2026-07-10; it lives in git history
+  (commit `3ce1e69` / `c01d817`) if ever needed.
+- **GitHub:** repo `personal-whatsapp-ai` is **PRIVATE**. This local folder is a working
+  **git clone** tracking `origin/main` (`gh` provides auth).
+- **Production (the droplet): ✅ v2.0 is DEPLOYED and LIVE** (cut over 2026-07-10). Trigger
+  kept as **`@brain`** and instance kept as **`secretaria`** (via compose env overrides
+  `SECRETARY_TAG=@brain`, `EVOLUTION_INSTANCE=secretaria`) so WhatsApp stayed linked. Old
+  v3.3 code backed up at `/opt/brain_v3.3_backup`; compose backup at
+  `/opt/evolution/docker-compose.yml.v3.3.bak`.
+- **Deploy pipeline: ✅ set up.** Read-only GitHub **deploy key** on the droplet + repo
+  cloned at `/opt/personal-whatsapp-ai`; `/opt/brain` is a **symlink** to `brain/v2.0`, so
+  `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
+  (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
+
+**What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
+Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
+(confirm-first via a stateful session: `@brain cancel` replying to an invite → type `yes`).
+`transcribe_audio` — reply-detection bug fixed (see §8); verify end-to-end when convenient.
+The stateful session layer (Redis) is live; see §6.
+
+### Deploy runbook (this is how to ship changes now)
+
+```bash
+# 1. from this Mac (folder is a clone; gh is logged in): edit, then
+git add -A && git commit -m "..." && git push      # (git status is slow on Google Drive — normal)
+
+# 2. deploy on the droplet
+ssh secretaria-droplet 'cd /opt/personal-whatsapp-ai && git pull --ff-only'
+ssh secretaria-droplet 'cd /opt/evolution && docker compose restart brain'   # code-only change
+#   if /opt/brain/.env (secrets) changed:  docker compose up -d --force-recreate brain
+
+# 3. verify / read logs
+ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orchestrator) listening..."
+```
+- **Production writes are gated per Claude Code session** — a fresh session must be
+  *explicitly asked* to run the `git pull`/restart (naming the action). Reading logs is
+  read-only and not gated.
+- `docker compose restart` reloads code but **not** `.env`; after a secret change use
+  `up -d --force-recreate`. Rollback: repoint the `/opt/brain` symlink to
+  `/opt/brain_v3.3_backup` (+ restore the compose `.bak`), then `--force-recreate`.
+
+---
+
+## 3. Open decisions & next tasks
+
+1. ~~**Deploy v2.0 to the droplet.**~~ ✅ **DONE (2026-07-10)** — clone-on-droplet +
+   `git pull` deploys (runbook in §2). App Platform was considered and rejected (can't run
+   `docker-compose.yml`; would need paid managed Postgres/Redis + a session-persistence fix).
+2. ~~**Cut over the trigger + instance names.**~~ ✅ **DONE** — kept `@brain` / instance
+   `secretaria` via compose env overrides so WhatsApp stayed linked (no QR re-scan / webhook reset).
+3. **Verify `transcribe_audio` end-to-end (open).** Reply-detection fixed 2026-07-10;
+   `calendar_action` is confirmed working. Send a real quoted voice note + `@brain transcreva`
+   to confirm the AssemblyAI round-trip.
+4. **Security TODO (pre-existing).** Evolution's port `8080` is open to the internet,
+   protected only by the API key. Lock it down with `ufw`.
+5. **Calendar feature roadmap (open).** See `brain/v2.0/ROADMAP.md`: smart scheduling
+   (name events by topic; detect & collect missing attendee emails — asking the owner
+   *or the attendee themselves* via the stateful `awaitFrom:"contact"` path) and
+   edit/reschedule existing events by replying. Recommended next: Phase C (C1→C3).
+6. **Product upgrades (backlog).** More skills (each a folder under `2. Skills/`),
+   private reply when `@brain` is used in a group. (A "confirm before acting" step now
+   exists for cancellations, built on the stateful session layer.)
+
+---
+
+## 4. Repository layout
+
+```
+.
+├── README.md              # public overview + setup
+├── ARCHITECTURE.md        # detailed data flow (what is sent to each service)
+├── HANDOVER.md            # this file
+├── LICENSE                # MIT
+├── .gitignore
+├── brain/
+│   └── v2.0/              # the app — run this (v1.0 removed; in git history)
+│       ├── package.json   #   at the v2.0 ROOT (shared node_modules for orchestrator+skills)
+│       ├── .env.example
+│       ├── ROADMAP.md                    # next features (smart scheduling, edit)
+│       ├── STATEFUL_ARCHITECTURE_PLAN.md # the session layer, in depth
+│       ├── 1. Orchestrator/
+│       │   ├── server.js  #   webhook, start/continue gate, context, dispatch
+│       │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
+│       │   └── router/{prompt,router}.js
+│       └── 2. Skills/
+│           ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete
+│           └── 2. Audio transcriptions/{skill,prompt}.js
+└── evolution/
+    ├── docker-compose.yml # Evolution API + Postgres + Redis + brain
+    └── .env.example
+```
+
+---
+
+## 5. Working on it from Claude Code (macOS)
+
+```bash
+git clone https://github.com/<your-username>/personal-whatsapp-ai.git
+cd personal-whatsapp-ai
+```
+
+**Local install / boot check** (won't do real work without the full stack + a linked
+WhatsApp, but confirms wiring and skill discovery):
+
+```bash
+cd "brain/v2.0"
+npm install
+ANTHROPIC_API_KEY=dummy npm start
+# expect: "skill loaded: ..." x2, "available skills: calendar_action, transcribe_audio"
+# (no Redis locally -> "sessions: Redis unavailable, using memory" is fine; set REDIS_URL= to silence)
+```
+
+**Important layout facts:**
+- `package.json` sits at the `v2.0/` root, **not** inside `1. Orchestrator/`. It has to:
+  Node resolves `node_modules` by walking up from each file, and the skills live in a
+  different branch than the orchestrator, so a single `node_modules` at the `v2.0/` root
+  is the only place both can reach. Start command is `node "1. Orchestrator/server.js"`
+  run from `v2.0/` (that's what `npm start` does).
+- Folder names have spaces and numbers (`1. Orchestrator`, `2. Skills/1. Calendar
+  Actions`). The orchestrator loads skills via dynamic `import(pathToFileURL(...))`,
+  which handles the spaces. Don't convert these to static imports across folders.
+- Requires Node 18+ (uses `fetch`, `fileURLToPath`, `pathToFileURL`). The droplet runs
+  `node:20-alpine`.
+
+**Full local run (optional):** bring up the whole `evolution/` docker-compose locally,
+link a WhatsApp test number, point the webhook at the brain. Heavier; usually not worth
+it for iterating on skill logic — prefer mocked tests (§9).
+
+---
+
+## 6. How a skill works (the contract)
+
+Each skill is a folder under `2. Skills/` with a `skill.js`:
+
+```js
+export const manifest = {
+  id: "unique_id",                 // the router routes to this id
+  description: "what it does",      // the router reads this to classify
+};
+export async function run(ctx) { /* do the work, reply via ctx.send */ }
+```
+
+The orchestrator scans `2. Skills/*/skill.js` at boot, builds `{ [id]: run }` and a
+catalog `[{id, description}]` that it passes to the router. **Adding a skill = drop in a
+folder. No edits to `server.js` or the router.**
+
+`ctx` handed to every skill: `owner, tag, anthropic, model, order, transcript, nowStr,
+contact, number, remoteJid, fromMe, quoted, hasQuotedAudio, catalog, env, evolution,
+send, sessions, session`.
+- `ctx.send(number, text)` — reply on WhatsApp (adds the `[AI Brain]:` header + a blank
+  line; no footer).
+- `ctx.evolution` — `{ sendText, fetchHistory, getMediaBase64 }`.
+- `ctx.quoted` — `{ id, hasAudio, mediaType, text, calendarLink }` when the message is a
+  reply, else null.
+- `ctx.sessions` — the per-chat session store `{ get, set, clear }` (Redis-backed).
+- `ctx.session` — the active session for this chat when the message is a **continuation**
+  (else null); `ctx.fromMe` says whether the owner (true) or the contact (false) sent it.
+
+**Stateful flow (§ see STATEFUL_ARCHITECTURE_PLAN.md):** a flow STARTS only when the
+owner sends `@brain`. While a session is open, the orchestrator hands each message from
+the awaited party (`session.awaitFrom`: owner / contact / any) to the owning skill,
+which uses the LLM to detect the awaited answer and ignores normal chatter — no reply or
+tag needed. The brain never reacts to its own `[AI Brain]:` messages.
+
+Convention: prompt/text lives in the skill's `prompt.js`, logic in `skill.js`. To change
+a skill's wording or language, edit only its `prompt.js`.
+
+Two-LLM-call design is intentional: the router classifies (call 1), then a skill like
+`calendar_action` extracts details (call 2). `transcribe_audio` makes no LLM call.
+
+---
+
+## 7. Deploying v2.0 to the droplet (historical, initial one-time setup)
+
+> This is how the droplet was first set up. It's **done** — for day-to-day deploys use
+> the runbook in §2. Kept for reference / disaster recovery.
+
+Run in the DigitalOcean web console (root). Replace `<repo-url>` and confirm paths.
+
+```bash
+# 1. Get the repo onto the server
+cd /opt && git clone <repo-url> personal-whatsapp-ai
+
+# 2. Point the brain at the v2.0 app.
+#    The compose 'brain' service mounts /opt/brain and runs `npm install && npm start`,
+#    and npm start = node "1. Orchestrator/server.js". So /opt/brain must contain the
+#    CONTENTS of brain/v2.0 (package.json at its root, "1. Orchestrator/", "2. Skills/").
+#    Simplest: back up the current /opt/brain, then repoint it:
+mv /opt/brain /opt/brain_v1_backup
+ln -s /opt/personal-whatsapp-ai/brain/v2.0 /opt/brain     # or copy the contents
+
+# 3. Bring your secrets across (do NOT commit these)
+cp /opt/brain_v1_backup/.env /opt/brain/.env
+#    then add the new key:  ASSEMBLYAI_API_KEY=...   (and ASSEMBLYAI_LANGUAGE=pt for PT audio)
+#    decide trigger/instance: keep the old ones by setting in the compose 'brain' env:
+#      SECRETARY_TAG: "@brain"        # if you want to keep the old trigger
+#      EVOLUTION_INSTANCE: secretaria # if you want to keep the existing linked instance
+
+# 4. Recreate the brain (force-recreate because .env changed)
+cd /opt/evolution && docker compose up -d --force-recreate brain
+docker compose logs -f brain     # expect "Brain v2.0 (orchestrator) listening..."
+```
+
+Gotcha: `docker compose restart` re-reads code but **not** `.env`. After any secret
+change use `up -d --force-recreate`.
+
+Future updates once this is set up: `cd /opt/personal-whatsapp-ai && git pull` then
+`cd /opt/evolution && docker compose restart brain`.
+
+If you keep the old instance/trigger, you skip re-linking WhatsApp and re-setting the
+webhook. If you adopt the new `secretary` instance, you must re-scan the QR and re-run
+the `/webhook/set/secretary` call (see README §Setup step 4).
+
+---
+
+## 8. External services & verified contracts
+
+- **Anthropic (Claude):** `@anthropic-ai/sdk`, `CLAUDE_MODEL` env (default
+  `claude-sonnet-5`). Router uses ~200 max_tokens; scheduling ~700.
+- **Google Calendar:** OAuth (Client ID + Secret + Refresh Token). `sendUpdates=all`
+  makes Google email the invite / the cancellation. Used by `calendar_action`
+  (`events.insert` to create, `events.get` + `events.delete` to cancel; the event id
+  is decoded from the invite link's `eid`).
+- **Redis (brain session state):** in addition to being Evolution's cache, the brain
+  stores per-chat conversation state in Redis (`lib/sessions.js`, key prefix
+  `brain:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
+  (same `evolution-net`, no auth). No Redis → automatic in-memory fallback (lost on
+  restart). This is what lets a flow continue without re-tagging `@brain`.
+- **AssemblyAI:** `ASSEMBLYAI_API_KEY`. Flow (verified): `POST /v2/upload` (raw bytes)
+  → `POST /v2/transcript` `{audio_url, language_code}` → poll `GET /v2/transcript/{id}`
+  until `status==completed`. `ASSEMBLYAI_LANGUAGE` sets the language (`en` default; set
+  `pt` for Portuguese). Note: AssemblyAI is a US cloud service — audio bytes leave the
+  droplet, which is the one place the self-hosted privacy model is broken. A self-hosted
+  Whisper is the alternative if that matters.
+- **Evolution media download (transcription):** `POST
+  /chat/getBase64FromMediaMessage/{instance}` with `{message:{key:{id}},convertToMp4}` →
+  `{base64, mimetype}`. **Requires `DATABASE_SAVE_DATA_NEW_MESSAGE=true`** in the
+  Evolution `.env` (default) — otherwise old audios 404.
+  - **Quoted-reply payload gotcha (bug fixed 2026-07-10).** For a plain-text reply,
+    Evolution (v2.3.7) delivers the reply context at **`data.contextInfo`** — a SIBLING of
+    `data.message`, NOT nested under `data.message.extendedTextMessage.contextInfo`. The
+    quoted audio id is `data.contextInfo.stanzaId`; the audio itself is at
+    `data.contextInfo.quotedMessage.audioMessage`. `getQuoted()` now takes the whole `data`
+    and checks the sibling first. **Debug tip:** Evolution's Postgres `Message` table stores
+    only `message` and DROPS the sibling `contextInfo`, so a reply looks like a bare
+    `conversation` there — inspect the **raw webhook** via `docker logs evolution_api`
+    (search the message id), not the DB, when debugging replies.
+- **Google OAuth (Calendar) gotcha.** The OAuth consent screen MUST be published to
+  **"In production."** In **"Testing"** status, refresh tokens **expire after ~7 days** and
+  the bot then fails calendar creation with `invalid_grant` ("Token expired or revoked").
+  Published + token re-minted 2026-07-10 (OAuth Playground, scope
+  `https://www.googleapis.com/auth/calendar`, "Use your own OAuth credentials"). To re-mint:
+  Playground → gear → own client id/secret → scope above → authorize → exchange → copy the
+  `1//…` refresh token into `/opt/brain/.env` `GOOGLE_REFRESH_TOKEN=` → `--force-recreate`.
+
+Env var reference: see `brain/v2.0/.env.example` and `evolution/.env.example`.
+
+---
+
+## 9. Testing approach
+
+There's no committed test suite yet. During development, skills and the router were
+tested by stubbing `global.fetch` (Evolution + AssemblyAI) and injecting a fake
+`anthropic` client into `ctx`, then asserting on captured `send()` calls. This exercises
+routing, both skill flows, and every guardrail without network or real keys. Worth
+formalizing into a `test/` folder with `node --test`. Boot + skill-discovery is the
+cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
+
+---
+
+## 10. Version history
+
+- **v1.0** — single-file agent; every message was assumed to be a meeting request.
+  Portuguese. Removed from the tree 2026-07-10; preserved in git history.
+- **v2.0** (`brain/v2.0`) — orchestrator + auto-discovered skills; router classifies
+  intent. Current. Notable additions since the v2.0 cut-over: `transcribe_audio`;
+  `schedule_meeting` renamed to `calendar_action` and given **cancel/delete**; a
+  **stateful session layer** (Redis) so flows continue without re-tagging; `[AI Brain]:`
+  message framing; `@brain` trigger (via `SECRETARY_TAG`).
+
+Next up: the calendar feature roadmap — see `brain/v2.0/ROADMAP.md` (smart scheduling,
+then edit/reschedule).

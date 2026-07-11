@@ -1,8 +1,13 @@
 # Stateful Conversation Architecture — Plan
 
-Plan only. No code changes here. Goal: move the brain from **stateless single-shot**
-(every action needs `@brain`) to **stateful conversations** — so a follow-up
-(confirmation, clarification, or an edit) continues **without re-tagging `@brain`**.
+Architecture reference for the brain's stateful conversation layer.
+**Phase A is built and live** (per-chat Redis sessions + the delete confirm flow).
+For the remaining feature work (smart scheduling, edit/reschedule) see
+[ROADMAP.md](ROADMAP.md).
+
+Goal: move the brain from **stateless single-shot** (every action needs `@brain`) to
+**stateful conversations** — so a follow-up (confirmation, clarification, or an edit)
+continues **without re-tagging `@brain`**.
 
 ## Why
 
@@ -127,16 +132,16 @@ Skills that don't use sessions behave exactly as today.
 
 ## Rollout (incremental, each testable)
 
-- **Phase A — foundation + delete.** Build the session store (Redis + in-memory
-  fallback), wire the orchestrator, and migrate the **delete confirm** flow to
-  sessions. Result: `@brain cancel` (reply to invite) → clean confirmation with
-  **no link line** → reply `yes` (no tag) → deleted. Drops the link hack.
-  *Test:* the current cancel flow, but the confirmation is link-free and "yes"
-  works by session, not by quoted link.
-- **Phase B — edit/reschedule (Step 5) via sessions.** "change the time" →
-  clarify if ambiguous (session `await_clarification`) → answer (no tag) → apply.
-- **Phase C — create clarifications via sessions.** Missing email / headcount
-  questions answered without re-tagging `@brain`.
+- **Phase A — foundation + delete. ✅ DONE / LIVE.** Session store (Redis +
+  in-memory fallback), orchestrator wiring, and the delete confirm flow on sessions:
+  `@brain cancel` (reply to invite) → clean, link-free confirmation → type `yes`
+  (no tag) → deleted. The confirmation is LLM-judged, so unrelated chatter is ignored.
+- **Phase C — smart scheduling** (topic naming, missing-email capture from the owner
+  or the contact). See [ROADMAP.md](ROADMAP.md) (C1–C3). *Recommended next.*
+- **Phase B — edit/reschedule via sessions.** See [ROADMAP.md](ROADMAP.md).
+
+(Phase C is listed before B because it's the original goal and the first real use of
+`awaitFrom: "contact"`.)
 
 ## Edge cases & decisions
 
