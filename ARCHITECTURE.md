@@ -113,16 +113,18 @@ GET    https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=�
 your account. The `list` GET is read-only and sends no email; `singleEvents=true` expands
 recurring events into concrete instances inside the window.
 
-### 5b. skill → Google Tasks (add / list / complete) — task_action
+### 5b. skill → Google Tasks (add / list / complete / edit / delete) — task_action
 
 Same OAuth client as Calendar (the refresh token must also carry the
 `https://www.googleapis.com/auth/tasks` scope). The Tasks list defaults to `@default`
-(override with `GOOGLE_TASKLIST_ID`).
+(override with `GOOGLE_TASKLIST_ID`). One list-aware planner (`planTaskOps`) enumerates the
+tasks a message refers to — so add / complete / edit / delete all work in **batch** — and the
+same HTTP surface is called once per task:
 ```
-POST   https://tasks.googleapis.com/tasks/v1/lists/@default/tasks              (add)
-GET    https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=false  (list)
-PATCH  https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (complete: status=completed; or amend title/due)
-DELETE https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (amend-window "cancel that")
+POST   https://tasks.googleapis.com/tasks/v1/lists/@default/tasks              (add, one per created task)
+GET    https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=false  (list; also read before every plan, to match refs)
+PATCH  https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (complete: status=completed; or edit/amend title/due)
+DELETE https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (delete / amend-window "cancel that")
 ```
 `due` is **date-only** (stored at UTC midnight). A to-do for **yourself** lands here; a
 to-do assigned to **someone else** has no private-list equivalent (Tasks emails no one),

@@ -33,9 +33,11 @@ Four skills exist today:
   (no session, no confirm, no write — "what's on tomorrow?", "what's my next meeting?").
 - `transcribe_audio` — reply to a voice message + `@secretary transcribe`; downloads the
   audio from WhatsApp and transcribes it via AssemblyAI.
-- `task_action` — a to-do inbox: add / list / complete todos. A todo for the owner goes to
-  Google Tasks; one assigned to someone else becomes a 5-min Calendar invite (via
-  `calendar_action`'s `startCreate` capability).
+- `task_action` — a to-do inbox: add / list / complete / edit / delete todos, **one or many
+  per message**, via a single list-aware planner that matches the owner's words to tasks on
+  file. Stays **engaged without re-tagging** for a window. A todo for the owner goes to Google
+  Tasks; one assigned to someone else becomes a 5-min Calendar invite (via `calendar_action`'s
+  `startCreate` capability). See `New Features Plans/task-improvements.md`.
 - `feature_request` — talk through a new feature idea; the secretary interviews the owner, then
   writes a Markdown spec and sends it as a `.md` document.
 
@@ -379,6 +381,23 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   orchestrator/`server.js` change (uses `Date.now()`, not a ctx clock); the router routes it
   via the updated `manifest.description`. Plan archived to
   `Shipped Features/2026-07-11 - feature-calendar-read-query.md`.
+- **2026-07-11 — Tasks: batch + edit + stateful, on one resolver (BUILT, not yet deployed).**
+  Reworked `task_action` from a single-item inbox into one that handles **any number of tasks
+  per message** and **edits/deletes tasks already on file**, all through a single list-aware
+  planner. `planTaskOps` (schema `PLAN_SCHEMA` in `prompt.js`) reads the conversation *and* the
+  numbered open list and returns `{ list_requested, owner_done, ops[] }` — one op per distinct
+  task (`create|complete|edit|delete`), with list-aware matching (`target_index` /
+  `candidate_indices`). This replaces the old `interpret` + `resolveTaskRef` (and retires
+  `reviewAdd`), fixing the production bug where "mark A and B done" collapsed to one ref and got
+  lost. `dispatchPlan` routes ops: self-creates write immediately (batch); complete/edit/delete
+  of stored tasks share **one confirm session** (`resumeConfirm`, per-item ok/fail, unmatched
+  refs surfaced not dropped); an edit/delete of a just-touched task is frictionless (the old
+  amend window, now an op). New **stateful `engaged` window** (`armEngaged`/`resumeEngaged`,
+  TTL 600) keeps follow-ups **tag-free** — verified the orchestrator's generic continuation
+  (dispatches by `skill`+`awaitFrom`) needs **no router change**. Third-party reminders remain
+  capped at 1/message (a serial queue is out of scope under one-session-per-chat). Reply layer
+  refactored to a single `makeReply(vocabulary)` render for en+pt. Files: `secretary/2. Skills/
+  3. Tasks/{prompt.js,skill.js,SKILL.md}`. Plan: `New Features Plans/task-improvements.md`.
 - **2026-07-11 — AI Brain → AI Secretary rename SHIPPED (DEPLOYED).** Shipped in two layers.
   **Layer 1 (deployed first)** introduced `secretary/1. Orchestrator/lib/identity.js` as the
   single source of truth for trigger tags + the reply header: `SECRETARY_TAG` is now

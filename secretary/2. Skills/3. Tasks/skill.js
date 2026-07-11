@@ -1,15 +1,21 @@
 // ============================================================================
 //  Skill "Tasks" (todo inbox) — LOGIC.
-//  Interprets the order with Claude and acts on the owner's to-dos:
-//    - add (self)   : create a private Google Tasks item immediately, then keep a
-//                     short AMEND window open to correct/delete it (no confirm step).
-//    - add (other)  : a task FOR someone else has no private-list equivalent — it
-//                     must reach them by email, so we DELEGATE to calendar_action's
-//                     `startCreate` capability (a 5-min invite at 15:00). Confirm-first
-//                     and the whole lifecycle is owned by calendar_action.
-//    - list         : read back the open tasks.
-//    - complete     : resolve which task, then confirm-first before marking done.
-//  Run by the orchestrator when the router picks "task_action".
+//  ONE list-aware resolver (`planTaskOps`) reads the conversation AND the owner's
+//  open list, then emits a PLAN of ops. A little glue routes the ops:
+//    - create (self)  : write a private Google Tasks item immediately, then keep a
+//                       stateful window open (no re-tag) to correct/delete it.
+//    - create (other) : a task FOR someone else must reach them by email, so we
+//                       DELEGATE to calendar_action's `startCreate` (a 5-min invite
+//                       at 15:00). Confirm-first; the lifecycle is owned by calendar.
+//                       Capped at ONE third-party item per message (see plan).
+//    - complete/edit/ : mutations of EXISTING stored tasks — confirm-first, ONE
+//      delete           confirmation for the whole set.
+//    - amend window   : an edit/delete of a JUST-touched task inside the stateful
+//                       window is frictionless (no confirm), like the shipped amend.
+//    - list           : read back the open tasks.
+//  The same resolver drives the first (tagged) message AND every untagged follow-up
+//  while a task window is open — so a batch, a correction, or a new task all work
+//  without re-tagging. See New Features Plans/task-improvements.md.
 //
 //  Skill contract (read by the orchestrator):
 //    export const manifest = { id, description }
@@ -21,27 +27,21 @@
 // ============================================================================
 import { google } from "googleapis";
 import {
-  buildSystem,
-  buildUserPrompt,
-  buildResolveRefSystem,
-  buildResolveRefUser,
-  buildReviewAddSystem,
-  buildReviewAddUser,
+  buildPlanSystem,
+  buildPlanUser,
   buildConfirmSystem,
   buildConfirmUser,
   reply,
   localizeDueDate,
   threePmOnDue,
-  TASK_SCHEMA,
-  RESOLVE_REF_SCHEMA,
-  REVIEW_ADD_SCHEMA,
+  PLAN_SCHEMA,
   CONFIRM_SCHEMA,
 } from "./prompt.js";
 
 export const manifest = {
   id: "task_action",
   description:
-    "add a to-do for the owner OR for another person, list the owner's open tasks, or complete/check off a task",
+    "add one or more to-dos for the owner OR another person, list open tasks, complete/check off tasks, or edit/rename/reschedule/delete existing tasks",
 };
 
 // ---- Structured-output helpers (same pattern as calendar_action) -------------
@@ -161,43 +161,52 @@ async function patchTask(env, taskId, { title, due }) {
   await svc.tasks.patch({ tasklist: listId(env), task: taskId, requestBody });
 }
 
-// Open tasks only, with a non-blank title.
-function openWithTitle(items) {
-  return (items || []).filter(
-    (t) => t.status !== "completed" && (t.title || "").trim()
-  );
+// Open tasks only, with a non-blank title, normalized to { id, title, due }.
+async function fetchOpen(ctx) {
+  const items = await listTasks(ctx.env);
+  return (items || [])
+    .filter((t) => t.status !== "completed" && (t.title || "").trim())
+    .map((t) => ({ id: t.id, title: t.title.trim(), due: t.due || null }));
 }
 
-// ---- Interpret ---------------------------------------------------------------
-async function interpret(ctx) {
+// ---- The one resolver --------------------------------------------------------
+// Reads the conversation + the numbered open list, returns a PLAN (see PLAN_SCHEMA).
+async function planTaskOps(ctx, open) {
   const { anthropic, model, owner, order, transcript, nowStr, contact, quoted } =
     ctx;
+  const listText = open
+    .map(
+      (t, i) =>
+        `${i + 1}. ${t.title}${t.due ? ` (due ${localizeDueDate("en", t.due)})` : ""}`
+    )
+    .join("\n");
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 1024,
-    system: buildSystem(owner),
-    output_config: jsonFormat(TASK_SCHEMA),
+    max_tokens: 1500,
+    system: buildPlanSystem(owner),
+    output_config: jsonFormat(PLAN_SCHEMA),
     messages: [
       {
         role: "user",
-        content: buildUserPrompt(owner, {
+        content: buildPlanUser(owner, {
           order,
           transcript,
           nowStr,
           contact,
           quoted,
+          listText,
         }),
       },
     ],
   });
-  const info = readReply(msg);
-  console.log("TASK RAW:", JSON.stringify(info));
-  return info;
+  const plan = readReply(msg);
+  console.log("TASK PLAN RAW:", JSON.stringify(plan));
+  return plan;
 }
 
 // A meaningful third-party assignee (has a name or email, and isn't the owner).
-function otherAssignee(ctx, info) {
-  const a = info?.assignee;
+function otherAssignee(ctx, assignee) {
+  const a = assignee;
   if (!a || (!a.name && !a.email)) return null;
   const owner = String(ctx.owner || "").trim().toLowerCase();
   const nm = String(a.name || "").trim().toLowerCase();
@@ -206,6 +215,14 @@ function otherAssignee(ctx, info) {
   return { name: a.name || null, email: a.email || null };
 }
 
+// 1-based index into `open` → { id, title, due }, or null if out of range.
+function openAt(open, idx) {
+  const n = Number(idx);
+  if (!Number.isInteger(n) || n < 1 || n > open.length) return null;
+  return open[n - 1];
+}
+
+// ---- Entry point -------------------------------------------------------------
 // ctx (from the orchestrator): { owner, tag, anthropic, model, order, transcript,
 //   nowStr, contact, remoteJid, number, fromMe, quoted, env, evolution, send,
 //   sessions, session, lang, hasSkill, callSkill }
@@ -213,308 +230,466 @@ export async function run(ctx) {
   const { number, send, session } = ctx;
 
   // CONTINUATIONS owned by this skill (set by the orchestrator on a continuation).
-  if (session?.intent === "add" && session.stage === "await_amend") {
-    return resumeAmend(ctx, session);
-  }
-  if (session?.intent === "complete" && session.stage === "await_confirmation") {
-    return resumeComplete(ctx, session);
+  if (session?.skill === "task_action" && session.stage === "await_confirmation")
+    return resumeConfirm(ctx, session);
+  if (session?.skill === "task_action" && session.stage === "engaged")
+    return resumeEngaged(ctx, session);
+
+  // FRESH (tagged) message.
+  let open;
+  try {
+    open = await fetchOpen(ctx);
+  } catch (e) {
+    console.error("Tasks list error:", e?.response?.data || e?.message || e);
+    await send(number, reply(ctx.lang).failed());
+    return;
   }
 
-  let info;
+  let plan;
   try {
-    info = await interpret(ctx);
+    plan = await planTaskOps(ctx, open);
   } catch (e) {
-    console.error("Tasks/Claude error:", e);
+    console.error("Tasks/plan error:", e);
+    await send(number, reply(ctx.lang).thinkingError());
+    return;
+  }
+  if (!plan) {
     await send(number, reply(ctx.lang).thinkingError());
     return;
   }
 
-  if (info?.action === "add") {
-    const assignee = otherAssignee(ctx, info);
-    return assignee
-      ? handleAddOther(ctx, info, assignee)
-      : handleAddSelf(ctx, info);
-  }
-  if (info?.action === "list") return handleList(ctx);
-  if (info?.action === "complete") return handleComplete(ctx, info);
-
-  await send(number, reply(ctx.lang).noAction());
+  return dispatchPlan(ctx, plan, open, { recent: [], fromEngaged: false });
 }
 
-// ---- ADD (self): immediate write + amend window ------------------------------
-async function handleAddSelf(ctx, info) {
-  const { env, number, send, sessions, remoteJid } = ctx;
-  const title = (info.title || ctx.quoted?.text || "").trim();
-  if (!title) {
-    await send(number, reply(ctx.lang).needTitle());
-    return;
-  }
-  const due = toTasksDue(info.due_iso) || null;
+// ---- Dispatch: turn a PLAN into work -----------------------------------------
+// Shared by the fresh path and the stateful re-plan. Partitions ops, performs the
+// immediate ones (create, in-window amend), and opens a confirm session for
+// mutations of stored tasks.
+async function dispatchPlan(ctx, plan, open, { recent, fromEngaged }) {
+  const { number, send, sessions, remoteJid, lang } = ctx;
+  const ops = Array.isArray(plan.ops) ? plan.ops : [];
+  const recentById = new Map((recent || []).map((r) => [r.id, r]));
 
-  let task;
-  try {
-    task = await addTask(env, { title, due });
-  } catch (e) {
-    console.error("Tasks add error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).failed());
-    return;
+  const creates = [];
+  const mutations = []; // confirm-first: { type, id, oldTitle, title?, due? }
+  const frictionEdits = []; // in-window: { id, oldTitle, title, due }
+  const frictionDeletes = []; // in-window: { id, title }
+  const unresolved = []; // { ref, candidates: [{ title, when }] }
+
+  for (const op of ops) {
+    if (!op || typeof op !== "object") continue;
+    if (op.kind === "create") {
+      creates.push(op);
+      continue;
+    }
+    if (!["complete", "edit", "delete"].includes(op.kind)) continue;
+
+    const t = openAt(open, op.target_index);
+    if (!t) {
+      const cands = (Array.isArray(op.candidate_indices) ? op.candidate_indices : [])
+        .map((i) => openAt(open, i))
+        .filter(Boolean)
+        .map((c) => ({ title: c.title, when: localizeDueDate(lang, c.due) }));
+      unresolved.push({ ref: op.ref_text || null, candidates: cands });
+      continue;
+    }
+
+    const inWindow = fromEngaged && recentById.has(t.id);
+    if (inWindow && op.kind === "edit") {
+      frictionEdits.push({
+        id: t.id,
+        oldTitle: t.title,
+        title: (op.title || "").trim() || null,
+        due: op.due_iso || null,
+      });
+    } else if (inWindow && op.kind === "delete") {
+      frictionDeletes.push({ id: t.id, title: t.title });
+    } else {
+      mutations.push({
+        type: op.kind,
+        id: t.id,
+        oldTitle: t.title,
+        title: op.kind === "edit" ? (op.title || "").trim() || null : null,
+        // undefined => leave due unchanged; a string => set it.
+        due: op.kind === "edit" && op.due_iso ? op.due_iso : undefined,
+      });
+    }
   }
 
-  // Keep a short window open so a follow-up can correct/delete the created task.
-  await sessions.set(
-    remoteJid,
-    {
-      skill: "task_action",
-      intent: "add",
-      stage: "await_amend",
-      awaitFrom: "owner",
-      lang: ctx.lang,
-      data: { taskId: task.id, title, due },
-    },
-    600
-  );
-  await send(
-    number,
-    reply(ctx.lang).added({ title, when: localizeDueDate(ctx.lang, due) })
-  );
-}
+  // 1) CREATE immediately.
+  const created = creates.length ? await handleCreates(ctx, creates) : null;
+  const made = created?.made || [];
 
-// Resume a just-added task's amend window. Runs for EVERY owner message while open:
-// correct/delete on a real edit, silent on chatter.
-async function resumeAmend(ctx, session) {
-  const { env, number, send, sessions, remoteJid } = ctx;
-  const data = session.data || {};
-  if (!data.taskId) {
-    await sessions.clear(remoteJid);
-    return;
-  }
-
-  const review = await reviewAdd(ctx, data);
-  if (!review || review.decision === "unrelated") return; // ignore chatter
-  if (review.decision === "keep") {
-    await sessions.clear(remoteJid);
-    return; // accepted as-is
-  }
-  if (review.decision === "delete") {
+  // 2) FRICTIONLESS in-window amends (no confirm, like the shipped amend flow).
+  //    Track how `recent` changes so the re-armed window shows current values.
+  let nextRecent = (recent || []).map((r) => ({ ...r }));
+  const amendedItems = [];
+  for (const e of frictionEdits) {
+    const patch = {};
+    if (e.title && e.title !== e.oldTitle) patch.title = e.title;
+    const newDue = toTasksDue(e.due);
+    if (newDue) patch.due = newDue;
+    if (patch.title === undefined && patch.due === undefined) continue;
     try {
-      await deleteTask(env, data.taskId);
+      await patchTask(ctx.env, e.id, patch);
+    } catch (err) {
+      console.error("Tasks patch error:", err?.response?.data || err?.message || err);
+      continue;
+    }
+    const cur = recentById.get(e.id);
+    const finalTitle = patch.title || e.oldTitle;
+    const finalDue = patch.due !== undefined ? patch.due : cur?.due ?? null;
+    amendedItems.push({ title: finalTitle, when: localizeDueDate(lang, finalDue) });
+    nextRecent = nextRecent.map((r) =>
+      r.id === e.id ? { ...r, title: finalTitle, due: finalDue } : r
+    );
+  }
+  const removedTitles = [];
+  for (const d of frictionDeletes) {
+    try {
+      await deleteTask(ctx.env, d.id);
+      removedTitles.push(d.title);
+      nextRecent = nextRecent.filter((r) => r.id !== d.id);
+    } catch (err) {
+      console.error("Tasks delete error:", err?.response?.data || err?.message || err);
+    }
+  }
+
+  // 3) NOTIFY on the immediate actions.
+  if (made.length)
+    await send(
+      number,
+      reply(lang).createdBatch(
+        made.map((m) => ({ title: m.title, when: localizeDueDate(lang, m.due) }))
+      )
+    );
+  if (created?.calendarUnavailable)
+    await send(number, reply(lang).calendarUnavailable());
+  if (created?.thirdPartyCapped)
+    await send(number, reply(lang).thirdPartyCapped(created.otherCount));
+  if (creates.length && !made.length && !created?.handedToCalendar && !created?.calendarUnavailable)
+    await send(number, reply(lang).needTitle());
+  if (amendedItems.length) await send(number, reply(lang).amended(amendedItems));
+  if (removedTitles.length) await send(number, reply(lang).removed(removedTitles));
+
+  // 4) CONFIRM-FIRST mutations take the session slot and end the turn.
+  if (mutations.length) {
+    return openConfirm(ctx, mutations, unresolved);
+  }
+
+  // 5) Surface unmatched refs (disambiguate if we have candidates, else ask).
+  if (unresolved.length) {
+    const u = unresolved.find((x) => x.candidates?.length) || unresolved[0];
+    if (u.candidates?.length)
+      await send(number, reply(lang).disambiguate(u.ref, u.candidates));
+    else
+      await send(
+        number,
+        reply(lang).notFound(unresolved.map((x) => x.ref).filter(Boolean))
+      );
+  }
+
+  // 6) List, if asked.
+  if (plan.list_requested) {
+    if (open.length)
+      await send(
+        number,
+        reply(lang).formatList(
+          open.map((t) => ({ title: t.title, when: localizeDueDate(lang, t.due) }))
+        )
+      );
+    else await send(number, reply(lang).empty());
+  }
+
+  // 7) Session state. If we handed a third-party invite to calendar, it owns the
+  //    slot — don't clobber it. Otherwise (re)arm the stateful window if anything
+  //    happened, so follow-ups need no tag.
+  if (created?.handedToCalendar) return;
+
+  const didSomething =
+    made.length ||
+    amendedItems.length ||
+    removedTitles.length ||
+    plan.list_requested ||
+    unresolved.length ||
+    (creates.length && !made.length); // asked to create but needs a title
+
+  if (didSomething) {
+    const armRecent = made.length ? made : nextRecent;
+    await armEngaged(ctx, armRecent);
+    return;
+  }
+
+  // Nothing actionable.
+  if (fromEngaged) {
+    if (plan.owner_done) await sessions.clear(remoteJid); // clean close
+    return; // otherwise a silent no-op inside the window
+  }
+  await send(number, reply(lang).noAction());
+}
+
+// ---- CREATE ------------------------------------------------------------------
+// Self items are written immediately; the FIRST third-party item is delegated to
+// calendar_action (the rest are capped — the owner is asked to resend them).
+async function handleCreates(ctx, creates) {
+  const { env, quoted } = ctx;
+  const self = [];
+  const other = [];
+  for (const c of creates) {
+    const a = otherAssignee(ctx, c.assignee);
+    (a ? other : self).push({ op: c, assignee: a });
+  }
+
+  const made = [];
+  for (const s of self) {
+    const title = (s.op.title || quoted?.text || "").trim();
+    if (!title) continue;
+    const due = toTasksDue(s.op.due_iso) || null;
+    try {
+      const task = await addTask(env, { title, due });
+      made.push({ id: task.id, title, due });
     } catch (e) {
-      console.error("Tasks delete error:", e?.response?.data || e?.message || e);
-      await sessions.clear(remoteJid);
-      await send(number, reply(ctx.lang).failed());
-      return;
+      console.error("Tasks add error:", e?.response?.data || e?.message || e);
     }
-    await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).removed({ title: data.title }));
-    return;
   }
 
-  // decision === "amend": apply whatever actually changed.
-  const patch = {};
-  const newTitle = (review.title || "").trim();
-  if (newTitle && newTitle !== data.title) patch.title = newTitle;
-  const newDue = toTasksDue(review.due_iso) || null;
-  if (newDue && newDue !== data.due) patch.due = newDue;
-  if (patch.title === undefined && patch.due === undefined) return; // nothing new
-
-  try {
-    await patchTask(env, data.taskId, patch);
-  } catch (e) {
-    console.error("Tasks patch error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).failed());
-    return;
+  let handedToCalendar = false;
+  let calendarUnavailable = false;
+  let thirdPartyCapped = false;
+  if (other.length) {
+    if (!ctx.hasSkill("calendar_action", "startCreate")) {
+      calendarUnavailable = true;
+    } else {
+      const first = other[0];
+      const title = (first.op.title || quoted?.text || "").trim() || null;
+      await ctx.callSkill("calendar_action", "startCreate", {
+        action: "create",
+        title,
+        participants: [
+          { name: first.assignee.name, email: first.assignee.email },
+        ],
+        start_iso: threePmOnDue(first.op.due_iso),
+        duration_min: 5,
+        summary: title || "",
+      });
+      handedToCalendar = true;
+      if (other.length > 1) thirdPartyCapped = true;
+    }
   }
 
-  const finalTitle = patch.title ?? data.title;
-  const finalDue = patch.due ?? data.due;
+  return {
+    made,
+    handedToCalendar,
+    calendarUnavailable,
+    thirdPartyCapped,
+    otherCount: other.length,
+  };
+}
+
+// ---- Confirm-first mutations (complete / edit / delete of stored tasks) -------
+async function openConfirm(ctx, mutations, unresolved) {
+  const { number, send, sessions, remoteJid, lang } = ctx;
+  const missed = (unresolved || []).map((u) => u.ref).filter(Boolean);
   await sessions.set(
     remoteJid,
     {
       skill: "task_action",
-      intent: "add",
-      stage: "await_amend",
-      awaitFrom: "owner",
-      lang: ctx.lang,
-      data: { taskId: data.taskId, title: finalTitle, due: finalDue },
-    },
-    600 // re-arm for further edits
-  );
-  await send(
-    number,
-    reply(ctx.lang).updated({
-      title: finalTitle,
-      when: localizeDueDate(ctx.lang, finalDue),
-    })
-  );
-}
-
-async function reviewAdd(ctx, data) {
-  const { anthropic, model, owner, transcript, order, nowStr } = ctx;
-  try {
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 1024,
-      system: buildReviewAddSystem(owner),
-      output_config: jsonFormat(REVIEW_ADD_SCHEMA),
-      messages: [
-        {
-          role: "user",
-          content: buildReviewAddUser({
-            taskJson: JSON.stringify(data),
-            transcript,
-            latest: order,
-            nowStr,
-          }),
-        },
-      ],
-    });
-    const parsed = readReply(msg);
-    console.log("TASK REVIEW RAW:", JSON.stringify(parsed));
-    if (!parsed) return null;
-    if (!["amend", "keep", "delete", "unrelated"].includes(parsed.decision)) {
-      parsed.decision = "unrelated";
-    }
-    return parsed;
-  } catch (e) {
-    console.error("task reviewAdd error:", e?.message || e);
-    return null;
-  }
-}
-
-// ---- ADD (other): delegate to calendar_action (confirm-first invite) ---------
-async function handleAddOther(ctx, info, assignee) {
-  const { number, send } = ctx;
-  if (!ctx.hasSkill("calendar_action", "startCreate")) {
-    await send(number, reply(ctx.lang).calendarUnavailable());
-    return;
-  }
-  const title = (info.title || ctx.quoted?.text || "").trim() || null;
-  // 5-min invite at 15:00 on the due date; calendar owns the confirm/email-chase.
-  return ctx.callSkill("calendar_action", "startCreate", {
-    action: "create",
-    title,
-    participants: [{ name: assignee.name, email: assignee.email }],
-    start_iso: threePmOnDue(info.due_iso),
-    duration_min: 5,
-    summary: title || "",
-  });
-}
-
-// ---- LIST --------------------------------------------------------------------
-async function handleList(ctx) {
-  const { env, number, send } = ctx;
-  let items;
-  try {
-    items = await listTasks(env);
-  } catch (e) {
-    console.error("Tasks list error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).failed());
-    return;
-  }
-  const open = openWithTitle(items);
-  if (!open.length) {
-    await send(number, reply(ctx.lang).empty());
-    return;
-  }
-  const rows = open.map((t) => ({
-    title: t.title.trim(),
-    when: localizeDueDate(ctx.lang, t.due),
-  }));
-  await send(number, reply(ctx.lang).formatList(rows));
-}
-
-// ---- COMPLETE: confirm-first session -----------------------------------------
-async function handleComplete(ctx, info) {
-  const { env, number, send, sessions, remoteJid } = ctx;
-  let items;
-  try {
-    items = await listTasks(env);
-  } catch (e) {
-    console.error("Tasks list error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).failed());
-    return;
-  }
-  const open = openWithTitle(items);
-  if (!open.length) {
-    await send(number, reply(ctx.lang).empty());
-    return;
-  }
-
-  const match = await resolveTaskRef(ctx, info.task_ref, open);
-  if (!match) {
-    await send(number, reply(ctx.lang).notFound());
-    return;
-  }
-
-  await sessions.set(
-    remoteJid,
-    {
-      skill: "task_action",
-      intent: "complete",
       stage: "await_confirmation",
       awaitFrom: "owner",
-      lang: ctx.lang,
-      data: { taskId: match.id, title: match.title },
+      lang,
+      // Store raw due_iso for edits; normalize at apply time.
+      data: {
+        mutations: mutations.map((m) => ({
+          type: m.type,
+          id: m.id,
+          oldTitle: m.oldTitle,
+          title: m.title ?? null,
+          ...(m.due !== undefined ? { due: m.due } : {}),
+        })),
+        missed,
+      },
     },
     600
   );
-  await send(number, reply(ctx.lang).confirmComplete({ title: match.title }));
+  await send(number, reply(lang).confirmMutations(confirmView(mutations, lang), missed));
 }
 
-async function resumeComplete(ctx, session) {
-  const { env, number, send, sessions, remoteJid } = ctx;
-  const { taskId, title } = session.data || {};
-  if (!taskId) {
+// Localize the new-due for edit lines so the confirm/applied views read in dd/mmm.
+function confirmView(mutations, lang) {
+  return mutations.map((m) => ({
+    type: m.type,
+    oldTitle: m.oldTitle,
+    title: m.title ?? null,
+    when: m.type === "edit" && m.due ? localizeDueDate(lang, toTasksDue(m.due)) : null,
+  }));
+}
+
+async function resumeConfirm(ctx, session) {
+  const { env, number, send, sessions, remoteJid, lang } = ctx;
+  const data = session.data || {};
+  const mutations = data.mutations || [];
+  if (!mutations.length) {
     await sessions.clear(remoteJid);
     return;
   }
 
   const decision = await classifyConfirmation(ctx, {
-    action: `mark the task "${title}" done`,
+    action: summarizeMutations(mutations),
   });
-  if (decision === "unrelated") return; // ignore chatter
-  if (decision === "decline") {
-    await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).keptOpen({ title }));
+
+  if (decision === "confirm") {
+    const done = [];
+    const failed = [];
+    for (const m of mutations) {
+      try {
+        if (m.type === "complete") await completeTask(env, m.id);
+        else if (m.type === "delete") await deleteTask(env, m.id);
+        else {
+          const patch = {};
+          if (m.title) patch.title = m.title;
+          const nd = m.due ? toTasksDue(m.due) : undefined;
+          if (nd) patch.due = nd;
+          await patchTask(env, m.id, patch);
+        }
+        done.push(m);
+      } catch (e) {
+        console.error("Tasks apply error:", e?.response?.data || e?.message || e);
+        failed.push(m);
+      }
+    }
+    await send(
+      number,
+      reply(lang).mutationsApplied(confirmView(done, lang), confirmView(failed, lang))
+    );
+    // Keep the window open (tag-free) with edited items as `recent`, so a follow-up
+    // "actually make it Tuesday" amends without another confirm.
+    const armRecent = done
+      .filter((m) => m.type === "edit")
+      .map((m) => ({
+        id: m.id,
+        title: m.title || m.oldTitle,
+        due: m.due ? toTasksDue(m.due) : null,
+      }));
+    await armEngaged(ctx, armRecent);
     return;
   }
 
-  try {
-    await completeTask(env, taskId);
+  if (decision === "decline") {
     await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).completed({ title }));
-  } catch (e) {
-    console.error("Tasks complete error:", e?.response?.data || e?.message || e);
-    await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).failed());
+    await send(number, reply(lang).declined());
+    return;
   }
+
+  // "unrelated": maybe a NEW task ("actually also add milk") arrived mid-confirm.
+  // Re-plan; if it's a clear self-create, do it and RE-OFFER the pending confirm
+  // (we never clobber the pending mutation). Otherwise a silent no-op.
+  let open;
+  try {
+    open = await fetchOpen(ctx);
+  } catch {
+    return;
+  }
+  let plan;
+  try {
+    plan = await planTaskOps(ctx, open);
+  } catch {
+    return;
+  }
+  const selfCreates = (plan?.ops || []).filter(
+    (o) => o?.kind === "create" && !otherAssignee(ctx, o.assignee)
+  );
+  if (!selfCreates.length) return; // truly unrelated
+
+  const created = await handleCreates(ctx, selfCreates);
+  if (created.made.length)
+    await send(
+      number,
+      reply(lang).createdBatch(
+        created.made.map((m) => ({
+          title: m.title,
+          when: localizeDueDate(lang, m.due),
+        }))
+      )
+    );
+  // Re-offer the still-pending confirmation and refresh its TTL.
+  await send(
+    number,
+    reply(lang).confirmMutations(confirmView(mutations, lang), data.missed || [])
+  );
+  await sessions.set(remoteJid, session, 600);
 }
 
-async function resolveTaskRef(ctx, taskRef, open) {
-  const { anthropic, model, owner } = ctx;
-  const listText = open.map((t, i) => `${i + 1}. ${t.title.trim()}`).join("\n");
+function summarizeMutations(mutations) {
+  const kinds = mutations.map((m) => m.type).join(", ");
+  const n = mutations.length;
+  return `apply ${n} change${n > 1 ? "s" : ""} to the owner's tasks (${kinds})`;
+}
+
+// ---- Stateful window: re-plan an untagged follow-up --------------------------
+async function resumeEngaged(ctx, session) {
+  const recent = session.data?.recent || [];
+  let open;
   try {
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 256,
-      system: buildResolveRefSystem(owner),
-      output_config: jsonFormat(RESOLVE_REF_SCHEMA),
-      messages: [
-        {
-          role: "user",
-          content: buildResolveRefUser({ taskRef: taskRef || "", listText }),
-        },
-      ],
-    });
-    const idx = Number(readReply(msg)?.match_index);
-    console.log("TASK RESOLVE RAW:", idx);
-    if (!Number.isInteger(idx) || idx < 1 || idx > open.length) return null;
-    const t = open[idx - 1];
-    return { id: t.id, title: t.title.trim() };
+    open = await fetchOpen(ctx);
   } catch (e) {
-    console.error("task resolveRef error:", e?.message || e);
-    return null;
+    console.error("Tasks list error:", e?.response?.data || e?.message || e);
+    return; // stay silent inside the window on a transient error
   }
+  let plan;
+  try {
+    plan = await planTaskOps(ctx, open);
+  } catch (e) {
+    console.error("Tasks/plan error:", e);
+    return;
+  }
+  if (!plan) return;
+  return dispatchPlan(ctx, plan, open, { recent, fromEngaged: true });
+}
+
+// Open/refresh the stateful, tag-free window over the just-touched tasks.
+async function armEngaged(ctx, recent) {
+  await ctx.sessions.set(
+    ctx.remoteJid,
+    {
+      skill: "task_action",
+      stage: "engaged",
+      awaitFrom: "owner",
+      lang: ctx.lang,
+      data: {
+        recent: (recent || []).map((r) => ({
+          id: r.id,
+          title: r.title,
+          due: r.due ?? null,
+        })),
+      },
+    },
+    600
+  );
+}
+
+// ---- LIST (direct capability) ------------------------------------------------
+// Kept for callers that just want the open list; the planner also sets
+// list_requested, handled inline in dispatchPlan.
+async function handleList(ctx) {
+  const { number, send, lang } = ctx;
+  let open;
+  try {
+    open = await fetchOpen(ctx);
+  } catch (e) {
+    console.error("Tasks list error:", e?.response?.data || e?.message || e);
+    await send(number, reply(lang).failed());
+    return;
+  }
+  if (!open.length) {
+    await send(number, reply(lang).empty());
+    return;
+  }
+  await send(
+    number,
+    reply(lang).formatList(
+      open.map((t) => ({ title: t.title, when: localizeDueDate(lang, t.due) }))
+    )
+  );
 }
 
 // LLM: does the latest message confirm/decline the pending action? Defaults to
@@ -541,3 +716,6 @@ async function classifyConfirmation(ctx, { action }) {
     return "unrelated";
   }
 }
+
+// Exposed as an internal capability in case another skill wants the open list.
+export const capabilities = { list: handleList };

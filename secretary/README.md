@@ -27,8 +27,8 @@ secretary/
     │   ├── skill.js         #   export { manifest, run } — transcribes via AssemblyAI
     │   └── prompt.js        #   reply texts (this skill does not use an LLM)
     ├── 3. Tasks/
-    │   ├── skill.js         #   export { manifest, run } — Google Tasks (self) / delegates a task-for-others to Calendar
-    │   └── prompt.js        #   interpret/review prompts, JSON Schemas, localized reply() strings
+    │   ├── skill.js         #   export { manifest, run, capabilities } — batch add/list/complete/edit/delete; delegates a task-for-others to Calendar
+    │   └── prompt.js        #   list-aware planner prompt + PLAN_SCHEMA, confirm classifier, localized reply() strings
     └── 4. Feature Requests/
         ├── skill.js         #   export { manifest, run } — clarify conversation → Markdown spec sent as a .md document
         └── prompt.js        #   clarify prompt + CLARIFY_SCHEMA, English doc prompt, slugify, localized reply() strings
