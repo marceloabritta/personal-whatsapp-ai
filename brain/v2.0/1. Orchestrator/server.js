@@ -124,7 +124,7 @@ app.post("/webhook", async (req, res) => {
 
     const order = text.slice(TAG.length).trim();
     const number = remoteJid.split("@")[0]; // reply in the originating chat
-    const quoted = getQuoted(data.message); // { id, hasAudio, mediaType } | null
+    const quoted = getQuoted(data); // { id, hasAudio, mediaType } | null
 
     // Conversation context (Evolution history + in-memory buffer).
     const nowStr = new Date().toLocaleString("en-US", {

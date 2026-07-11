@@ -19,10 +19,17 @@ export function extractText(msg) {
 // Detects whether a message is a REPLY (quote) to another one and, if so,
 // returns the quoted message id and whether it contains audio.
 //   -> { id, hasAudio, mediaType } | null
-// `contextInfo` shows up inside extendedTextMessage when the user replies to a
-// message by typing text (the "reply to the audio + @secretary transcribe" case).
-export function getQuoted(msg) {
+// Pass the whole webhook `data` object. Evolution delivers the reply context in
+// one of two places depending on the message shape:
+//   - data.contextInfo            -> a plain-text ("conversation") reply, which is
+//                                    the usual WhatsApp case: contextInfo sits as a
+//                                    SIBLING of `message`, not inside it.
+//   - message.<type>.contextInfo  -> some payload shapes nest it under the message.
+// We check the sibling first, then fall back to the nested shapes.
+export function getQuoted(data) {
+  const msg = data?.message ?? data; // tolerate being called with data or data.message
   const ctx =
+    data?.contextInfo ||
     msg?.extendedTextMessage?.contextInfo ||
     msg?.imageMessage?.contextInfo ||
     msg?.videoMessage?.contextInfo ||
