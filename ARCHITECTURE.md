@@ -2,7 +2,7 @@
 
 What is sent to each service, with what content, as the system runs. This replaces
 the original personal handover document; it describes the current version
-(`brain/v2.0`: orchestrator + skills).
+(`brain/`: orchestrator + skills).
 
 ## Components
 
@@ -143,7 +143,7 @@ everyone (a private-reply option is on the roadmap).
 
 ## Adding a skill
 
-Create `brain/v2.0/2. Skills/<Your Skill>/skill.js`:
+Create `brain/2. Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = { id: "unique_id", description: "what it does (the router reads this)" };
 export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ... */ }

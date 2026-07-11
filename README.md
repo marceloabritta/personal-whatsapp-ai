@@ -50,7 +50,7 @@ You type "@brain ..." in a chat
 - **`calendar_action`** — reads the chat and either **creates** or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. (Edit/reschedule is planned, not yet built.)
 - **`transcribe_audio`** — reply to a voice message and type `@brain transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
 
-Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. See `brain/v2.0/README.md`.
+Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. See `brain/README.md`.
 
 ## Repository layout
 
@@ -60,10 +60,9 @@ Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with 
 ├── ARCHITECTURE.md        # detailed data flow: what is sent to each service
 ├── LICENSE
 ├── .gitignore
-├── brain/                 # the "brain" (Node.js) — the AI app
-│   └── v2.0/              #   current: orchestrator + skills  ← run this
-│       ├── 1. Orchestrator/
-│       └── 2. Skills/     #   (the earlier single-agent version lives in git history)
+├── brain/                 # the "brain" (Node.js) — orchestrator + skills  ← run this
+│   ├── 1. Orchestrator/
+│   └── 2. Skills/         #   (the earlier single-agent version lives in git history)
 └── evolution/             # the WhatsApp gateway (Docker)
     ├── docker-compose.yml #   Evolution API + Postgres + Redis + brain
     └── .env.example
@@ -80,7 +79,7 @@ Adding a skill is a drop-in: create a folder under `brain/v2.0/2. Skills/` with 
 ## Setup
 
 1. **Bring up the stack.** Copy `evolution/` to `/opt/evolution` on the server, create `.env` from `.env.example`, and generate the two secrets with `openssl rand -hex 16` (`AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`). Then `docker compose up -d`.
-2. **Deploy the brain.** Put the **contents of `brain/v2.0/`** in `/opt/brain` (so `/opt/brain/package.json`, `/opt/brain/1. Orchestrator/`, `/opt/brain/2. Skills/` exist). Create `/opt/brain/.env` from `brain/v2.0/.env.example` and fill in your keys. The `brain` service in the compose file runs `npm install && npm start`.
+2. **Deploy the brain.** Put the **contents of `brain/`** in `/opt/brain` (so `/opt/brain/package.json`, `/opt/brain/1. Orchestrator/`, `/opt/brain/2. Skills/` exist). Create `/opt/brain/.env` from `brain/.env.example` and fill in your keys. The `brain` service in the compose file runs `npm install && npm start`.
 3. **Link WhatsApp.** In the Evolution manager (`http://YOUR_IP:8080`), create an instance named `secretary` and scan the QR code with WhatsApp → Linked devices.
 4. **Point the webhook** at the brain for `MESSAGES_UPSERT` events:
 
@@ -113,7 +112,7 @@ The default reply strings and LLM prompts are in English. Each skill keeps its l
 
 ## Contributing
 
-Issues and pull requests are welcome. New skills are the easiest contribution: follow the `{ manifest, run }` contract in `brain/v2.0/2. Skills/` and open a PR.
+Issues and pull requests are welcome. New skills are the easiest contribution: follow the `{ manifest, run }` contract in `brain/2. Skills/` and open a PR.
 
 ## License
 

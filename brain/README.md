@@ -6,7 +6,7 @@ router that classifies intent and dispatches to the right skill.
 ## Structure
 
 ```
-v2.0/
+brain/
 ├── 1. Orchestrator/         # the Node app that runs (webhook + router + skill loading)
 │   ├── server.js            #   receives the webhook, filters the trigger tag (SECRETARY_TAG), builds context,
 │   │                        #   DISCOVERS the skills, calls the router and dispatches
@@ -60,9 +60,9 @@ the tag" no longer holds — a non-owner message can be a valid continuation of 
 
 ## Run / deploy
 
-The app is the contents of the `v2.0/` folder (that's where `package.json` lives,
+The app is the contents of the `brain/` folder (that's where `package.json` lives,
 and `server.js` looks for the skills at `../2. Skills`). A single `node_modules`
-at the `v2.0/` root is shared by the orchestrator and the skills. Start it with
+at the `brain/` root is shared by the orchestrator and the skills. Start it with
 `npm start` (which runs `node "1. Orchestrator/server.js"`). New `.env` variables:
 `ASSEMBLYAI_API_KEY` (and optionally `ASSEMBLYAI_LANGUAGE`), and `REDIS_URL` for the
 session store (defaults to `redis://evolution_redis:6379` — the same Redis the stack uses

@@ -3,7 +3,7 @@
 Architecture reference for the brain's stateful conversation layer.
 **Phase A is built and live** (per-chat Redis sessions + the delete confirm flow).
 For the remaining feature work (smart scheduling, edit/reschedule) see
-[ROADMAP.md](ROADMAP.md).
+[calendar-actions.md](../New Features Plans/calendar-actions.md).
 
 Goal: move the brain from **stateless single-shot** (every action needs `@brain`) to
 **stateful conversations** — so a follow-up (confirmation, clarification, or an edit)
@@ -137,8 +137,8 @@ Skills that don't use sessions behave exactly as today.
   `@brain cancel` (reply to invite) → clean, link-free confirmation → type `yes`
   (no tag) → deleted. The confirmation is LLM-judged, so unrelated chatter is ignored.
 - **Phase C — smart scheduling** (topic naming, missing-email capture from the owner
-  or the contact). See [ROADMAP.md](ROADMAP.md) (C1–C3). *Recommended next.*
-- **Phase B — edit/reschedule via sessions.** See [ROADMAP.md](ROADMAP.md).
+  or the contact). See [calendar-actions.md](../New Features Plans/calendar-actions.md) (C1–C3). *Recommended next.*
+- **Phase B — edit/reschedule via sessions.** See [calendar-actions.md](../New Features Plans/calendar-actions.md).
 
 (Phase C is listed before B because it's the original goal and the first real use of
 `awaitFrom: "contact"`.)

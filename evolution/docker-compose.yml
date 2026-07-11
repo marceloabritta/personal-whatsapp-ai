@@ -52,7 +52,7 @@ services:
       - api
     volumes:
       - /opt/brain:/app        # the brain code lives here, mounted from the host
-                               # (put the contents of brain/v2.0 in /opt/brain)
+                               # (put the contents of brain/ in /opt/brain)
     env_file:
       - /opt/brain/.env        # brain secrets (Claude, Google, AssemblyAI)
     command: sh -c "npm install --no-audit --no-fund && npm start"
