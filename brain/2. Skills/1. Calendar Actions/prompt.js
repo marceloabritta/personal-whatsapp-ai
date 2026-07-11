@@ -204,3 +204,158 @@ ${transcript || "(no history)"}
 
 ${OWNER_NAME}'s order: ${order}`;
 }
+
+// ============================================================================
+//  USER-FACING REPLY STRINGS (localized).
+//  Per-language render functions for EVERY message this skill sends, selected at
+//  send time with ctx.lang via reply(). English is canonical; pt is maintained;
+//  any other language is produced from the `en` copy by the orchestrator's send()
+//  translation fallback. Keep BOTH en + pt for every new message. Interpolated
+//  dates arrive pre-formatted (localizeDate); list grammar and pluralization are
+//  done per language here — never share an English list-builder across languages.
+// ============================================================================
+
+const REPLY_TZ = "America/Sao_Paulo";
+
+// Localized date/time for USER-FACING strings. Always hh:mm AM/PM and a 3-letter
+// month; the locale sets the day/month ORDER — en-US "Jul 5, 2026, 2:30 PM"
+// (month-day), pt-BR "5 de jul. de 2026, 2:30 PM" (day-month). São Paulo, no
+// seconds. (The LLM-facing nowStr in server.js stays en.)
+export function localizeDate(lang, dateTime) {
+  if (!dateTime) return lang === "pt" ? "(sem horário)" : "(no time)";
+  const locale = lang === "pt" ? "pt-BR" : "en-US";
+  return new Date(dateTime).toLocaleString(locale, {
+    timeZone: REPLY_TZ,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true, // always AM/PM
+  });
+}
+
+// List grammar, per language. EN: "A", "A and B", "A, B, and C".
+function joinListEn(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+// PT: "A", "A e B", "A, B e C" (no Oxford comma; "e").
+function joinListPt(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} e ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} e ${items[items.length - 1]}`;
+}
+
+const REPLY = {
+  en: {
+    thinkingError: () => "I hit an error while thinking. Try again?",
+    noAction: ({ summary }) =>
+      `I didn't identify a calendar action. ${summary || ""}`.trim(),
+    createConfirm: ({ title, emails, when, duration }) =>
+      `Confirm this event:
+- ${title}
+- ${emails}
+- ${when} (${duration} min)
+
+Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`,
+    createDone: ({ reused, title, emails, when, duration, link }) =>
+      `${
+        reused
+          ? "That event already exists — here it is (no duplicate created):"
+          : "Done! Invite created and sent:"
+      }\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
+    createCancelled: ({ title }) => `Okay, I won't create "${title}".`,
+    createGoogleError: () =>
+      "I understood the request but failed to create it in Google. Error in the log.",
+    inquiry: (m) => {
+      if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
+        return `${m.emailNames[0]}, I'm missing your email. Can you send it so I can add you to the invite?`;
+      }
+      const asks = [];
+      if (m.noTime) asks.push("the date and time");
+      if (m.noAttendees) asks.push("who to invite");
+      if (m.emailNames.length === 1) asks.push(`${m.emailNames[0]}'s email`);
+      else if (m.emailNames.length > 1)
+        asks.push(`emails for ${joinListEn(m.emailNames)}`);
+      return `Before I can set this up, I still need ${joinListEn(
+        asks
+      )}. Send it here and I'll continue.`;
+    },
+    deleteNeedSignal: ({ tag }) =>
+      `To cancel an event, reply to its invite message, or tell me which meeting (who and when) and call ${tag} again.`,
+    deleteCheckError: () => "I hit an error checking the calendar. Try again?",
+    deleteNoMatch: () =>
+      "I couldn't find a matching event — it may already be cancelled, or I'm not sure which one you mean. Reply to its invite message and try again.",
+    deleteConfirm: ({ title, when, count }) => {
+      const countNote = count > 1 ? `\n- (${count} matching copies)` : "";
+      return `Confirm the cancelation of this event?\n- ${title}\n- ${when}${countNote}\n\nReply "yes" to confirm, or "no" to keep it.`;
+    },
+    deleteKeep: ({ title }) => `Okay, I'll keep "${title}".`,
+    deleteCancelled: ({ title, removed }) => {
+      const dupNote = removed > 1 ? ` (removed ${removed} copies)` : "";
+      return `Cancelled "${title}"${dupNote} and notified the attendees.`;
+    },
+    deleteGoogleError: () =>
+      "I found the event but failed to cancel it in Google. Error in the log.",
+  },
+  pt: {
+    thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
+    noAction: ({ summary }) =>
+      `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
+    createConfirm: ({ title, emails, when, duration }) =>
+      `Confirme este evento:
+- ${title}
+- ${emails}
+- ${when} (${duration} min)
+
+Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`,
+    createDone: ({ reused, title, emails, when, duration, link }) =>
+      `${
+        reused
+          ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
+          : "Pronto! Convite criado e enviado:"
+      }\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
+    createCancelled: ({ title }) => `Ok, não vou criar "${title}".`,
+    createGoogleError: () =>
+      "Entendi o pedido, mas não consegui criar no Google. O erro está no log.",
+    inquiry: (m) => {
+      if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
+        return `${m.emailNames[0]}, estou sem o seu e-mail. Pode me enviar para eu te incluir no convite?`;
+      }
+      const asks = [];
+      if (m.noTime) asks.push("a data e o horário");
+      if (m.noAttendees) asks.push("quem convidar");
+      if (m.emailNames.length === 1) asks.push(`o e-mail de ${m.emailNames[0]}`);
+      else if (m.emailNames.length > 1)
+        asks.push(`os e-mails de ${joinListPt(m.emailNames)}`);
+      return `Antes de agendar, ainda preciso do seguinte: ${joinListPt(
+        asks
+      )}. Envie aqui que eu continuo.`;
+    },
+    deleteNeedSignal: ({ tag }) =>
+      `Para cancelar um evento, responda à mensagem do convite, ou me diga qual reunião (quem e quando) e chame ${tag} de novo.`,
+    deleteCheckError: () =>
+      "Tive um erro ao verificar o calendário. Pode tentar de novo?",
+    deleteNoMatch: () =>
+      "Não encontrei um evento correspondente — pode já ter sido cancelado, ou não tenho certeza de qual você quer dizer. Responda à mensagem do convite e tente de novo.",
+    deleteConfirm: ({ title, when, count }) => {
+      const countNote = count > 1 ? `\n- (${count} cópias correspondentes)` : "";
+      return `Confirmar o cancelamento deste evento?\n- ${title}\n- ${when}${countNote}\n\nResponda "sim" para confirmar, ou "não" para manter.`;
+    },
+    deleteKeep: ({ title }) => `Ok, vou manter "${title}".`,
+    deleteCancelled: ({ title, removed }) => {
+      const dupNote = removed > 1 ? ` (removi ${removed} cópias)` : "";
+      return `Cancelado "${title}"${dupNote} e avisei os participantes.`;
+    },
+    deleteGoogleError: () =>
+      "Encontrei o evento, mas não consegui cancelar no Google. O erro está no log.",
+  },
+};
+
+// Pick the reply set for a language, falling back to English (which the
+// orchestrator's send() then translates for any non-en/pt language).
+export function reply(lang) {
+  return REPLY[lang] || REPLY.en;
+}

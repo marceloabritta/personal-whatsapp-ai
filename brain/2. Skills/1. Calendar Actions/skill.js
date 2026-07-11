@@ -25,6 +25,8 @@ import {
   CONFIRM_SCHEMA,
   REVIEW_SCHEMA,
   RESOLVE_SCHEMA,
+  reply,
+  localizeDate,
 } from "./prompt.js";
 
 // Structured outputs: pass a JSON Schema so the API returns ONLY schema-valid
@@ -268,20 +270,6 @@ function resolveEventId(link) {
   }
 }
 
-function whenStr(dateTime) {
-  return dateTime
-    ? new Date(dateTime).toLocaleString("en-US", {
-        timeZone: CAL_TZ,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true, // hh:mm AM/PM, no seconds
-      })
-    : "(no time)";
-}
-
 async function interpret(ctx) {
   const { owner, anthropic, model, order, transcript, nowStr, contact, quoted } =
     ctx;
@@ -327,17 +315,14 @@ export async function run(ctx) {
     info = await interpret(ctx);
   } catch (e) {
     console.error("Calendar/Claude error:", e);
-    await send(number, "I hit an error while thinking. Try again?");
+    await send(number, reply(ctx.lang).thinkingError());
     return;
   }
 
   if (info?.action === "delete") return handleDelete(ctx, info);
   if (info?.action === "create") return handleCreate(ctx, info);
 
-  await send(
-    number,
-    `I didn't identify a calendar action. ${info?.summary || ""}`.trim()
-  );
+  await send(number, reply(ctx.lang).noAction({ summary: info?.summary }));
 }
 
 // ---- CREATE ----------------------------------------------------------------
@@ -425,15 +410,6 @@ function draftEmails(draft) {
   return (draft.participants || []).map((p) => p?.email).filter(Boolean);
 }
 
-function renderCreateConfirm(draft) {
-  return `Confirm this event:
-- ${draft.title}
-- ${draftEmails(draft).join(", ")}
-- ${whenStr(draft.start_iso)} (${draft.duration_min} min)
-
-Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
-}
-
 // Open (or refresh) the confirmation session holding the draft and show it. The
 // owner's next plain message resumes via resumeCreate. 10-min window to answer.
 async function openCreateConfirm(ctx, draft) {
@@ -445,11 +421,20 @@ async function openCreateConfirm(ctx, draft) {
       intent: "create",
       stage: "await_confirmation",
       awaitFrom: "owner", // only the owner approves their own event
+      lang: ctx.lang, // reply to the continuation in the flow's language
       data: { draft },
     },
     600
   );
-  await send(number, renderCreateConfirm(draft));
+  await send(
+    number,
+    reply(ctx.lang).createConfirm({
+      title: draft.title,
+      emails: draftEmails(draft).join(", "),
+      when: localizeDate(ctx.lang, draft.start_iso),
+      duration: draft.duration_min,
+    })
+  );
 }
 
 // Actually write the confirmed draft to Google and report back.
@@ -466,16 +451,16 @@ async function createFromDraft(ctx, draft) {
     end_iso,
     summary: draft.summary,
   });
-  const header = ev.reused
-    ? "That event already exists — here it is (no duplicate created):"
-    : "Done! Invite created and sent:";
   await send(
     number,
-    `${header}\n\n- ${draft.title}\n- ${emails.join(", ")}\n- ${whenStr(
-      draft.start_iso
-    )} (${draft.duration_min} min)\n\nHere is a link for the event:\n${
-      ev.htmlLink || ""
-    }`
+    reply(ctx.lang).createDone({
+      reused: !!ev.reused,
+      title: draft.title,
+      emails: emails.join(", "),
+      when: localizeDate(ctx.lang, draft.start_iso),
+      duration: draft.duration_min,
+      link: ev.htmlLink || "",
+    })
   );
 }
 
@@ -494,7 +479,7 @@ async function resumeCreate(ctx, session) {
 
   if (review.decision === "cancel") {
     await sessions.clear(remoteJid);
-    await send(number, `Okay, I won't create "${draft.title}".`);
+    await send(number, reply(ctx.lang).createCancelled({ title: draft.title }));
     return;
   }
 
@@ -511,10 +496,7 @@ async function resumeCreate(ctx, session) {
   } catch (e) {
     console.error("Calendar error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
-    await send(
-      number,
-      "I understood the request but failed to create it in Google. Error in the log."
-    );
+    await send(number, reply(ctx.lang).createGoogleError());
   }
 }
 
@@ -575,27 +557,6 @@ async function reviewCreate(ctx, draft) {
 // participant (awaitFrom:"any"), until every required field is secure. Each
 // incoming message re-runs the focused resolver; progress → ask for the rest,
 // complete → confirm, nothing new → stay silent (chatter).
-function joinList(items) {
-  if (items.length === 1) return items[0];
-  if (items.length === 2) return `${items[0]} and ${items[1]}`;
-  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
-}
-
-function renderInquiry(m) {
-  // Marquee case: only a single person's email is missing → address them by name.
-  if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
-    return `${m.emailNames[0]}, I'm missing your email. Can you send it so I can add you to the invite?`;
-  }
-  const asks = [];
-  if (m.noTime) asks.push("the date and time");
-  if (m.noAttendees) asks.push("who to invite");
-  if (m.emailNames.length === 1) asks.push(`${m.emailNames[0]}'s email`);
-  else if (m.emailNames.length > 1) asks.push(`emails for ${joinList(m.emailNames)}`);
-  return `Before I can set this up, I still need ${joinList(
-    asks
-  )}. Send it here and I'll continue.`;
-}
-
 async function openInquiry(ctx, draft, m) {
   const { number, send, sessions, remoteJid } = ctx;
   await sessions.set(
@@ -605,11 +566,12 @@ async function openInquiry(ctx, draft, m) {
       intent: "create",
       stage: "await_info",
       awaitFrom: "any", // the owner OR any attendee in the chat may answer
+      lang: ctx.lang, // reply to the continuation in the flow's language
       data: { draft },
     },
     600
   );
-  await send(number, renderInquiry(m));
+  await send(number, reply(ctx.lang).inquiry(m));
 }
 
 const normName = (s) => String(s || "").trim().toLowerCase();
@@ -729,10 +691,7 @@ async function handleDelete(ctx, info) {
 
   // Need at least one usable signal beyond a bare start time to be sure.
   if (!eidEventId && !(startIso && emails.length)) {
-    await send(
-      number,
-      `To cancel an event, reply to its invite message, or tell me which meeting (who and when) and call ${tag} again.`
-    );
+    await send(number, reply(ctx.lang).deleteNeedSignal({ tag }));
     return;
   }
 
@@ -741,15 +700,12 @@ async function handleDelete(ctx, info) {
     matches = await matchDeletionTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
     console.error("Calendar match error:", e?.response?.data || e?.message || e);
-    await send(number, "I hit an error checking the calendar. Try again?");
+    await send(number, reply(ctx.lang).deleteCheckError());
     return;
   }
 
   if (!matches.length) {
-    await send(
-      number,
-      "I couldn't find a matching event — it may already be cancelled, or I'm not sure which one you mean. Reply to its invite message and try again."
-    );
+    await send(number, reply(ctx.lang).deleteNoMatch());
     return;
   }
 
@@ -758,9 +714,8 @@ async function handleDelete(ctx, info) {
   const primary = matches[0];
   const title = primary.summary || "(untitled)";
   const start = primary.start?.dateTime || startIso || null;
-  const when = whenStr(primary.start?.dateTime || startIso);
+  const when = localizeDate(ctx.lang, primary.start?.dateTime || startIso);
   const ids = matches.map((e) => e.id);
-  const countNote = ids.length > 1 ? `\n- (${ids.length} matching copies)` : "";
 
   // Confirm-first: remember the matched ids + identity and ask. The owner can just
   // type "yes"/"no" (no reply, no tag); the brain watches and ignores chatter.
@@ -771,13 +726,14 @@ async function handleDelete(ctx, info) {
       intent: "delete",
       stage: "await_confirmation",
       awaitFrom: "owner", // only the owner confirms their own cancellation
+      lang: ctx.lang, // reply to the "yes"/"no" in the flow's language
       data: { ids, title, when, start },
     },
     600 // 10 min window to confirm
   );
   await send(
     number,
-    `Confirm the cancelation of this event?\n- ${title}\n- ${when}${countNote}\n\nReply "yes" to confirm, or "no" to keep it.`
+    reply(ctx.lang).deleteConfirm({ title, when, count: ids.length })
   );
 }
 
@@ -796,7 +752,7 @@ async function resumeDelete(ctx, session) {
 
   if (decision === "decline") {
     await sessions.clear(remoteJid);
-    await send(number, `Okay, I'll keep "${title}".`);
+    await send(number, reply(ctx.lang).deleteKeep({ title }));
     return;
   }
 
@@ -808,18 +764,11 @@ async function resumeDelete(ctx, session) {
       startIso: start,
     });
     await sessions.clear(remoteJid);
-    const dupNote = n > 1 ? ` (removed ${n} copies)` : "";
-    await send(
-      number,
-      `Cancelled "${title}"${dupNote} and notified the attendees.`
-    );
+    await send(number, reply(ctx.lang).deleteCancelled({ title, removed: n }));
   } catch (e) {
     console.error("Calendar delete error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
-    await send(
-      number,
-      "I found the event but failed to cancel it in Google. Error in the log."
-    );
+    await send(number, reply(ctx.lang).deleteGoogleError());
   }
 }
 

@@ -37,8 +37,14 @@ const APIKEY = process.env.EVOLUTION_APIKEY;
 const INSTANCE = process.env.EVOLUTION_INSTANCE || "secretary";
 const TAG = (process.env.SECRETARY_TAG || "@brain").toLowerCase();
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
+// Cheap model for the long-tail translation fallback (see localizeBody).
+const TRANSLATE_MODEL =
+  process.env.TRANSLATE_MODEL || "claude-haiku-4-5-20251001";
 const OWNER_NAME = process.env.OWNER_NAME || "User";
 const HEADER = "[AI Brain]:";
+// Languages the brain writes natively (skills carry en/pt maps). Any other
+// detected language is handled by the LLM-translation fallback in send().
+const MAINTAINED_LANGS = new Set(["en", "pt"]);
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const evolution = createEvolution({
@@ -90,10 +96,72 @@ async function loadSkills() {
   return { skills, catalog };
 }
 
+// LONG-TAIL TRANSLATION FALLBACK. Maintained languages (en/pt) are already
+// localized by the skill/orchestrator map → returned untouched. For any other
+// detected language, translate the BODY only (the header is added afterwards, so
+// it's never seen here) with a cheap model, preserving structure. On any failure
+// we return the source text rather than nothing — a message in English beats no
+// message.
+async function localizeBody(text, lang) {
+  const l = (lang || "en").toLowerCase();
+  if (!text || MAINTAINED_LANGS.has(l) || l === "en") return text;
+  try {
+    const msg = await anthropic.messages.create({
+      model: TRANSLATE_MODEL,
+      max_tokens: 1024,
+      system: `Translate the user's message into the language with ISO 639-1 code "${l}". Output ONLY the translation — no preamble, no quotes, no notes. Preserve EXACTLY, unchanged: URLs, email addresses, numbers, dates, times, and every line break and bullet/dash character. Do NOT translate proper nouns (people's names, event titles). Translate the prose only and keep the original layout and formatting.`,
+      messages: [{ role: "user", content: text }],
+    });
+    const out = (msg?.content || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    return out || text;
+  } catch (e) {
+    console.error("translation fallback error:", e?.message || e);
+    return text;
+  }
+}
+
 // Sends text to WhatsApp with the brain's standard header (header + blank line).
-async function send(number, text) {
-  const full = `${HEADER}\n\n${text}`;
+// `lang` drives the long-tail translation fallback; en/pt pass through unchanged.
+// Skills receive a `ctx.send` already bound to the conversation's language.
+async function send(number, text, lang = "en") {
+  const body = await localizeBody(text, lang);
+  const full = `${HEADER}\n\n${body}`;
   return evolution.sendText(number, full);
+}
+
+// The orchestrator's OWN user-facing strings (routing/plumbing problems), en + pt.
+// Any other language is produced from the `en` copy by the send() fallback.
+const ORCH_MSG = {
+  notUnderstood: {
+    en: (names) =>
+      `I didn't understand what you want me to do. Available skills: ${names}.`,
+    pt: (names) =>
+      `Não entendi o que você quer que eu faça. Habilidades disponíveis: ${names}.`,
+  },
+  routerError: {
+    en: () => "I hit an error understanding the request. Try again?",
+    pt: () => "Tive um erro ao entender o pedido. Pode tentar de novo?",
+  },
+  continuationError: {
+    en: () => "I failed to continue that. Error in the log.",
+    pt: () => "Não consegui continuar isso. O erro está no log.",
+  },
+  skillError: {
+    en: () => "I failed to run that task. Error in the log.",
+    pt: () => "Não consegui executar essa tarefa. O erro está no log.",
+  },
+};
+
+// Pick an orchestrator string for `lang`, falling back to the English copy (which
+// the send() fallback then translates for a non-en/pt language).
+function orch(lang, key, ...args) {
+  const entry = ORCH_MSG[key];
+  const fn = (entry && (entry[lang] || entry.en)) || (() => "");
+  return fn(...args);
 }
 
 // ---- Boot -------------------------------------------------------------------
@@ -190,10 +258,16 @@ app.post("/webhook", async (req, res) => {
       catalog: CATALOG,
       env: process.env,
       evolution,
-      send,
       sessions, // store: get/set/clear per-chat state
       session: isContinuation ? session : null, // present only on a continuation
     };
+
+    // Conversation language. On a continuation it's persisted in the session (so a
+    // "yes" answers in the language the flow started in); on a fresh command the
+    // router fills it in below. Default English. `ctx.send` reads ctx.lang lazily,
+    // so setting it after routing still applies to every skill send.
+    ctx.lang = (isContinuation ? session?.lang : null) || "en";
+    ctx.send = (number, text) => send(number, text, ctx.lang);
 
     // CONTINUATION: a follow-up owned by the skill that opened the session.
     // Bypass the router and hand it straight to that skill (it reads ctx.session).
@@ -207,7 +281,7 @@ app.post("/webhook", async (req, res) => {
         await run(ctx);
       } catch (e) {
         console.error(`Session skill '${session.skill}' error:`, e);
-        await send(number, "I failed to continue that. Error in the log.");
+        await send(number, orch(ctx.lang, "continuationError"), ctx.lang);
       }
       return;
     }
@@ -215,24 +289,23 @@ app.post("/webhook", async (req, res) => {
     // FRESH COMMAND: a new @brain order overrides any pending session.
     if (session) await sessions.clear(remoteJid);
 
-    // ROUTER: decide which skill(s) to run.
+    // ROUTER: decide which skill(s) to run — and detect the conversation language.
     let tasks;
     try {
-      ({ tasks } = await route(ctx));
+      const routed = await route(ctx);
+      tasks = routed.tasks;
+      ctx.lang = routed.lang || ctx.lang; // reply in the detected language
     } catch (e) {
       console.error("Router error:", e);
-      await send(number, "I hit an error understanding the request. Try again?");
+      await send(number, orch(ctx.lang, "routerError"), ctx.lang);
       return;
     }
-    console.log("ROUTER -> tasks:", tasks);
+    console.log("ROUTER -> tasks:", tasks, "lang:", ctx.lang);
 
     // No recognized skill.
     if (!tasks.length || tasks.every((x) => !SKILLS[x])) {
       const names = CATALOG.map((c) => c.id).join(", ");
-      await send(
-        number,
-        `I didn't understand what you want me to do. Available skills: ${names}.`
-      );
+      await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
       return;
     }
 
@@ -244,7 +317,7 @@ app.post("/webhook", async (req, res) => {
         await run(ctx);
       } catch (e) {
         console.error(`Skill '${task}' error:`, e);
-        await send(number, "I failed to run that task. Error in the log.");
+        await send(number, orch(ctx.lang, "skillError"), ctx.lang);
       }
     }
   } catch (e) {

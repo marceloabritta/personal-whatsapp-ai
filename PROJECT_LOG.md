@@ -132,7 +132,6 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │   ├── package.json       #   at the brain/ ROOT (shared node_modules for orchestrator+skills)
 │   ├── .env.example
 │   ├── README.md
-│   ├── STATEFUL_ARCHITECTURE_PLAN.md   # the session layer, in depth
 │   ├── 1. Orchestrator/
 │   │   ├── server.js      #   webhook, start/continue gate, context, dispatch
 │   │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
@@ -201,9 +200,11 @@ folder. No edits to `server.js` or the router.**
 
 `ctx` handed to every skill: `owner, tag, anthropic, model, order, transcript, nowStr,
 contact, number, remoteJid, fromMe, quoted, hasQuotedAudio, catalog, env, evolution,
-send, sessions, session`.
+send, sessions, session, lang`.
 - `ctx.send(number, text)` — reply on WhatsApp (adds the `[AI Brain]:` header + a blank
-  line; no footer).
+  line; no footer). Localizes the body to `ctx.lang` (see the convention below).
+- `ctx.lang` — the detected conversation language (ISO code; `"en"` default). The router
+  detects it on a fresh command; it's persisted in the session for continuations.
 - `ctx.evolution` — `{ sendText, fetchHistory, getMediaBase64 }`.
 - `ctx.quoted` — `{ id, hasAudio, mediaType, text, calendarLink }` when the message is a
   reply, else null.
@@ -211,14 +212,20 @@ send, sessions, session`.
 - `ctx.session` — the active session for this chat when the message is a **continuation**
   (else null); `ctx.fromMe` says whether the owner (true) or the contact (false) sent it.
 
-**Stateful flow (§ see STATEFUL_ARCHITECTURE_PLAN.md):** a flow STARTS only when the
+**Stateful flow (§ see `brain/1. Orchestrator/ORCHESTRATOR.md`):** a flow STARTS only when the
 owner sends `@brain`. While a session is open, the orchestrator hands each message from
 the awaited party (`session.awaitFrom`: owner / contact / any) to the owning skill,
 which uses the LLM to detect the awaited answer and ignores normal chatter — no reply or
 tag needed. The brain never reacts to its own `[AI Brain]:` messages.
 
-Convention: prompt/text lives in the skill's `prompt.js`, logic in `skill.js`. To change
-a skill's wording or language, edit only its `prompt.js`.
+Convention: prompt/text lives in the skill's `prompt.js`, logic in `skill.js`.
+**Localization:** user-facing strings are a per-language map (`{ en, pt }`) in `prompt.js`,
+selected at send time with `ctx.lang`; every new message must ship its `en` *and* `pt`
+entries (English is canonical). Dates use `localizeDate(ctx.lang, …)`. Any language without
+a map is produced from the `en` copy by the orchestrator's `send()` translation fallback —
+a safety net, not a reason to skip `pt`. Never translate the `[AI Brain]:` header;
+classification/system prompts stay English. Full design:
+`New Features Plans/multilingual-brain.md`.
 
 Two-LLM-call design is intentional: the router classifies (call 1), then a skill like
 `calendar_action` extracts details (call 2). `transcribe_audio` makes no LLM call.
@@ -327,6 +334,17 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — multilingual brain (built, not yet deployed).** The brain now detects
+  the conversation language (the router returns `lang`, schema-enforced) and replies in it,
+  system-wide. Prose lives per-skill in `prompt.js` as `{ en, pt }` maps selected by
+  `ctx.lang`; the `send()` choke point localizes — en/pt pass through, any other language
+  is body-translated by a cheap `TRANSLATE_MODEL` (header never translated). Dates via
+  `localizeDate` (3-letter month + AM/PM; locale day/month order). `lang` is persisted in
+  the session so continuations answer in-language. Maintained: en + pt-BR. Design:
+  `New Features Plans/multilingual-brain.md`.
+- **2026-07-11 — calendar structured outputs.** All four calendar LLM calls moved to
+  native structured outputs (`output_config.format` + JSON Schemas in `prompt.js`), with a
+  `parseJsonReply`/refusal-guard fallback; `@anthropic-ai/sdk` bumped to `^0.111`.
 - **2026-07-10 — folder flattened + docs registry.** `brain/v2.0/` collapsed to
   `brain/` (only one version now; `v1.0` lives in git history). This handover doc
   renamed to `PROJECT_LOG.md` and repurposed as the project registry. Feature plans

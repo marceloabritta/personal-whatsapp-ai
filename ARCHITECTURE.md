@@ -69,11 +69,15 @@ messages as `ME: ...` / `OTHER: ...`.
 POST https://api.anthropic.com/v1/messages   (via @anthropic-ai/sdk)
 ```
 Sent: the router system prompt (the live skill catalog) plus a user message with the
-order, the transcript and whether a quoted audio is present. The router returns:
+order, the transcript and whether a quoted audio is present. The router is
+schema-enforced (`output_config.format` with `ROUTER_SCHEMA`) and returns:
 ```json
-{ "tasks": ["calendar_action"], "reason": "..." }
+{ "tasks": ["calendar_action"], "lang": "pt", "reason": "..." }
 ```
-Only the content of that one conversation leaves for Anthropic, and only at that moment.
+`lang` is the detected conversation language (ISO code; default `"en"`) — it rides in
+`ctx.lang` so the whole system replies in that language (see the localization note under
+"Adding a skill"). Only the content of that one conversation leaves for Anthropic, and only
+at that moment.
 
 ### 4. brain → Claude (skill: calendar_action)
 
@@ -132,9 +136,12 @@ everyone (a private-reply option is on the roadmap).
 
 ## Environment variables
 
-**brain (`/opt/brain/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `GOOGLE_CLIENT_ID`,
-`GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_CALENDAR_ID`, `ASSEMBLYAI_API_KEY`,
-`ASSEMBLYAI_LANGUAGE`, `OWNER_NAME`, `REDIS_URL` (session store; defaults to
+**brain (`/opt/brain/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
+(cheap model for the long-tail reply-translation fallback; default `claude-haiku-4-5`),
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_CALENDAR_ID`,
+`ASSEMBLYAI_API_KEY`, `ASSEMBLYAI_LANGUAGE` (now only a *fallback* for the transcription
+language — the transcription follows the detected `ctx.lang` first; it does **not** set the
+reply language, which follows `ctx.lang`), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
 `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
 `EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tag, default `@brain`).
 
@@ -146,6 +153,20 @@ everyone (a private-reply option is on the roadmap).
 Create `brain/2. Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = { id: "unique_id", description: "what it does (the router reads this)" };
-export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ... */ }
+export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ctx.lang, ... */ }
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
+
+### Localization convention (applies to every skill)
+
+Replies follow `ctx.lang` (detected by the router). **Every user-facing string a skill
+sends lives in that skill's `prompt.js` as a per-language map (`{ en, pt }`), selected at
+send time with `ctx.lang` (fall back to `en`); every new message must ship its `en` *and*
+`pt` entries.** English is the canonical source — do not write user-facing prose inline in
+`skill.js`. Dates use a `localizeDate(ctx.lang, …)` helper (always 3-letter month + AM/PM;
+the locale sets day/month order). Any language you did *not* write a map for is produced
+from the `en` copy by the orchestrator's `send()` translation fallback — a safety net for
+unmaintained languages, **not** a substitute for authoring `en`/`pt`. Never translate the
+`[AI Brain]:` header; internal/classification prompts (router + skill system prompts) stay
+English. Maintained languages today: **en + pt-BR**. Full design:
+`New Features Plans/multilingual-brain.md`.

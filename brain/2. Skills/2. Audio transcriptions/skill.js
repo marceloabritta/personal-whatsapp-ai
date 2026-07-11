@@ -8,7 +8,7 @@
 //    export const manifest = { id, description }
 //    export async function run(ctx)
 // ============================================================================
-import { MSG, formatTranscript } from "./prompt.js";
+import { msg } from "./prompt.js";
 
 export const manifest = {
   id: "transcribe_audio",
@@ -67,17 +67,18 @@ async function aaiTranscribe(apiKey, uploadUrl, language) {
 // ctx (from the orchestrator): { number, quoted, env, evolution, send }
 //   quoted = { id, hasAudio, mediaType } | null
 export async function run(ctx) {
-  const { number, quoted, env, evolution, send, tag } = ctx;
+  const { number, quoted, env, evolution, send, tag, lang } = ctx;
+  const M = msg(lang); // per-language reply texts (en/pt map; en fallback)
 
   if (!quoted || !quoted.hasAudio) {
-    await send(number, MSG.noAudio(tag));
+    await send(number, M.noAudio(tag));
     return;
   }
 
   const apiKey = env.ASSEMBLYAI_API_KEY;
   if (!apiKey) {
     console.error("ASSEMBLYAI_API_KEY missing in .env");
-    await send(number, MSG.transcriptionFailed);
+    await send(number, M.transcriptionFailed);
     return;
   }
 
@@ -87,21 +88,23 @@ export async function run(ctx) {
     ({ base64, mimetype } = await evolution.getMediaBase64(quoted.id));
   } catch (e) {
     console.error("Transcription/download error:", e?.message || e);
-    await send(number, MSG.downloadFailed);
+    await send(number, M.downloadFailed);
     return;
   }
 
-  await send(number, MSG.processing);
+  await send(number, M.processing);
 
-  // 2) transcribe via AssemblyAI.
+  // 2) transcribe via AssemblyAI. Prefer the detected conversation language so a
+  //    PT chat transcribes in PT; fall back to the static env, then English.
   try {
     const buffer = Buffer.from(base64, "base64");
     const uploadUrl = await aaiUpload(apiKey, buffer);
-    const text = await aaiTranscribe(apiKey, uploadUrl, env.ASSEMBLYAI_LANGUAGE);
+    const language = lang || env.ASSEMBLYAI_LANGUAGE || "en";
+    const text = await aaiTranscribe(apiKey, uploadUrl, language);
     const clean = (text || "").trim();
-    await send(number, clean ? formatTranscript(clean) : MSG.empty);
+    await send(number, clean ? M.transcript(clean) : M.empty);
   } catch (e) {
     console.error("Transcription/AAI error:", e?.message || e, "mime:", mimetype);
-    await send(number, MSG.transcriptionFailed);
+    await send(number, M.transcriptionFailed);
   }
 }

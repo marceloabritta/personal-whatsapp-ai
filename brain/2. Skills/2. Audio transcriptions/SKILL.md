@@ -43,9 +43,16 @@ you see it, the audio was fetched and only the transcription step remains.
 
 ## For AI / maintainers — detailed
 
-Source: `skill.js` (logic) + `prompt.js` (fixed reply strings — **no LLM prompts**;
+Source: `skill.js` (logic) + `prompt.js` (reply strings — **no LLM prompts**;
 this skill makes **no Claude call**). Contract: `export const manifest` +
 `export async function run(ctx)`; auto-discovered at boot.
+
+**Localization:** `prompt.js` holds `MSG` as a per-language map (`{ en, pt }`) plus the
+`transcript` label; `skill.js` selects the set with `const M = msg(ctx.lang)` (fallback
+`en`) and sends `M.noAudio(tag)` / `M.processing` / `M.transcript(text)` / etc. The
+"what you'll see" strings above are the **en** copy — replies mirror the chat language, and
+any language without a map is translated from `en` by the orchestrator's `send()` fallback
+(the transcript text itself is the audio's own words and isn't localized).
 
 ### How it's invoked
 The router classifies an `@brain` order as `transcribe_audio` — disambiguated by
@@ -68,13 +75,15 @@ here `quoted.id` = the voice message id, `quoted.hasAudio` = true for a PTT/audi
 5. **Transcribe (AssemblyAI)**, wrapped in try/catch:
    - `Buffer.from(base64, "base64")` → raw bytes.
    - **`aaiUpload(apiKey, buffer)`** → `POST /v2/upload` (raw bytes) → `upload_url`.
-   - **`aaiTranscribe(apiKey, uploadUrl, env.ASSEMBLYAI_LANGUAGE)`**:
+   - **`aaiTranscribe(apiKey, uploadUrl, lang || env.ASSEMBLYAI_LANGUAGE || "en")`**:
+     the transcription language now follows the detected `ctx.lang` first (a PT chat
+     transcribes in PT), then the static env, then English.
      `POST /v2/transcript` `{ audio_url, language_code }` → `{ id }`, then **poll**
      `GET /v2/transcript/{id}` **up to 40 times, every 3 s (~2 min max)** until
      `status === "completed"` (returns `text`); `status === "error"` throws; exhausting
      the loop throws `"AAI timeout"`.
-   - `clean = text.trim()`; send `formatTranscript(clean)` — or `MSG.empty` if blank.
-   - Any throw (upload/create/poll/timeout) → caught → `MSG.transcriptionFailed`.
+   - `clean = text.trim()`; send `M.transcript(clean)` — or `M.empty` if blank.
+   - Any throw (upload/create/poll/timeout) → caught → `M.transcriptionFailed`.
 
 ### External APIs
 - **Evolution:** `getMediaBase64` → `POST /chat/getBase64FromMediaMessage/{instance}`

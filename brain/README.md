@@ -44,9 +44,19 @@ with a `skill.js`. You don't edit `server.js` or the router.**
 The `ctx` object handed to skills carries everything they need (no imports back to
 the orchestrator): `owner, anthropic, model, order, transcript, nowStr, contact,
 number, remoteJid, quoted, hasQuotedAudio, catalog, tag, fromMe, sessions, session,
-env, evolution, send`. `ctx.quoted` is `{ id, hasAudio, mediaType, text, calendarLink }`.
+env, evolution, send, lang`. `ctx.quoted` is `{ id, hasAudio, mediaType, text, calendarLink }`.
 `ctx.sessions` is the Redis-backed session store and `ctx.session` is the current chat's
 state, so a skill can drive a multi-step, stateful flow (confirmations, clarifications).
+
+## Localization
+
+Replies follow `ctx.lang` (the conversation language the router detects). Each skill keeps
+its user-facing strings in its `prompt.js` as a per-language map (`{ en, pt }`) selected by
+`ctx.lang`, and **must ship both `en` and `pt` for every message** (English is canonical;
+dates use `localizeDate(ctx.lang, …)`). A language without a map is auto-translated from the
+`en` copy by the orchestrator's `send()` fallback; the `[AI Brain]:` header is never
+translated. See the convention in `../ARCHITECTURE.md` and the design in
+`../New Features Plans/multilingual-brain.md`.
 
 ## Stateful flow (starting vs. continuing)
 

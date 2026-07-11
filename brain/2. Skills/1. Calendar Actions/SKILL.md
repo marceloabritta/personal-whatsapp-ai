@@ -89,9 +89,18 @@ the confirm step ("rename to …").
 
 ## For AI / maintainers — detailed
 
-Source: `skill.js` (logic) + `prompt.js` (LLM prompts **and** the JSON Schemas).
-Contract: `export const manifest` + `export async function run(ctx)`; auto-discovered by
-the orchestrator at boot.
+Source: `skill.js` (logic) + `prompt.js` (LLM prompts, the JSON Schemas, **and** the
+localized user-facing reply strings). Contract: `export const manifest` +
+`export async function run(ctx)`; auto-discovered by the orchestrator at boot.
+
+**Localization:** every reply the skill sends comes from `prompt.js` — a per-language map
+of render functions (`REPLY = { en, pt }`), selected with `reply(ctx.lang)` (fallback `en`);
+dates via `localizeDate(ctx.lang, …)` (always 3-letter month + AM/PM; the locale sets
+day/month order). List grammar and pluralization are rendered **per language** (never a
+shared English builder). Sessions persist `lang` so the confirm/cancel/gather continuations
+answer in the flow's language. Any language without a map is translated from the `en` copy
+by the orchestrator's `send()` fallback; the `[AI Brain]:` header and the LLM system prompts
+stay as-is. The example strings below are the **en** copy.
 
 ### Structured outputs (all four LLM calls)
 Every LLM call passes `output_config: { format: { type: "json_schema", schema } }`, so the
@@ -146,10 +155,11 @@ Required to create (everything else has a fallback and never blocks): a **date/t
    newly-named attendees; a lone bare email fills the one missing attendee). No LLM call
    when nothing is missing.
 3. **`advanceCreate`** — complete → **`openCreateConfirm`** (session `await_info` →
-   `await_confirmation`, `awaitFrom:"owner"`, `renderCreateConfirm`); incomplete →
-   **`openInquiry`** (session `await_info`, `awaitFrom:"any"`, `renderInquiry` — a single
-   missing email keeps the "Ana, I'm missing your email…" phrasing, otherwise a composed
-   "Before I can set this up, I still need …").
+   `await_confirmation`, `awaitFrom:"owner"`, `reply(lang).createConfirm`); incomplete →
+   **`openInquiry`** (session `await_info`, `awaitFrom:"any"`, `reply(lang).inquiry` — a
+   single missing email keeps the "Ana, I'm missing your email…" phrasing, otherwise a
+   composed "Before I can set this up, I still need …"). Both `openCreateConfirm` and
+   `openInquiry` persist `lang` in the session.
 
 **`resumeInfo`** (every owner/attendee message while gathering): re-run `inspectMissing`,
 `mergeDraft`; **nothing new resolved → return silently** (chatter); progressed →

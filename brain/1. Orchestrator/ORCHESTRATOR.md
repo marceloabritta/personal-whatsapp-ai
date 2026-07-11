@@ -72,8 +72,10 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, quoted, hasQuotedAudio,
-    catalog, env, evolution, send, sessions, session`. `session` is set **only** on a
-    continuation (else `null`).
+    catalog, env, evolution, send, sessions, session, lang`. `session` is set **only** on a
+    continuation (else `null`). `ctx.lang` is the conversation language — from the session
+    on a continuation, from the router on a fresh command (set after `route()` returns),
+    default `"en"`; `ctx.send` is bound to it (see the localizing `send` above).
 12. **Dispatch:**
     - **Continuation** → **bypass the router**, run `SKILLS[session.skill](ctx)` directly
       (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
@@ -83,9 +85,18 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
       catalog. Empty/unknown → "I didn't understand… Available skills: …". Otherwise run
       each `SKILLS[task](ctx)` in order; per-skill errors → "I failed to run that task."
 
-### `send(number, text)`
+### `send(number, text)` — the localizing choke point
 Prepends `HEADER` + a blank line and calls `evolution.sendText`. The single choke point
-for every user-facing message (skills call `ctx.send`).
+for every user-facing message (skills call `ctx.send`). It also **localizes**: skills and
+the orchestrator author each message in `en`/`pt` (the maintained languages), so those
+pass through untouched; for any **other** detected language (`ctx.lang`) it LLM-translates
+the **body only** (a cheap model, `TRANSLATE_MODEL`) — the `HEADER` is added afterwards and
+is never translated. English never calls the model. Skills receive a `ctx.send` already
+bound to the conversation's `ctx.lang`, so their call sites don't pass a language.
+
+The orchestrator's own strings ("I didn't understand…", router/continuation/skill errors)
+live in an `en`/`pt` map (`ORCH_MSG` + `orch(lang, key, …)`); a non-en/pt language is
+produced from the English copy by the same fallback. See `New Features Plans/multilingual-brain.md`.
 
 ### State the orchestrator holds
 - **`sessions`** (Redis / in-memory) — per-chat pending actions; skills open/clear them,
@@ -93,6 +104,37 @@ for every user-facing message (skills call `ctx.send`).
 - **In-memory buffer** (`remember`/`combine` in `whatsapp.js`) — recent messages per chat,
   merged with Evolution history to build the transcript. Lost on restart.
 - **`seen`** — message-id dedup set (last 500).
+
+### Sessions — shape & skill contract
+A **session** is a short-lived pending action, keyed by `remoteJid`, that lets a flow
+continue without the `@brain` tag. Shape:
+```jsonc
+{
+  "skill": "calendar_action",     // which skill owns the follow-up (dispatch target)
+  "intent": "delete",             // delete | create | edit …
+  "stage": "await_confirmation",  // await_confirmation | await_info | await_clarification …
+  "awaitFrom": "owner",           // who may continue: owner (fromMe) | contact (!fromMe) | any
+  "lang": "pt",                   // conversation language — so the continuation replies in-language
+  "data": { "eventId": "…", "title": "…", "when": "…" },  // skill-specific payload
+  "expiresAt": 1720000900         // TTL — the skill sets it (e.g. 10–15 min)
+}
+```
+The orchestrator only **reads** `awaitFrom`/`skill` (to gate + dispatch) and `lang` (to set
+`ctx.lang` on the continuation, since continuations bypass the router that detects it);
+**skills own the rest.** A skill opts into multi-turn via the store on `ctx`, persisting
+`ctx.lang` so a later bare "yes" answers in the language the flow started in:
+```js
+// open a follow-up (in a fresh run)
+await ctx.sessions.set(remoteJid, { skill:"calendar_action", intent:"delete",
+  stage:"await_confirmation", awaitFrom:"owner", lang: ctx.lang,
+  data:{ eventId, title, when } });
+
+// on resume, ctx.session is the stored object; read ctx.session.data, then when done/cancelled:
+await ctx.sessions.clear(remoteJid);
+```
+`ctx.session` is set **only** on a continuation (else `null`), and `ctx.sessions` exposes
+`get / set / clear`. A fresh `@brain` command clears any stale session first (starting over
+always wins). Skills that never call `ctx.sessions.set` behave statelessly, exactly as before.
 
 ### External touchpoints, timeouts, completion
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.
