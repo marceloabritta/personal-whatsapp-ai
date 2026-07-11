@@ -30,6 +30,7 @@ import {
   reply,
   CLARIFY_SCHEMA,
 } from "./prompt.js";
+import { headerFor } from "../../1. Orchestrator/lib/identity.js";
 
 export const manifest = {
   id: "feature_request",
@@ -40,7 +41,6 @@ export const manifest = {
     "'new feature' — NOT for adding a to-do (task_action) or scheduling (calendar_action).",
 };
 
-const HEADER = "[AI Brain]:";
 const SESSION_TTL = 1800; // 30-min clarify window, re-armed each turn
 
 // Empty draft shape (schema requires every field present, arrays default []).
@@ -285,7 +285,7 @@ async function finalize(ctx, draft) {
   const slug = slugify(draft.title);
   const fileName = `feature-${slug}.md`;
   const base64 = Buffer.from(md, "utf8").toString("base64");
-  const caption = `${HEADER}\n\n${reply(ctx.lang).docCaption({
+  const caption = `${headerFor(ctx.lang)}\n\n${reply(ctx.lang).docCaption({
     title: draft.title || slug,
   })}`;
 

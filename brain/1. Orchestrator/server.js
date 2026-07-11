@@ -26,6 +26,7 @@ import {
   contactName,
 } from "./lib/whatsapp.js";
 import { createSessions } from "./lib/sessions.js";
+import { TAGS, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
 import { route } from "./router/router.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,13 +36,14 @@ const SKILLS_DIR = path.join(__dirname, "..", "2. Skills");
 const EVOLUTION_URL = process.env.EVOLUTION_URL || "http://api:8080";
 const APIKEY = process.env.EVOLUTION_APIKEY;
 const INSTANCE = process.env.EVOLUTION_INSTANCE || "secretary";
-const TAG = (process.env.SECRETARY_TAG || "@brain").toLowerCase();
+// Trigger tags + reply header live in lib/identity.js (single source of truth,
+// shared with skills). TAGS is the accepted-tag list; headerFor(lang)/isOwnMessage/
+// matchedTag are imported above.
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 // Cheap model for the long-tail translation fallback (see localizeBody).
 const TRANSLATE_MODEL =
   process.env.TRANSLATE_MODEL || "claude-haiku-4-5-20251001";
 const OWNER_NAME = process.env.OWNER_NAME || "User";
-const HEADER = "[AI Brain]:";
 // Languages the brain writes natively (skills carry en/pt maps). Any other
 // detected language is handled by the LLM-translation fallback in send().
 const MAINTAINED_LANGS = new Set(["en", "pt"]);
@@ -144,7 +146,7 @@ async function localizeBody(text, lang) {
 // Skills receive a `ctx.send` already bound to the conversation's language.
 async function send(number, text, lang = "en") {
   const body = await localizeBody(text, lang);
-  const full = `${HEADER}\n\n${body}`;
+  const full = `${headerFor(lang)}\n\n${body}`;
   return evolution.sendText(number, full);
 }
 
@@ -209,14 +211,19 @@ app.post("/webhook", async (req, res) => {
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
     console.log("QUOTED>>>", JSON.stringify(quoted));
 
-    // Never react to the brain's OWN messages (they start with the header).
-    const isBrainMsg = text.startsWith(HEADER);
+    // Never react to the secretary's OWN messages. They arrive with fromMe=true
+    // (same account as the owner), so this header check is the ONLY thing telling
+    // them apart from a genuine owner message — it must match every header variant
+    // the secretary emits (both languages + legacy), see lib/identity.js.
+    const isBrainMsg = isOwnMessage(text);
 
     // Pending conversation state for this chat (confirmations, clarifications, ...).
     const session = await sessions.get(remoteJid);
 
-    // START: a flow only begins when the OWNER uses the trigger tag.
-    const isTagged = fromMe && text.toLowerCase().startsWith(TAG);
+    // START: a flow only begins when the OWNER uses a trigger tag. `tag` is the tag
+    // this message actually starts with (or null) — used below to slice it off.
+    const tag = fromMe ? matchedTag(text) : null;
+    const isTagged = !!tag;
 
     // CONTINUE: while a session is active, the owning skill inspects EVERY message
     // from the party it waits on (session.awaitFrom) and decides — with the LLM —
@@ -240,7 +247,8 @@ app.post("/webhook", async (req, res) => {
       if (seen.size > 500) seen.delete(seen.values().next().value);
     }
 
-    const order = isTagged ? text.slice(TAG.length).trim() : text.trim();
+    // Slice off the matched tag by ITS own length (tags can differ in length).
+    const order = isTagged ? text.slice(tag.length).trim() : text.trim();
     const number = remoteJid.split("@")[0]; // reply in the originating chat
 
     // Conversation context (Evolution history + in-memory buffer).
@@ -261,7 +269,8 @@ app.post("/webhook", async (req, res) => {
     // Shared context passed to the router and to every skill.
     const ctx = {
       owner: OWNER_NAME,
-      tag: TAG,
+      tag: tag || TAGS[0], // the tag this order used (fallback: the primary tag)
+      tags: TAGS, // full accepted-tag list, for any skill that wants to show them
       anthropic,
       model: MODEL,
       order,
@@ -319,7 +328,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // FRESH COMMAND: a new @brain order overrides any pending session.
+    // FRESH COMMAND: a new tagged order overrides any pending session.
     if (session) await sessions.clear(remoteJid);
 
     // ROUTER: decide which skill(s) to run — and detect the conversation language.
