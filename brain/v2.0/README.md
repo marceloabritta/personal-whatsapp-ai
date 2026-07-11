@@ -8,7 +8,7 @@ router that classifies intent and dispatches to the right skill.
 ```
 v2.0/
 ├── 1. Orchestrator/         # the Node app that runs (webhook + router + skill loading)
-│   ├── server.js            #   receives the webhook, filters @secretary, builds context,
+│   ├── server.js            #   receives the webhook, filters the trigger tag (SECRETARY_TAG), builds context,
 │   │                        #   DISCOVERS the skills, calls the router and dispatches
 │   ├── package.json         #   process dependencies (includes the skills' deps)
 │   ├── .env.example

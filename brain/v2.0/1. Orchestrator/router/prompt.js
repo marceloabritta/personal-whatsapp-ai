@@ -22,11 +22,18 @@ Rules:
 - "tasks" is a list of the requested task ids (in the order they should run). Usually just one.
 - Use ONLY ids that appear in the list above. If nothing applies, use ["other"].
 - You will be told whether there is a quoted (replied-to) audio in the message; use that to disambiguate.
+- If the message is a REPLY to a message that contains a Google Calendar link, it
+  is almost certainly a calendar action (edit or delete/cancel) — including a bare
+  "yes"/"confirm" reply confirming a cancellation. Route it to the calendar task.
 - "reason": a short sentence explaining the choice.`;
 }
 
-export function buildRouterUser(ownerName, { order, transcript, hasQuotedAudio }) {
+export function buildRouterUser(
+  ownerName,
+  { order, transcript, hasQuotedAudio, hasQuotedCalendarLink }
+) {
   return `Quoted audio in this message (a reply to an audio)? ${hasQuotedAudio ? "YES" : "NO"}
+Replied-to message contains a Google Calendar link? ${hasQuotedCalendarLink ? "YES" : "NO"}
 
 Recent conversation:
 ${transcript || "(no history)"}

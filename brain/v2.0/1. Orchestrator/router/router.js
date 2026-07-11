@@ -8,12 +8,25 @@ import { buildRouterSystem, buildRouterUser } from "./prompt.js";
 // ctx: { owner, anthropic, model, order, transcript, hasQuotedAudio, catalog }
 // -> { tasks: string[], reason: string }
 export async function route(ctx) {
-  const { owner, anthropic, model, order, transcript, hasQuotedAudio, catalog } =
-    ctx;
+  const {
+    owner,
+    anthropic,
+    model,
+    order,
+    transcript,
+    hasQuotedAudio,
+    quoted,
+    catalog,
+  } = ctx;
   const valid = new Set([...(catalog || []).map((c) => c.id), "other"]);
 
   const system = buildRouterSystem(owner, catalog || []);
-  const user = buildRouterUser(owner, { order, transcript, hasQuotedAudio });
+  const user = buildRouterUser(owner, {
+    order,
+    transcript,
+    hasQuotedAudio,
+    hasQuotedCalendarLink: !!quoted?.calendarLink,
+  });
 
   const msg = await anthropic.messages.create({
     model,

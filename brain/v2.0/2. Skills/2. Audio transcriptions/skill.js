@@ -13,7 +13,7 @@ import { MSG, formatTranscript } from "./prompt.js";
 export const manifest = {
   id: "transcribe_audio",
   description:
-    "transcribe an audio message that the user REPLIED to (quoted) with @secretary",
+    "transcribe an audio message that the user REPLIED to (quoted) and asked to transcribe",
 };
 
 const AAI_BASE = "https://api.assemblyai.com/v2";
@@ -67,10 +67,10 @@ async function aaiTranscribe(apiKey, uploadUrl, language) {
 // ctx (from the orchestrator): { number, quoted, env, evolution, send }
 //   quoted = { id, hasAudio, mediaType } | null
 export async function run(ctx) {
-  const { number, quoted, env, evolution, send } = ctx;
+  const { number, quoted, env, evolution, send, tag } = ctx;
 
   if (!quoted || !quoted.hasAudio) {
-    await send(number, MSG.noAudio);
+    await send(number, MSG.noAudio(tag));
     return;
   }
 

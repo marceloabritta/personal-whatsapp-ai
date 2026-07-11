@@ -17,8 +17,10 @@ export function extractText(msg) {
 }
 
 // Detects whether a message is a REPLY (quote) to another one and, if so,
-// returns the quoted message id and whether it contains audio.
-//   -> { id, hasAudio, mediaType } | null
+// returns the quoted message id, whether it contains audio, the quoted TEXT and
+// any Google Calendar link found in it (used to delete/edit an event by replying
+// to the message that carries its calendar link).
+//   -> { id, hasAudio, mediaType, text, calendarLink } | null
 // Pass the whole webhook `data` object. Evolution delivers the reply context in
 // one of two places depending on the message shape:
 //   - data.contextInfo            -> a plain-text ("conversation") reply, which is
@@ -49,7 +51,18 @@ export function getQuoted(data) {
     : q.documentMessage
     ? "document"
     : "text";
-  return { id, hasAudio, mediaType };
+  const text = extractText(q).trim();
+  return { id, hasAudio, mediaType, text, calendarLink: findCalendarLink(text) };
+}
+
+// Finds a Google Calendar event link inside a text (google.com/calendar or
+// calendar.google.com, carrying an `eid` param). Returns the URL or null.
+export function findCalendarLink(text) {
+  if (!text) return null;
+  const m = text.match(
+    /https?:\/\/\S*(?:google\.com\/calendar|calendar\.google\.com)\/\S*eid=\S+/i
+  );
+  return m ? m[0] : null;
 }
 
 // ---------------------------------------------------------------------------

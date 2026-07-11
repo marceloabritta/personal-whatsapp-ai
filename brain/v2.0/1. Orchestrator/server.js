@@ -1,6 +1,6 @@
 // ============================================================================
 //  BRAIN (v2.0)  —  ORCHESTRATOR.
-//  Receives the Evolution webhook, filters (fromMe + @secretary), builds the
+//  Receives the Evolution webhook, filters (fromMe + trigger tag), builds the
 //  context, DISCOVERS the available skills (../2. Skills/*/skill.js), calls the
 //  ROUTER to classify intent and dispatches to the chosen skill(s).
 //
@@ -34,7 +34,7 @@ const SKILLS_DIR = path.join(__dirname, "..", "2. Skills");
 const EVOLUTION_URL = process.env.EVOLUTION_URL || "http://api:8080";
 const APIKEY = process.env.EVOLUTION_APIKEY;
 const INSTANCE = process.env.EVOLUTION_INSTANCE || "secretary";
-const TAG = (process.env.SECRETARY_TAG || "@secretary").toLowerCase();
+const TAG = (process.env.SECRETARY_TAG || "@brain").toLowerCase();
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 const OWNER_NAME = process.env.OWNER_NAME || "User";
 const HEADER = "[AI Secretary]:";
@@ -115,7 +115,7 @@ app.post("/webhook", async (req, res) => {
     if (text) remember(remoteJid, { t, fromMe, text, pushName: data.pushName });
 
     if (!fromMe) return; // only the owner's order
-    if (!text.toLowerCase().startsWith(TAG)) return; // only act on the @secretary tag
+    if (!text.toLowerCase().startsWith(TAG)) return; // only act on the trigger tag (SECRETARY_TAG)
     if (id && seen.has(id)) return; // dedup
     if (id) {
       seen.add(id);
@@ -124,7 +124,17 @@ app.post("/webhook", async (req, res) => {
 
     const order = text.slice(TAG.length).trim();
     const number = remoteJid.split("@")[0]; // reply in the originating chat
-    const quoted = getQuoted(data); // { id, hasAudio, mediaType } | null
+    const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
+    console.log("QUOTED>>>", JSON.stringify(quoted));
+    // TEMP diagnostic: raw reply context, to see if Evolution ships the quoted body.
+    console.log(
+      "QUOTED_RAW_CTX>>>",
+      JSON.stringify(
+        data?.contextInfo ||
+          data?.message?.extendedTextMessage?.contextInfo ||
+          null
+      )
+    );
 
     // Conversation context (Evolution history + in-memory buffer).
     const nowStr = new Date().toLocaleString("en-US", {
@@ -144,6 +154,7 @@ app.post("/webhook", async (req, res) => {
     // Shared context passed to the router and to every skill.
     const ctx = {
       owner: OWNER_NAME,
+      tag: TAG,
       anthropic,
       model: MODEL,
       order,

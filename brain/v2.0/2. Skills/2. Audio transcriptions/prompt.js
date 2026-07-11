@@ -6,8 +6,8 @@
 // ============================================================================
 
 export const MSG = {
-  noAudio:
-    "To transcribe, reply to the audio you want and call @secretary again. E.g.: press and hold the audio, tap Reply and type \"@secretary transcribe\".",
+  noAudio: (tag) =>
+    `To transcribe, reply to the audio you want and call ${tag} again. E.g.: press and hold the audio, tap Reply and type "${tag} transcribe".`,
   processing: "Got the audio, transcribing... ~1 min.",
   downloadFailed:
     "I couldn't download that audio from WhatsApp. It may be too old or was not saved. Try a more recent audio.",
