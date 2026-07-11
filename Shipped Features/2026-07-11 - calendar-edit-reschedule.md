@@ -63,3 +63,16 @@ Reschedule / relength / add-remove attendee / rename all work; changes chain tag
 until confirmed; ambiguous requests clarify; nothing is written until the owner confirms.
 Shipped and confirmed working by Marcelo on **2026-07-11** (commits `8036a4b` initial,
 `55891fe` confirm-first rework).
+
+## Hardening — edit shares delete's matcher (2026-07-11)
+
+`handleEdit` originally resolved its target **link-only** (`resolveEventId` → `getEvent` →
+status recheck), so replying to a *summary/confirm bubble* (which carries no embedded
+calendar link) failed. Generalized `matchDeletionTargets` → **`matchEventTargets`** (rename
+only — signature, scoring `+100`/`+40`/`+30`, confident `≥70`, dedup, return shape all
+unchanged) and pointed **both** delete and edit at it. Edit now resolves via a decoded link
+**or** start-time + attendee-email match — exactly like delete — and works from the summary
+bubble or a tagless "who + when" request. Removed the now-redundant `getEvent`/status recheck
+in edit (the matcher returns full confirmed events). Delete's behavior is byte-for-byte
+unchanged (one call-site rename). `resumeEditClarify` / `resumeEditConfirm` untouched. Net:
+one rename + ~15 swapped lines in `handleEdit`, zero new prompts/strings.

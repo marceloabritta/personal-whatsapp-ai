@@ -194,9 +194,9 @@ async function findConfirmedDuplicates(env, { title, startIso, excludeId }) {
   );
 }
 
-// Identify which real calendar event(s) a cancel request targets, by MATCHING the
-// details captured from the conversation against the calendar — not by trusting a
-// decoded link alone. Signals, per candidate:
+// Identify which real calendar event(s) a request targets (cancel or edit), by
+// MATCHING the details captured from the conversation against the calendar — not by
+// trusting a decoded link alone. Signals, per candidate:
 //   +100  the event id decoded from the replied-to link (strong, explicit)
 //   + 40  same start instant as the captured date/time
 //   + 30  an attendee email overlaps a captured participant email
@@ -204,7 +204,7 @@ async function findConfirmedDuplicates(env, { title, startIso, excludeId }) {
 // start+email together. A bare same-start coincidence (40) is NOT enough to act on
 // — it could be a different meeting in the same slot. Returns confident matches
 // (deduped by id), each with its event data.
-async function matchDeletionTargets(env, { eidEventId, startIso, emails }) {
+async function matchEventTargets(env, { eidEventId, startIso, emails }) {
   const cal = calendarClient(env);
   const emailSet = new Set((emails || []).map((e) => String(e).toLowerCase()));
   const startMs = startIso ? new Date(startIso).getTime() : null;
@@ -931,25 +931,40 @@ async function applyEditDraft(ctx, eventId, draft) {
 async function handleEdit(ctx, info) {
   const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
 
-  // The event to change is the one whose invite the owner replied to.
-  const eventId = resolveEventId(quoted?.calendarLink);
-  if (!eventId) {
+  // Resolve the event to change the SAME way delete does: match the details captured
+  // from the conversation (start time + attendee emails) PLUS any id decoded from a
+  // replied-to link. This works whether the owner replied to the invite (link), the
+  // summary/confirm bubble (start+email, no link), or a tagless request that names
+  // who+when.
+  const participants = Array.isArray(info?.participants) ? info.participants : [];
+  const emails = participants.map((p) => p?.email).filter(Boolean);
+  const startIso = info?.start_iso || null;
+  const eidEventId = resolveEventId(quoted?.calendarLink); // may be null
+
+  // Same guard as delete: need the link, or start+email together.
+  if (!eidEventId && !(startIso && emails.length)) {
     await send(number, reply(ctx.lang).editNeedSignal({ tag }));
     return;
   }
 
-  let ev;
+  let matches;
   try {
-    ev = await getEvent(env, eventId);
+    matches = await matchEventTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
-    console.error("Calendar edit get error:", e?.response?.data || e?.message || e);
+    console.error("Calendar edit match error:", e?.response?.data || e?.message || e);
+    await send(number, reply(ctx.lang).editCheckError());
+    return;
+  }
+  if (!matches.length) {
     await send(number, reply(ctx.lang).editNoMatch());
     return;
   }
-  if (!ev || ev.status !== "confirmed") {
-    await send(number, reply(ctx.lang).editNoMatch());
-    return;
-  }
+
+  // Matcher returns full, confirmed-only event resources; patch the primary (same
+  // "primary" pick delete makes for display). The confirm-first step below shows the
+  // target, so a wrong pick among same-slot dupes is catchable before any write.
+  const ev = matches[0];
+  const eventId = ev.id;
 
   let patch;
   try {
@@ -1103,7 +1118,7 @@ async function handleDelete(ctx, info) {
 
   let matches;
   try {
-    matches = await matchDeletionTargets(env, { eidEventId, startIso, emails });
+    matches = await matchEventTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
     console.error("Calendar match error:", e?.response?.data || e?.message || e);
     await send(number, reply(ctx.lang).deleteCheckError());

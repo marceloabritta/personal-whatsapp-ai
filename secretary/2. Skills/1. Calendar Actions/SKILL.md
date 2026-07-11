@@ -242,7 +242,7 @@ calendar**, not by trusting a decoded link alone. `interpret` fills `participant
 emails) and `start_iso` for deletes too.
 1. **`handleDelete`:** gather `emails` + `start_iso` from `info` and `eidEventId =
    resolveEventId(quoted.calendarLink)` (may be null). Need the link id **or** both a start
-   time and an email, else ask and stop. `matchDeletionTargets` lists candidates (decoded
+   time and an email, else ask and stop. `matchEventTargets` (shared with edit) lists candidates (decoded
    id via `events.get`, plus every confirmed event at the start instant via `events.list`)
    and **scores** them: `+100` decoded-id, `+40` same start, `+30` attendee-email overlap;
    confident = **≥ 70**. No confident match → "couldn't find a matching event". Otherwise
@@ -256,7 +256,9 @@ emails) and `start_iso` for deletes too.
    success) → clear + "Cancelled…".
 
 ### Task: EDIT — `handleEdit` + `resumeEditClarify` + `resumeEditConfirm`
-Change an existing event the owner **replied to**. **Confirm-first and stays open** (reuses
+Change an existing event, resolved **like delete** (shared `matchEventTargets`) — a decoded
+link **or** start-time + attendee-email match, so replying to the summary/confirm bubble (no
+link) works too. **Confirm-first and stays open** (reuses
 create's confirm/modify machinery): the change is folded into a **draft** of the event's
 target state, shown for confirmation, and written to Google only on `yes`. While the confirm
 session is open the owner can keep refining the same event tagless. **The draft** — seeded by
@@ -264,9 +266,12 @@ session is open the owner can keep refining the same event tagless. **The draft*
 `applyPatchToDraft(draft, patch)` folds a change onto it (overwrite touched fields; merge
 attendees: case-insensitive remove then dedup add).
 
-1. **`handleEdit`:** `eventId = resolveEventId(quoted.calendarLink)` — no link id → ask the
-   owner to reply to the invite and stop. `getEvent` the current state; not `confirmed` →
-   "couldn't find that event". Then the **first-pass** `interpretEdit` (`buildEditSystem`,
+1. **`handleEdit`:** gather `emails` + `start_iso` from `info` and `eidEventId =
+   resolveEventId(quoted.calendarLink)` (may be null) — same signals delete uses. Need the
+   link id **or** both a start time and an email, else ask and stop. `matchEventTargets`
+   returns the confident, confirmed-only matches; none → "couldn't find that event"; else
+   patch the primary (`matches[0]`) — no separate `getEvent`/status recheck, the matcher
+   already returns the full event. Then the **first-pass** `interpretEdit` (`buildEditSystem`,
    `EDIT_SCHEMA`, 2048) reads the change against the real event (`eventForLLM`) and returns
    only what changes:
    ```jsonc

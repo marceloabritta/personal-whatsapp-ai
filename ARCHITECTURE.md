@@ -93,8 +93,9 @@ A second call, with the calendar skill's own prompt, extracts:
 }
 ```
 `action` is `"create"`, `"delete"`, or `"edit"` — the skill can create a new event,
-cancel/delete an existing one, or edit/reschedule one (reply to the invite with a change;
-confirm-first and stays open until you save).
+cancel/delete an existing one, or edit/reschedule one (reply to the invite **or** the
+summary/confirm bubble with a change — the target is matched like delete, by decoded link
+or start-time + attendee-email; confirm-first and stays open until you save).
 
 ### 5. skill → Google Calendar (create or cancel/delete event)
 
