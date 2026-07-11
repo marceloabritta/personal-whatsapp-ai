@@ -66,6 +66,61 @@ Built in three testable steps.
 
 ---
 
+## Extraction architecture — decisions & improvements
+
+Notes on *how* create pulls its data, separate from the stateful flows above.
+
+### What create actually requires (today)
+Only **two** fields gate a create ([`skill.js` `handleCreate`](../brain/2.%20Skills/1.%20Calendar%20Actions/skill.js)):
+- **`start_iso`** — a date/time (blocks if absent).
+- **≥1 attendee email** — at least one email among the participants (blocks if none).
+
+Everything else is defaulted: participant names → title fallback `Owner & Guest`,
+`duration_min` → 45 min, `summary` → empty. C1/C2 above upgrade the naming and the
+email handling.
+
+### Decision: keep extraction as ONE LLM call (do not split per-field)
+`interpret()` extracts action + participants + emails + time + duration in a single
+Claude call. This is deliberate — **don't** decompose it into independent per-field
+questions ("who?", then "their email?", then "when?"). The fields are **correlated**:
+- deciding *who attends* needs the whole conversation;
+- attributing an *email* needs to already know *who* the person is;
+- resolving "tomorrow 3pm" needs the meeting context.
+
+Independent calls lose that shared context (worse attribution), add latency and tokens,
+and add orchestration code — with no accuracy gain for a small 4–5 field extraction.
+Slot-filling across turns (C2/C3) is *not* the same thing: that re-runs the same single
+extraction as new info arrives, it doesn't split one message into many calls.
+
+### Improvement: confirm before writing to Google (create)
+Delete confirms first; create fires immediately on a single, unverified JSON extraction,
+so a mis-parsed time or wrong attendee only surfaces after the invite emails go out.
+- **Scope:** after extraction succeeds and no slots are missing, show a summary
+  (title / attendees / date-time / duration) and ask the owner to confirm before
+  `events.insert`.
+- **Reuses:** the exact `sessions` + `classifyConfirmation` machinery already proven in
+  delete — open an `await_confirmation` session holding the event draft; `yes` creates,
+  `no` discards, chatter is ignored.
+- **Test:** "@brain schedule with ana@x.com tomorrow 3pm" → brain shows the draft and
+  asks to confirm → `yes` → event created; a mis-parsed time is catchable at that step.
+- **Done when:** create never writes to Google without an explicit owner confirmation.
+- **Sequencing note:** fits naturally *after* C2 (both use the same session pattern);
+  can also land standalone before C2 for immediate safety.
+
+### Gap: per-attendee email coverage (not just "≥1 email")
+Today create only requires **one** email among all participants. Invite Ana + Bruno with
+only Ana's email in the chat and it creates the event with just Ana — Bruno is silently
+dropped. C2 addresses this by computing `missingEmails` **per participant** and asking
+for each; until C2 lands, this is a known correctness gap worth calling out.
+
+### Optional: extract → self-check (a verifier, not a field-splitter)
+If single-call accuracy ever proves shaky, the right second call is a **verifier**
+("given this chat, is any extracted field ambiguous or likely wrong?"), not per-field
+decomposition. Lower priority than the confirm step above, which gives the human the
+final check for free.
+
+---
+
 ## Phase B — Edit / reschedule via reply
 
 - **Scope:** reply to an event's calendar link with a change ("move to 4pm",
