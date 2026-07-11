@@ -4,7 +4,8 @@
 //    - create  : make a new event and fire the invite email.
 //    - delete  : cancel an event the owner REPLIED to (its calendar link), with
 //                a confirm-first step.
-//  (edit/reschedule comes in a later step.)
+//    - edit    : change an event the owner REPLIED to (move/relength/rename/add or
+//                remove an attendee); asks for clarification when ambiguous.
 //  Run by the orchestrator when the router picks "calendar_action".
 //
 //  Skill contract (read by the orchestrator):
@@ -21,10 +22,13 @@ import {
   buildCreateReviewUser,
   buildResolveSystem,
   buildResolveUser,
+  buildEditSystem,
+  buildEditUser,
   CAL_SCHEMA,
   CONFIRM_SCHEMA,
   REVIEW_SCHEMA,
   RESOLVE_SCHEMA,
+  EDIT_SCHEMA,
   reply,
   localizeDate,
 } from "./prompt.js";
@@ -144,6 +148,18 @@ async function createEvent(env, { title, emails, start_iso, end_iso, summary }) 
 async function getEvent(env, eventId) {
   const cal = calendarClient(env);
   const r = await cal.events.get({ calendarId: calId(env), eventId });
+  return r.data;
+}
+
+// Patch an existing event with only the changed fields and notify the attendees.
+async function patchEvent(env, eventId, requestBody) {
+  const cal = calendarClient(env);
+  const r = await cal.events.patch({
+    calendarId: calId(env),
+    eventId,
+    sendUpdates: "all", // email the attendees about the change
+    requestBody,
+  });
   return r.data;
 }
 
@@ -319,6 +335,9 @@ export async function run(ctx) {
   if (session?.intent === "create" && session.stage === "await_confirmation") {
     return resumeCreate(ctx, session);
   }
+  if (session?.intent === "edit" && session.stage === "await_clarification") {
+    return resumeEdit(ctx, session);
+  }
 
   let info;
   try {
@@ -331,6 +350,7 @@ export async function run(ctx) {
 
   if (info?.action === "delete") return handleDelete(ctx, info);
   if (info?.action === "create") return handleCreate(ctx, info);
+  if (info?.action === "edit") return handleEdit(ctx, info);
 
   await send(number, reply(ctx.lang).noAction({ summary: info?.summary }));
 }
@@ -681,6 +701,246 @@ async function inspectMissing(ctx, draft, m) {
   } catch (e) {
     console.error("resolve error:", e?.message || e);
     return null;
+  }
+}
+
+// ---- EDIT / RESCHEDULE (Phase B) -------------------------------------------
+// Change an EXISTING event the owner REPLIED to (its calendar link): move it,
+// relength it, rename it, add/remove an attendee. The target event is resolved
+// straight from the quoted link; a FOCUSED LLM pass reads the change request against
+// the event's real current state and returns only what changes — or a `clarify`
+// question when the request is ambiguous (e.g. "move it earlier" with no target),
+// which opens a short session and resumes on the owner's answer. Unlike delete,
+// an unambiguous edit applies immediately (it is not destructive).
+
+// Compact view of the real event handed to the focused edit pass.
+function eventForLLM(ev) {
+  const start = ev.start?.dateTime || null;
+  const end = ev.end?.dateTime || null;
+  const duration_min =
+    start && end ? Math.round((new Date(end) - new Date(start)) / 60000) : null;
+  return {
+    title: ev.summary || "",
+    start_iso: start,
+    end_iso: end,
+    duration_min,
+    attendees: (ev.attendees || []).map((a) => a.email).filter(Boolean),
+  };
+}
+
+// Does the patch actually change anything? (An all-null/empty patch means the model
+// couldn't extract a change — distinct from a `clarify` question.)
+function hasEditChange(p) {
+  return !!(
+    p.new_start_iso ||
+    Number(p.new_duration_min) > 0 ||
+    p.new_title ||
+    (typeof p.new_summary === "string" && p.new_summary.trim()) ||
+    (Array.isArray(p.add_emails) && p.add_emails.length) ||
+    (Array.isArray(p.remove_emails) && p.remove_emails.length)
+  );
+}
+
+// The focused EDIT pass: given the real event + the change request, resolve only the
+// changed fields (or a clarify question). Throws on API error (callers handle it);
+// returns null on a refusal/unparseable reply.
+async function interpretEdit(ctx, ev) {
+  const { anthropic, model, owner, transcript, order, nowStr } = ctx;
+  const msg = await anthropic.messages.create({
+    model,
+    max_tokens: 2048,
+    system: buildEditSystem(owner),
+    output_config: jsonFormat(EDIT_SCHEMA),
+    messages: [
+      {
+        role: "user",
+        content: buildEditUser({
+          eventJson: JSON.stringify(eventForLLM(ev)),
+          transcript,
+          latest: order,
+          nowStr,
+        }),
+      },
+    ],
+  });
+  const patch = readReply(msg);
+  console.log("EDIT RAW:", JSON.stringify(patch));
+  return patch;
+}
+
+// Build the Google patch from the change set (carrying current start/duration for
+// the correlated time fields), apply it, and report the new state back.
+async function applyEdit(ctx, eventId, ev, patch) {
+  const { env, number, send } = ctx;
+  const curStart = ev.start?.dateTime || null;
+  const curEnd = ev.end?.dateTime || null;
+  const curDurMin =
+    curStart && curEnd
+      ? Math.round((new Date(curEnd) - new Date(curStart)) / 60000)
+      : 45;
+
+  const body = {};
+  if (patch.new_title) body.summary = patch.new_title;
+  if (typeof patch.new_summary === "string" && patch.new_summary.trim())
+    body.description = patch.new_summary;
+
+  const durChanged = Number(patch.new_duration_min) > 0;
+  if (patch.new_start_iso || durChanged) {
+    const startIso = patch.new_start_iso || curStart;
+    const durMin = durChanged ? Number(patch.new_duration_min) : curDurMin;
+    const endIso = new Date(
+      new Date(startIso).getTime() + durMin * 60000
+    ).toISOString();
+    body.start = { dateTime: startIso, timeZone: CAL_TZ };
+    body.end = { dateTime: endIso, timeZone: CAL_TZ };
+  }
+
+  const add = (patch.add_emails || [])
+    .map((e) => String(e || "").trim())
+    .filter(Boolean);
+  const remove = new Set(
+    (patch.remove_emails || []).map((e) => String(e || "").trim().toLowerCase())
+  );
+  if (add.length || remove.size) {
+    const kept = (ev.attendees || [])
+      .map((a) => ({ email: a.email }))
+      .filter((a) => a.email && !remove.has(String(a.email).toLowerCase()));
+    const have = new Set(kept.map((a) => String(a.email).toLowerCase()));
+    for (const e of add) {
+      if (!have.has(e.toLowerCase())) {
+        kept.push({ email: e });
+        have.add(e.toLowerCase());
+      }
+    }
+    body.attendees = kept;
+  }
+
+  const updated = await patchEvent(env, eventId, body);
+
+  const finalStart = updated.start?.dateTime || null;
+  const finalEnd = updated.end?.dateTime || null;
+  const finalDur =
+    finalStart && finalEnd
+      ? Math.round((new Date(finalEnd) - new Date(finalStart)) / 60000)
+      : curDurMin;
+  await send(
+    number,
+    reply(ctx.lang).editDone({
+      title: updated.summary || patch.new_title || ev.summary || "(untitled)",
+      emails: (updated.attendees || []).map((a) => a.email).filter(Boolean).join(", "),
+      when: localizeDate(ctx.lang, finalStart),
+      duration: finalDur,
+      link: updated.htmlLink || "",
+    })
+  );
+}
+
+async function handleEdit(ctx, info) {
+  const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
+
+  // The event to change is the one whose invite the owner replied to.
+  const eventId = resolveEventId(quoted?.calendarLink);
+  if (!eventId) {
+    await send(number, reply(ctx.lang).editNeedSignal({ tag }));
+    return;
+  }
+
+  let ev;
+  try {
+    ev = await getEvent(env, eventId);
+  } catch (e) {
+    console.error("Calendar edit get error:", e?.response?.data || e?.message || e);
+    await send(number, reply(ctx.lang).editNoMatch());
+    return;
+  }
+  if (!ev || ev.status !== "confirmed") {
+    await send(number, reply(ctx.lang).editNoMatch());
+    return;
+  }
+
+  let patch;
+  try {
+    patch = await interpretEdit(ctx, ev);
+  } catch (e) {
+    console.error("edit interpret error:", e?.message || e);
+    await send(number, reply(ctx.lang).editCheckError());
+    return;
+  }
+  if (!patch) {
+    await send(number, reply(ctx.lang).editCheckError());
+    return;
+  }
+
+  // Ambiguous / missing detail → ask, keep the event id, resume on the answer.
+  if (patch.clarify && !hasEditChange(patch)) {
+    await sessions.set(
+      remoteJid,
+      {
+        skill: "calendar_action",
+        intent: "edit",
+        stage: "await_clarification",
+        awaitFrom: "owner", // only the owner edits their own event
+        lang: ctx.lang,
+        data: { eventId },
+      },
+      600 // 10 min window to answer
+    );
+    await send(number, reply(ctx.lang).editClarify(patch.clarify));
+    return;
+  }
+
+  if (!hasEditChange(patch)) {
+    await send(number, reply(ctx.lang).editNoChange());
+    return;
+  }
+
+  try {
+    await applyEdit(ctx, eventId, ev, patch);
+  } catch (e) {
+    console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
+    await send(number, reply(ctx.lang).editGoogleError());
+  }
+}
+
+// Resume a pending edit clarification. Runs for EVERY owner message while open:
+// re-inspect the (fresh) event against the answer; apply once it resolves, else stay
+// silent (chatter / still ambiguous) until a clearer answer or the session TTL.
+async function resumeEdit(ctx, session) {
+  const { number, env, send, sessions, remoteJid } = ctx;
+  const eventId = session.data?.eventId;
+  if (!eventId) {
+    await sessions.clear(remoteJid);
+    return;
+  }
+
+  let ev;
+  try {
+    ev = await getEvent(env, eventId);
+  } catch {
+    await sessions.clear(remoteJid); // event vanished — drop the stale session
+    return;
+  }
+  if (!ev || ev.status !== "confirmed") {
+    await sessions.clear(remoteJid);
+    return;
+  }
+
+  let patch;
+  try {
+    patch = await interpretEdit(ctx, ev);
+  } catch (e) {
+    console.error("edit resume interpret error:", e?.message || e);
+    return; // transient — keep the session, let them try again
+  }
+  if (!patch || !hasEditChange(patch)) return; // still ambiguous / chatter — wait
+
+  try {
+    await applyEdit(ctx, eventId, ev, patch);
+    await sessions.clear(remoteJid);
+  } catch (e) {
+    console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
+    await sessions.clear(remoteJid);
+    await send(number, reply(ctx.lang).editGoogleError());
   }
 }
 

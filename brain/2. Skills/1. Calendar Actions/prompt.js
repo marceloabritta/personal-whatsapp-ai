@@ -27,7 +27,7 @@ export const CAL_SCHEMA = {
   additionalProperties: false,
   required: ["action", "title", "participants", "start_iso", "duration_min", "summary"],
   properties: {
-    action: { type: "string", enum: ["create", "delete", "other"] },
+    action: { type: "string", enum: ["create", "delete", "edit", "other"] },
     title: { type: ["string", "null"] },
     participants: { type: "array", items: PARTICIPANT },
     start_iso: { type: ["string", "null"] },
@@ -71,6 +71,33 @@ export const RESOLVE_SCHEMA = {
   },
 };
 
+// The focused EDIT pass (Phase B). Given the current event and the owner's change
+// request, it returns ONLY the fields that change (null / empty when untouched) —
+// or, if the request is ambiguous or missing a needed detail, a short `clarify`
+// question with every change left null. Emails to add/remove are plain arrays.
+export const EDIT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "new_start_iso",
+    "new_duration_min",
+    "new_title",
+    "new_summary",
+    "add_emails",
+    "remove_emails",
+    "clarify",
+  ],
+  properties: {
+    new_start_iso: { type: ["string", "null"] },
+    new_duration_min: { type: ["number", "null"] },
+    new_title: { type: ["string", "null"] },
+    new_summary: { type: ["string", "null"] },
+    add_emails: { type: "array", items: { type: "string" } },
+    remove_emails: { type: "array", items: { type: "string" } },
+    clarify: { type: ["string", "null"] },
+  },
+};
+
 export function buildSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data. (Your reply's shape is enforced separately — here, focus on getting the values right.)
 
@@ -81,6 +108,12 @@ Choosing "action":
   Google Calendar link. If the quoted message has a calendar link and the order
   asks to cancel/delete/remove — or is just an affirmative like "yes"/"confirm"
   right after a cancellation was proposed — choose "delete".
+- "edit": ${OWNER_NAME} wants to CHANGE an EXISTING event — reschedule it (move to
+  another time/date), change its length/duration, add or remove an attendee, or
+  rename it. Like delete, this is almost always a REPLY to a message that contains a
+  Google Calendar link, but the order asks to move/change/reschedule/rename/add/remove
+  rather than call the whole event off. Choose "edit" (NOT "delete") whenever the event
+  survives with a modification; choose "delete" only when the event is cancelled entirely.
 - "other": none of the above.
 
 For action="create", fill these (for action="delete", ALSO fill participants and start_iso — see below):
@@ -95,7 +128,12 @@ For action="create", fill these (for action="delete", ALSO fill participants and
 For action="delete", also identify WHICH event to cancel so it can be matched on the calendar (the decoded link is only one signal):
 - participants: the people the event is WITH — read them (and their emails) from the quoted invite message and the conversation. Include emails whenever they appear (the invite text usually lists them).
 - start_iso: the event's date/time, taken from the quoted invite or the conversation, in ISO 8601 with -03:00.
-- Still fill "summary" with a short note of what is being cancelled.`;
+- Still fill "summary" with a short note of what is being cancelled.
+
+For action="edit", you only need to CLASSIFY it here — the specific change (new time,
+new duration, renamed title, added/removed attendee) is extracted in a following focused
+step from the real event. Fill the other fields with your best effort or leave them
+null/empty; they are not used for edits.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----
@@ -188,6 +226,37 @@ Recent conversation:
 ${transcript || "(none)"}
 
 Latest message: ${latest}`;
+}
+
+// ---- Phase B: focused EDIT resolver -----------------------------------------
+// The event to edit is already identified (from the replied-to calendar link) and
+// its CURRENT state is given. This pass reads the owner's change request and returns
+// ONLY what changes — or a `clarify` question when the request is ambiguous or missing
+// a needed detail (e.g. "move it earlier" without saying to when). One call keeps the
+// correlated fields (time + duration) consistent, same reasoning as create/review.
+export function buildEditSystem(OWNER_NAME) {
+  return `You are ${OWNER_NAME}'s calendar assistant. ${OWNER_NAME} wants to CHANGE an existing event. You are given the event's CURRENT state, the recent conversation, and ${OWNER_NAME}'s latest change request. Return ONLY the fields that should change; leave everything else null or empty.
+
+- new_start_iso: the event's NEW start, ISO 8601 with the -03:00 offset, resolving relative times ("4pm", "tomorrow", "move it 30 min later") against the current date/time and the event's current start. null if the time/date is NOT changing.
+- new_duration_min: the NEW length in minutes if the request changes it ("make it 30 min", "an hour instead"). null if the duration is NOT changing. Changing only the start does NOT change the duration.
+- new_title: the NEW short calendar heading if the request renames it. null otherwise.
+- new_summary: a NEW one-line agenda/description if the request changes it. null otherwise.
+- add_emails: array of email addresses to ADD as attendees (["carlos@x.com"]). Empty array if none. Only include addresses that actually appear in the request/conversation — NEVER invent one.
+- remove_emails: array of email addresses to REMOVE from the attendees. Empty array if none.
+- clarify: if the request is AMBIGUOUS or missing a detail you need (e.g. "move it earlier"/"push it back" with no target time, or "add João" with no email on record), set this to a SHORT question asking for exactly that, and leave every change field null/empty. Otherwise clarify=null.
+
+Rules: change ONLY what the latest request asks; never guess a time or an email; if you cannot resolve a needed value, ask via clarify instead of guessing.`;
+}
+
+export function buildEditUser({ eventJson, transcript, latest, nowStr }) {
+  return `Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
+Current EVENT being edited:
+${eventJson}
+
+Recent conversation:
+${transcript || "(none)"}
+
+Change request: ${latest}`;
 }
 
 // Builds the "user" message sent along with the system prompt.
@@ -299,6 +368,18 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
     },
     deleteGoogleError: () =>
       "I found the event but failed to cancel it in Google. Error in the log.",
+    editNeedSignal: ({ tag }) =>
+      `To change an event, reply to its invite message with the change (e.g. "move it to 4pm") and call ${tag}.`,
+    editNoMatch: () =>
+      "I couldn't find that event — it may have been cancelled, or the invite link didn't resolve. Reply to its invite message and try again.",
+    editCheckError: () => "I hit an error reading the calendar. Try again?",
+    editClarify: (question) => question,
+    editNoChange: () =>
+      "I couldn't tell what to change. Tell me the new time, duration, title, or which attendee to add/remove.",
+    editDone: ({ title, when, duration, emails, link }) =>
+      `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
+    editGoogleError: () =>
+      "I understood the change but failed to update it in Google. Error in the log.",
   },
   pt: {
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
@@ -351,6 +432,19 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
     },
     deleteGoogleError: () =>
       "Encontrei o evento, mas não consegui cancelar no Google. O erro está no log.",
+    editNeedSignal: ({ tag }) =>
+      `Para alterar um evento, responda à mensagem do convite com a mudança (ex.: "muda para 16h") e chame ${tag}.`,
+    editNoMatch: () =>
+      "Não encontrei esse evento — pode ter sido cancelado, ou o link do convite não resolveu. Responda à mensagem do convite e tente de novo.",
+    editCheckError: () =>
+      "Tive um erro ao ler o calendário. Pode tentar de novo?",
+    editClarify: (question) => question,
+    editNoChange: () =>
+      "Não consegui entender o que mudar. Me diga o novo horário, a duração, o título, ou qual participante adicionar/remover.",
+    editDone: ({ title, when, duration, emails, link }) =>
+      `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
+    editGoogleError: () =>
+      "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
   },
 };
 
