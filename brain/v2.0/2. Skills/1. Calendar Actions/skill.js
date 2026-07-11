@@ -88,7 +88,15 @@ function resolveEventId(link) {
 
 function whenStr(dateTime) {
   return dateTime
-    ? new Date(dateTime).toLocaleString("en-US", { timeZone: CAL_TZ })
+    ? new Date(dateTime).toLocaleString("en-US", {
+        timeZone: CAL_TZ,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true, // hh:mm AM/PM, no seconds
+      })
     : "(no time)";
 }
 
@@ -187,7 +195,9 @@ async function handleCreate(ctx, info) {
       number,
       `Done! Invite created and sent:\n- ${title}\n- ${emails.join(
         ", "
-      )}\n- ${whenStr(info.start_iso)} (${dur} min)\n${ev.htmlLink || ""}`
+      )}\n- ${whenStr(info.start_iso)} (${dur} min)\n\nHere is a link for the event:\n${
+        ev.htmlLink || ""
+      }`
     );
   } catch (e) {
     console.error("Calendar error:", e?.response?.data || e?.message || e);
