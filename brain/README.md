@@ -14,7 +14,7 @@ brain/
 │   ├── .env.example
 │   ├── lib/                 #   shared utilities
 │   │   ├── whatsapp.js      #     extract text, detect quoted audio, buffer, transcript
-│   │   ├── evolution.js     #     send/fetch messages and download media (base64) from Evolution
+│   │   ├── evolution.js     #     sendText/sendMedia (documents), fetch history, download media (base64)
 │   │   └── sessions.js      #     per-chat conversation state in Redis (confirmations, clarifications)
 │   └── router/
 │       ├── prompt.js        #     classification prompt (lists the catalog's skills)
@@ -26,9 +26,12 @@ brain/
     ├── 2. Audio transcriptions/
     │   ├── skill.js         #   export { manifest, run } — transcribes via AssemblyAI
     │   └── prompt.js        #   reply texts (this skill does not use an LLM)
-    └── 3. Tasks/
-        ├── skill.js         #   export { manifest, run } — Google Tasks (self) / delegates a task-for-others to Calendar
-        └── prompt.js        #   interpret/review prompts, JSON Schemas, localized reply() strings
+    ├── 3. Tasks/
+    │   ├── skill.js         #   export { manifest, run } — Google Tasks (self) / delegates a task-for-others to Calendar
+    │   └── prompt.js        #   interpret/review prompts, JSON Schemas, localized reply() strings
+    └── 4. Feature Requests/
+        ├── skill.js         #   export { manifest, run } — clarify conversation → Markdown spec sent as a .md document
+        └── prompt.js        #   clarify prompt + CLARIFY_SCHEMA, English doc prompt, slugify, localized reply() strings
 ```
 
 ## How a skill is discovered

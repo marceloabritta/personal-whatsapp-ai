@@ -41,6 +41,7 @@ You type "@brain ..." in a chat
                               │ transcribe_audio  → AssemblyAI
                               │ task_action       → Google Tasks (self)
                               │                     ↳ Calendar (task for others)
+                              │ feature_request   → .md spec document
                               └─────────────┘
                                     │
                                     ▼
@@ -52,6 +53,7 @@ You type "@brain ..." in a chat
 - **`calendar_action`** — reads the chat and either **creates** or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. (Edit/reschedule is planned, not yet built.)
 - **`transcribe_audio`** — reply to a voice message and type `@brain transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
 - **`task_action`** — your to-do inbox. Add a todo (`@brain add "buy flight" to my todos`), hear your list, or check one off. A todo for **yourself** goes to your private **Google Tasks** list (created instantly, with a short window to correct it); a todo assigned to **someone else** becomes a 5-minute **Calendar** invite so they're notified by email. Google Tasks due dates are date-only.
+- **`feature_request`** — capture a new feature idea by talking it through. Start with `@brain I have a feature idea…`; the brain becomes stateful and **interviews you** until the feature is clear, then writes a **Markdown spec** (from the user's point of view) and sends it as a saveable `.md` document you can drop into your repo. The conversation follows your language; the document is always written in English.
 
 Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. A skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else). See `brain/README.md`.
 

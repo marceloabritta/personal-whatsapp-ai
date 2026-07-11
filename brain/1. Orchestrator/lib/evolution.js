@@ -21,6 +21,20 @@ export function createEvolution({ url, apikey, instance }) {
     return res.ok;
   }
 
+  // Sends a MEDIA message (document / image / …) as base64. Used by feature_request
+  // to deliver the generated spec as a real, saveable `.md` document
+  // (mediatype:"document", mimetype:"text/markdown"). Like sendText, the [AI Brain]:
+  // header framing is the CALLER's job — pass it inside `caption`. Returns res.ok.
+  async function sendMedia(number, { mediatype, mimetype, media, fileName, caption }) {
+    const res = await fetch(`${base}/message/sendMedia/${instance}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ number, mediatype, mimetype, media, fileName, caption }),
+    });
+    if (!res.ok) console.error("sendMedia failed", res.status, await res.text());
+    return res.ok;
+  }
+
   // Fetches a conversation's history and normalizes to { t, fromMe, text, pushName }.
   async function fetchHistory(remoteJid) {
     try {
@@ -69,5 +83,5 @@ export function createEvolution({ url, apikey, instance }) {
     return { base64: data.base64, mimetype: data.mimetype || "audio/ogg" };
   }
 
-  return { sendText, fetchHistory, getMediaBase64 };
+  return { sendText, sendMedia, fetchHistory, getMediaBase64 };
 }

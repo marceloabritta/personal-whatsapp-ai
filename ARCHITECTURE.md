@@ -150,6 +150,25 @@ Body: { "number": "5531999...", "text": "[AI Brain]:\n\n..." }
 The reply goes to the originating chat. In a group, the confirmation is visible to
 everyone (a private-reply option is on the roadmap).
 
+### 8b. skill → Evolution (send a document) — feature_request
+
+The `feature_request` skill holds a stateful clarifying conversation (per-chat session,
+`awaitFrom: "owner"`) and, when the owner says he's done, renders a Markdown feature spec
+and delivers it as a real, saveable file:
+```
+POST http://api:8080/message/sendMedia/secretary
+apikey: <AUTHENTICATION_API_KEY>
+Body: { "number": "5531999...", "mediatype": "document", "mimetype": "text/markdown",
+        "media": "<base64 of the .md>", "fileName": "feature-<slug>.md",
+        "caption": "[AI Brain]:\n\n..." }
+```
+The caption carries the `[AI Brain]:` header (media framing is the caller's job, like
+`sendText`). The **conversation** follows `ctx.lang`, but the **document body is always
+English** by design — it's destined for the owner's (English) codebase; only the caption
+localizes (see the localization note below). This is the only skill that sends a file;
+`evolution.sendMedia` was added for it (additive to `sendText`/`fetchHistory`/
+`getMediaBase64`).
+
 ## Environment variables
 
 **brain (`/opt/brain/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
@@ -214,3 +233,10 @@ unmaintained languages, **not** a substitute for authoring `en`/`pt`. Never tran
 English. Maintained languages today: **en + pt-BR**. The map is **per-skill** (in each
 skill's `prompt.js`) — deliberately *not* a central `i18n.js` catalog; prose stays with the
 skill that owns it. Live in production since 2026-07-11.
+
+**One deliberate exception — generated artifacts.** A skill may pin a *generated
+document* to a fixed language even though its chat replies follow `ctx.lang`.
+`feature_request` writes its `.md` spec **always in English** (the artifact is for the
+owner's English codebase) while the clarifying conversation and the file's caption still
+follow `ctx.lang`. The rule stands for user-facing chat prose; a saved artifact can opt
+out.

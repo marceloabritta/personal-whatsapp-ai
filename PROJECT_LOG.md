@@ -138,7 +138,8 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │   └── 2. Skills/
 │       ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete; exports capabilities.startCreate
 │       ├── 2. Audio transcriptions/{skill,prompt}.js
-│       └── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
+│       ├── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
+│       └── 4. Feature Requests/{skill,prompt}.js   # clarify conversation → Markdown spec sent as a .md document
 └── evolution/
     ├── docker-compose.yml # Evolution API + Postgres + Redis + brain
     └── .env.example
@@ -301,6 +302,13 @@ the `/webhook/set/secretary` call (see README §Setup step 4).
   `pt` for Portuguese). Note: AssemblyAI is a US cloud service — audio bytes leave the
   droplet, which is the one place the self-hosted privacy model is broken. A self-hosted
   Whisper is the alternative if that matters.
+- **Evolution media SEND (feature spec doc) — ⚠ UNVERIFIED contract.** `POST
+  /message/sendMedia/{instance}` with `{ number, mediatype:"document",
+  mimetype:"text/markdown", media:<base64>, fileName, caption }`. Used by `feature_request`
+  (`evolution.sendMedia`) to deliver the generated `.md` as a document. Field names follow
+  the Evolution v2 API but were **not yet confirmed against the running image** — verify
+  with one send (or check the instance's Swagger) before relying on it; adjust if the image
+  expects a nested `mediaMessage`/`options` shape.
 - **Evolution media download (transcription):** `POST
   /chat/getBase64FromMediaMessage/{instance}` with `{message:{key:{id}},convertToMp4}` →
   `{base64, mimetype}`. **Requires `DATABASE_SAVE_DATA_NEW_MESSAGE=true`** in the
@@ -341,6 +349,22 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — feature-request skill (DEPLOYED).** New `feature_request`
+  skill (`2. Skills/4. Feature Requests/`): the owner messages himself a feature idea
+  (`@brain I have a feature idea…`); the brain becomes **stateful and interviews him** —
+  one structured `clarifyTurn` per message (`CLARIFY_SCHEMA`) that folds each answer into a
+  running `draft`, decides `clarifying`/`finalize`/`cancel`, and generates the next
+  question in `ctx.lang`. On a done-signal it renders a Markdown feature spec (from the
+  user's POV) and delivers it as a real `.md` **document** via the new
+  `evolution.sendMedia` (`POST /message/sendMedia`, base64). The conversation follows
+  `ctx.lang` but the **document is always English** (destined for the codebase) — a
+  documented exception to the localization convention. No new env, no OAuth scope, no
+  orchestrator/router edit; only shared change is the additive `sendMedia` on the Evolution
+  client. **Shipped WITHOUT probing the `/message/sendMedia` contract** (owner's call) — if
+  the field names differ on the running image the conversation still works and `finalize`
+  replies `sendFailed()` + logs the HTTP error; verify from logs / fix forward (see §8).
+  Docs: `2. Skills/4. Feature Requests/SKILL.md`, ARCHITECTURE flow step 8b + localization
+  exception, ORCHESTRATOR external-touchpoints note.
 - **2026-07-11 — task capture skill + cross-skill capability registry (BUILT, not yet
   deployed).** New `task_action` skill (`2. Skills/3. Tasks/`): a to-do inbox backed by
   Google Tasks. A to-do for **yourself** is created immediately in Google Tasks, then a

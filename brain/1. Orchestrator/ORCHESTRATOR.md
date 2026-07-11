@@ -166,6 +166,10 @@ calendar invite by calling `calendar_action.startCreate`, never re-implementing 
 
 ### External touchpoints, timeouts, completion
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.
+  A skill may also call `evolution.sendMedia({ mediatype, mimetype, media, fileName,
+  caption })` (`POST /message/sendMedia`, base64 `media`) to deliver a file — the caller
+  frames the `[AI Brain]:` header inside `caption`, exactly as `send()` does for text.
+  Used by `feature_request` to send its generated `.md` spec as a document.
 - **Anthropic:** one router call per **fresh** command (continuations skip it; the skill
   does its own LLM work).
 - **Redis:** one `get` per inbound message; `set`/`clear` are driven by skills.
