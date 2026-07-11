@@ -98,6 +98,35 @@ export const EDIT_SCHEMA = {
   },
 };
 
+// The confirm-step review for edit (mirrors REVIEW_SCHEMA for create): the same change
+// fields as EDIT_SCHEMA PLUS a `decision`. Runs for each owner message while confirming
+// a pending edit — classifies confirm/modify/cancel/unrelated and, for a modify, carries
+// the further change to fold onto the draft.
+export const EDIT_REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "decision",
+    "new_start_iso",
+    "new_duration_min",
+    "new_title",
+    "new_summary",
+    "add_emails",
+    "remove_emails",
+    "clarify",
+  ],
+  properties: {
+    decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
+    new_start_iso: { type: ["string", "null"] },
+    new_duration_min: { type: ["number", "null"] },
+    new_title: { type: ["string", "null"] },
+    new_summary: { type: ["string", "null"] },
+    add_emails: { type: "array", items: { type: "string" } },
+    remove_emails: { type: "array", items: { type: "string" } },
+    clarify: { type: ["string", "null"] },
+  },
+};
+
 export function buildSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data. (Your reply's shape is enforced separately — here, focus on getting the values right.)
 
@@ -259,6 +288,35 @@ ${transcript || "(none)"}
 Change request: ${latest}`;
 }
 
+// ---- Phase B: confirm-step review (edit) ------------------------------------
+// After proposing the edited event, the brain shows the target state and asks the owner
+// to confirm. This runs for EVERY owner message while that session is open: it BOTH
+// classifies the reply AND, when the owner asks for a further change, returns the change
+// to fold onto the draft (one call keeps the correlated fields consistent — same as
+// create's review). The "event" shown is the PROPOSED target (with changes so far).
+export function buildEditReviewSystem(OWNER_NAME) {
+  return `You are ${OWNER_NAME}'s calendar assistant. You already PROPOSED an edit to an existing event and asked ${OWNER_NAME} to confirm it. Read the PROPOSED event (its current target state, including changes so far), the recent conversation, and ${OWNER_NAME}'s LATEST message, then decide what that latest message means for the pending edit.
+
+Choose the "decision":
+- "confirm": the latest message approves the edited event as shown (e.g. yes, confirm, go ahead, save it, sim, pode, isso).
+- "modify": the latest message asks for a FURTHER change (a different time, duration, title, or adding/removing an attendee). Return the change fields to apply ON TOP of the proposed event; leave the others null/empty. If the further change is ambiguous (e.g. "earlier" with no target), set "clarify" to a short question and leave the change fields null.
+- "cancel": the latest message calls the edit off / wants to keep the event as it was (e.g. no, leave it, forget it, deixa, mantém).
+- "unrelated": normal conversation, NOT a response to this confirmation. If unsure, choose "unrelated".
+
+Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, add_emails[], remove_emails[]. Change ONLY what the latest message asks; never invent a time or an email — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.`;
+}
+
+export function buildEditReviewUser({ eventJson, transcript, latest, nowStr }) {
+  return `Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
+PROPOSED event (target state, changes applied so far):
+${eventJson}
+
+Recent conversation:
+${transcript || "(none)"}
+
+Latest message: ${latest}`;
+}
+
 // Builds the "user" message sent along with the system prompt.
 export function buildUserPrompt(
   OWNER_NAME,
@@ -376,6 +434,14 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
     editClarify: (question) => question,
     editNoChange: () =>
       "I couldn't tell what to change. Tell me the new time, duration, title, or which attendee to add/remove.",
+    editConfirm: ({ title, emails, when, duration }) =>
+      `Here's the updated event:
+- ${title}
+- ${emails}
+- ${when} (${duration} min)
+
+Reply "yes" to save and notify everyone, or tell me what else to change.`,
+    editCancelled: ({ title }) => `Okay, I'll leave "${title}" as it was.`,
     editDone: ({ title, when, duration, emails, link }) =>
       `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
     editGoogleError: () =>
@@ -441,6 +507,14 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
     editClarify: (question) => question,
     editNoChange: () =>
       "Não consegui entender o que mudar. Me diga o novo horário, a duração, o título, ou qual participante adicionar/remover.",
+    editConfirm: ({ title, emails, when, duration }) =>
+      `Aqui está o evento atualizado:
+- ${title}
+- ${emails}
+- ${when} (${duration} min)
+
+Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.`,
+    editCancelled: ({ title }) => `Ok, vou deixar "${title}" como estava.`,
     editDone: ({ title, when, duration, emails, link }) =>
       `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
     editGoogleError: () =>

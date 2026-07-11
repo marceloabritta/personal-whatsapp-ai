@@ -24,11 +24,14 @@ import {
   buildResolveUser,
   buildEditSystem,
   buildEditUser,
+  buildEditReviewSystem,
+  buildEditReviewUser,
   CAL_SCHEMA,
   CONFIRM_SCHEMA,
   REVIEW_SCHEMA,
   RESOLVE_SCHEMA,
   EDIT_SCHEMA,
+  EDIT_REVIEW_SCHEMA,
   reply,
   localizeDate,
 } from "./prompt.js";
@@ -336,7 +339,10 @@ export async function run(ctx) {
     return resumeCreate(ctx, session);
   }
   if (session?.intent === "edit" && session.stage === "await_clarification") {
-    return resumeEdit(ctx, session);
+    return resumeEditClarify(ctx, session);
+  }
+  if (session?.intent === "edit" && session.stage === "await_confirmation") {
+    return resumeEditConfirm(ctx, session);
   }
 
   let info;
@@ -706,12 +712,12 @@ async function inspectMissing(ctx, draft, m) {
 
 // ---- EDIT / RESCHEDULE (Phase B) -------------------------------------------
 // Change an EXISTING event the owner REPLIED to (its calendar link): move it,
-// relength it, rename it, add/remove an attendee. The target event is resolved
-// straight from the quoted link; a FOCUSED LLM pass reads the change request against
-// the event's real current state and returns only what changes — or a `clarify`
-// question when the request is ambiguous (e.g. "move it earlier" with no target),
-// which opens a short session and resumes on the owner's answer. Unlike delete,
-// an unambiguous edit applies immediately (it is not destructive).
+// relength it, rename it, add/remove an attendee. Like create, edit is now
+// CONFIRM-FIRST and stays open: the change is applied to a DRAFT of the event's
+// target state, shown for confirmation, and only written to Google on the owner's
+// "yes". While the confirm session is open the owner can keep refining the same
+// event tagless ("actually 4:30", "also add bruno@x.com") — same review machinery
+// as create (confirm | modify | cancel | unrelated). Nothing is written until "yes".
 
 // Compact view of the real event handed to the focused edit pass.
 function eventForLLM(ev) {
@@ -728,6 +734,22 @@ function eventForLLM(ev) {
   };
 }
 
+// The editable DRAFT = the event's target state. Seeded from the current event, then
+// each requested change is folded in; the confirm writes it to Google.
+function editDraftFromEvent(ev) {
+  const start = ev.start?.dateTime || null;
+  const end = ev.end?.dateTime || null;
+  const duration_min =
+    start && end ? Math.round((new Date(end) - new Date(start)) / 60000) : 45;
+  return {
+    title: ev.summary || "",
+    start_iso: start,
+    duration_min,
+    summary: ev.description || "",
+    emails: (ev.attendees || []).map((a) => a.email).filter(Boolean),
+  };
+}
+
 // Does the patch actually change anything? (An all-null/empty patch means the model
 // couldn't extract a change — distinct from a `clarify` question.)
 function hasEditChange(p) {
@@ -741,9 +763,48 @@ function hasEditChange(p) {
   );
 }
 
-// The focused EDIT pass: given the real event + the change request, resolve only the
-// changed fields (or a clarify question). Throws on API error (callers handle it);
-// returns null on a refusal/unparseable reply.
+// Fold a change patch onto the draft (immutably): overwrite the touched fields, merge
+// attendees (case-insensitive remove, then dedup add). Untouched fields carry over.
+function applyPatchToDraft(draft, patch) {
+  const d = { ...draft, emails: [...draft.emails] };
+  if (patch.new_title) d.title = patch.new_title;
+  if (typeof patch.new_summary === "string" && patch.new_summary.trim())
+    d.summary = patch.new_summary;
+  if (patch.new_start_iso) d.start_iso = patch.new_start_iso;
+  if (Number(patch.new_duration_min) > 0) d.duration_min = Number(patch.new_duration_min);
+
+  const remove = new Set(
+    (patch.remove_emails || []).map((e) => String(e || "").trim().toLowerCase())
+  );
+  d.emails = d.emails.filter((e) => !remove.has(String(e).toLowerCase()));
+  const have = new Set(d.emails.map((e) => String(e).toLowerCase()));
+  for (const e of (patch.add_emails || []).map((x) => String(x || "").trim()).filter(Boolean)) {
+    if (!have.has(e.toLowerCase())) {
+      d.emails.push(e);
+      have.add(e.toLowerCase());
+    }
+  }
+  return d;
+}
+
+// The draft rendered as an "event" for the review LLM (so it judges against the
+// currently-proposed target, not the original).
+function draftAsEventJson(d) {
+  const end_iso = d.start_iso
+    ? new Date(new Date(d.start_iso).getTime() + d.duration_min * 60000).toISOString()
+    : null;
+  return JSON.stringify({
+    title: d.title,
+    start_iso: d.start_iso,
+    end_iso,
+    duration_min: d.duration_min,
+    attendees: d.emails,
+  });
+}
+
+// The focused EDIT extraction (first pass): given the real event + the change request,
+// resolve only the changed fields (or a clarify question). Throws on API error (callers
+// handle it); returns null on a refusal/unparseable reply.
 async function interpretEdit(ctx, ev) {
   const { anthropic, model, owner, transcript, order, nowStr } = ctx;
   const msg = await anthropic.messages.create({
@@ -768,65 +829,97 @@ async function interpretEdit(ctx, ev) {
   return patch;
 }
 
-// Build the Google patch from the change set (carrying current start/duration for
-// the correlated time fields), apply it, and report the new state back.
-async function applyEdit(ctx, eventId, ev, patch) {
-  const { env, number, send } = ctx;
-  const curStart = ev.start?.dateTime || null;
-  const curEnd = ev.end?.dateTime || null;
-  const curDurMin =
-    curStart && curEnd
-      ? Math.round((new Date(curEnd) - new Date(curStart)) / 60000)
-      : 45;
-
-  const body = {};
-  if (patch.new_title) body.summary = patch.new_title;
-  if (typeof patch.new_summary === "string" && patch.new_summary.trim())
-    body.description = patch.new_summary;
-
-  const durChanged = Number(patch.new_duration_min) > 0;
-  if (patch.new_start_iso || durChanged) {
-    const startIso = patch.new_start_iso || curStart;
-    const durMin = durChanged ? Number(patch.new_duration_min) : curDurMin;
-    const endIso = new Date(
-      new Date(startIso).getTime() + durMin * 60000
-    ).toISOString();
-    body.start = { dateTime: startIso, timeZone: CAL_TZ };
-    body.end = { dateTime: endIso, timeZone: CAL_TZ };
-  }
-
-  const add = (patch.add_emails || [])
-    .map((e) => String(e || "").trim())
-    .filter(Boolean);
-  const remove = new Set(
-    (patch.remove_emails || []).map((e) => String(e || "").trim().toLowerCase())
-  );
-  if (add.length || remove.size) {
-    const kept = (ev.attendees || [])
-      .map((a) => ({ email: a.email }))
-      .filter((a) => a.email && !remove.has(String(a.email).toLowerCase()));
-    const have = new Set(kept.map((a) => String(a.email).toLowerCase()));
-    for (const e of add) {
-      if (!have.has(e.toLowerCase())) {
-        kept.push({ email: e });
-        have.add(e.toLowerCase());
-      }
+// The confirm-step review (runs for every owner message while confirming): one call
+// that BOTH classifies (confirm | modify | cancel | unrelated) AND, for a modify,
+// returns the further change to fold in. Null on doubt/error → caller ignores silently.
+async function reviewEdit(ctx, draft) {
+  const { anthropic, model, owner, transcript, order, nowStr } = ctx;
+  try {
+    const msg = await anthropic.messages.create({
+      model,
+      max_tokens: 2048,
+      system: buildEditReviewSystem(owner),
+      output_config: jsonFormat(EDIT_REVIEW_SCHEMA),
+      messages: [
+        {
+          role: "user",
+          content: buildEditReviewUser({
+            eventJson: draftAsEventJson(draft),
+            transcript,
+            latest: order,
+            nowStr,
+          }),
+        },
+      ],
+    });
+    const parsed = readReply(msg);
+    console.log("EDIT REVIEW RAW:", JSON.stringify(parsed));
+    if (!parsed) return null;
+    if (!["confirm", "modify", "cancel", "unrelated"].includes(parsed.decision)) {
+      parsed.decision = "unrelated";
     }
-    body.attendees = kept;
+    return parsed;
+  } catch (e) {
+    console.error("edit review error:", e?.message || e);
+    return null; // on error, do nothing (safe)
+  }
+}
+
+// Open (or refresh) the confirm session holding the draft, and show the target state.
+// The owner's next plain message resumes via resumeEditConfirm. 10-min window.
+async function openEditConfirm(ctx, eventId, draft) {
+  const { number, send, sessions, remoteJid } = ctx;
+  await sessions.set(
+    remoteJid,
+    {
+      skill: "calendar_action",
+      intent: "edit",
+      stage: "await_confirmation",
+      awaitFrom: "owner", // only the owner approves changes to their event
+      lang: ctx.lang,
+      data: { eventId, draft },
+    },
+    600
+  );
+  await send(
+    number,
+    reply(ctx.lang).editConfirm({
+      title: draft.title,
+      emails: draft.emails.join(", "),
+      when: localizeDate(ctx.lang, draft.start_iso),
+      duration: draft.duration_min,
+    })
+  );
+}
+
+// Write the confirmed draft to Google (patch the existing event) and report back.
+async function applyEditDraft(ctx, eventId, draft) {
+  const { env, number, send } = ctx;
+  const body = {
+    summary: draft.title,
+    description: draft.summary || "",
+    attendees: draft.emails.map((email) => ({ email })),
+  };
+  if (draft.start_iso) {
+    const endIso = new Date(
+      new Date(draft.start_iso).getTime() + draft.duration_min * 60000
+    ).toISOString();
+    body.start = { dateTime: draft.start_iso, timeZone: CAL_TZ };
+    body.end = { dateTime: endIso, timeZone: CAL_TZ };
   }
 
   const updated = await patchEvent(env, eventId, body);
 
-  const finalStart = updated.start?.dateTime || null;
+  const finalStart = updated.start?.dateTime || draft.start_iso || null;
   const finalEnd = updated.end?.dateTime || null;
   const finalDur =
     finalStart && finalEnd
       ? Math.round((new Date(finalEnd) - new Date(finalStart)) / 60000)
-      : curDurMin;
+      : draft.duration_min;
   await send(
     number,
     reply(ctx.lang).editDone({
-      title: updated.summary || patch.new_title || ev.summary || "(untitled)",
+      title: updated.summary || draft.title || "(untitled)",
       emails: (updated.attendees || []).map((a) => a.email).filter(Boolean).join(", "),
       when: localizeDate(ctx.lang, finalStart),
       duration: finalDur,
@@ -871,7 +964,8 @@ async function handleEdit(ctx, info) {
     return;
   }
 
-  // Ambiguous / missing detail → ask, keep the event id, resume on the answer.
+  // Ambiguous / missing detail → ask, keep the event id, resume on the answer (which
+  // then rolls into the confirm below).
   if (patch.clarify && !hasEditChange(patch)) {
     await sessions.set(
       remoteJid,
@@ -894,19 +988,16 @@ async function handleEdit(ctx, info) {
     return;
   }
 
-  try {
-    await applyEdit(ctx, eventId, ev, patch);
-  } catch (e) {
-    console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).editGoogleError());
-  }
+  // Confirm-first: fold the change into a draft and ask before writing anything.
+  const draft = applyPatchToDraft(editDraftFromEvent(ev), patch);
+  await openEditConfirm(ctx, eventId, draft);
 }
 
-// Resume a pending edit clarification. Runs for EVERY owner message while open:
-// re-inspect the (fresh) event against the answer; apply once it resolves, else stay
-// silent (chatter / still ambiguous) until a clearer answer or the session TTL.
-async function resumeEdit(ctx, session) {
-  const { number, env, send, sessions, remoteJid } = ctx;
+// Resume a pending edit CLARIFICATION (the first request was ambiguous). Re-inspect the
+// fresh event against the answer; once it resolves to a concrete change, roll into the
+// confirm; else stay silent (chatter / still ambiguous) until answered or the TTL.
+async function resumeEditClarify(ctx, session) {
+  const { env, sessions, remoteJid } = ctx;
   const eventId = session.data?.eventId;
   if (!eventId) {
     await sessions.clear(remoteJid);
@@ -929,13 +1020,58 @@ async function resumeEdit(ctx, session) {
   try {
     patch = await interpretEdit(ctx, ev);
   } catch (e) {
-    console.error("edit resume interpret error:", e?.message || e);
+    console.error("edit clarify interpret error:", e?.message || e);
     return; // transient — keep the session, let them try again
   }
   if (!patch || !hasEditChange(patch)) return; // still ambiguous / chatter — wait
 
+  const draft = applyPatchToDraft(editDraftFromEvent(ev), patch);
+  await openEditConfirm(ctx, eventId, draft);
+}
+
+// Resume a pending edit CONFIRMATION. Runs for every owner message while open: one
+// review call classifies + (for a change) re-drafts, then acts. Stays open across
+// multiple refinements; silent on chatter; writes to Google only on "yes".
+async function resumeEditConfirm(ctx, session) {
+  const { number, env, send, sessions, remoteJid } = ctx;
+  const { eventId, draft } = session.data || {};
+  if (!eventId || !draft) {
+    await sessions.clear(remoteJid);
+    return;
+  }
+
+  const review = await reviewEdit(ctx, draft);
+  if (!review || review.decision === "unrelated") return; // not for us — ignore
+
+  if (review.decision === "cancel") {
+    await sessions.clear(remoteJid);
+    await send(number, reply(ctx.lang).editCancelled({ title: draft.title }));
+    return;
+  }
+
+  if (review.decision === "modify") {
+    // Ambiguous further change → ask and keep the session (draft unchanged).
+    if (!hasEditChange(review) && review.clarify) {
+      await openEditConfirm(ctx, eventId, draft); // refresh TTL, keep draft
+      await send(number, reply(ctx.lang).editClarify(review.clarify));
+      return;
+    }
+    if (!hasEditChange(review)) return; // nothing new resolved — stay silent
+    const updated = applyPatchToDraft(draft, review);
+    await openEditConfirm(ctx, eventId, updated); // re-show the revised draft, keep open
+    return;
+  }
+
+  // decision === "confirm" — write it now.
   try {
-    await applyEdit(ctx, eventId, ev, patch);
+    // Re-check the event still exists before patching (it may have been deleted).
+    const ev = await getEvent(env, eventId);
+    if (!ev || ev.status !== "confirmed") {
+      await sessions.clear(remoteJid);
+      await send(number, reply(ctx.lang).editNoMatch());
+      return;
+    }
+    await applyEditDraft(ctx, eventId, draft);
     await sessions.clear(remoteJid);
   } catch (e) {
     console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
