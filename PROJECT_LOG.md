@@ -122,11 +122,11 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 ├── PROJECT_LOG.md         # this file — the project registry
 ├── LICENSE                # MIT
 ├── .gitignore
-├── New Features Plans/    # per-feature implementation plans (not yet built)
+├── New Features Plans/    # per-feature implementation plans
 │   ├── calendar-actions.md     #   smart scheduling + edit/reschedule (next up)
 │   ├── message-summarizer.md
 │   ├── reminders-followups.md
-│   └── task-capture.md
+│   └── task-capture.md         #   BUILT (task_action); pending OAuth tasks-scope to deploy
 ├── brain/                 # the app — run this (v1.0 removed; in git history)
 │   ├── package.json       #   at the brain/ ROOT (shared node_modules for orchestrator+skills)
 │   ├── .env.example
@@ -136,8 +136,9 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │   │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
 │   │   └── router/{prompt,router}.js
 │   └── 2. Skills/
-│       ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete
-│       └── 2. Audio transcriptions/{skill,prompt}.js
+│       ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete; exports capabilities.startCreate
+│       ├── 2. Audio transcriptions/{skill,prompt}.js
+│       └── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
 └── evolution/
     ├── docker-compose.yml # Evolution API + Postgres + Redis + brain
     └── .env.example
@@ -282,6 +283,13 @@ the `/webhook/set/secretary` call (see README §Setup step 4).
   makes Google email the invite / the cancellation. Used by `calendar_action`
   (`events.insert` to create, `events.get` + `events.delete` to cancel; the event id
   is decoded from the invite link's `eid`).
+- **Google Tasks:** SAME OAuth client, but the refresh token must ALSO carry the
+  `https://www.googleapis.com/auth/tasks` scope — re-consent with **both** calendar +
+  tasks scopes at once (a wrong re-consent drops calendar). Used by `task_action`
+  (`tasks.insert`/`list`/`patch`/`delete` on `GOOGLE_TASKLIST_ID || "@default"`). `due`
+  is **date-only** (stored at UTC midnight). Without the scope, calls 401 and the skill
+  replies `failed()`. A to-do assigned to another person is created as a Calendar invite
+  instead (via the capability registry) — Tasks itself notifies no one.
 - **Redis (brain session state):** in addition to being Evolution's cache, the brain
   stores per-chat conversation state in Redis (`lib/sessions.js`, key prefix
   `brain:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
@@ -333,6 +341,18 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — task capture skill + cross-skill capability registry (BUILT, not yet
+  deployed).** New `task_action` skill (`2. Skills/3. Tasks/`): a to-do inbox backed by
+  Google Tasks. A to-do for **yourself** is created immediately in Google Tasks, then a
+  short **amend window** (session) lets you correct/delete it with no confirm step; **list**
+  reads open tasks; **complete** is confirm-first. A to-do for **someone else** is delegated
+  to `calendar_action` as a 5-min invite (15:00 on the due date) so they're emailed — via a
+  new **capability registry**: skills may export a `capabilities` object, and the orchestrator
+  injects `ctx.hasSkill`/`ctx.callSkill` (auto-injects ctx, `MAX_SKILL_DEPTH` loop guard) so
+  skills compose without importing each other's files. Calendar exposes
+  `capabilities.startCreate`. en+pt localized per the convention. **Blocking to deploy:**
+  re-consent OAuth with the **tasks** scope added to `GOOGLE_REFRESH_TOKEN` (see §8). Docs:
+  `2. Skills/3. Tasks/SKILL.md`, ARCHITECTURE "Composing skills", ORCHESTRATOR registry note.
 - **2026-07-11 — multilingual brain (DEPLOYED).** The brain now detects the conversation
   language (the router returns `lang`, schema-enforced) and replies in it, system-wide.
   Prose lives per-skill in `prompt.js` as `{ en, pt }` maps selected by `ctx.lang`; the

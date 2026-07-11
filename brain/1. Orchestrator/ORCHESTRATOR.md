@@ -44,8 +44,11 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    (`createSessions` — Redis or in-memory fallback).
 3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
    and requires `manifest.id` + `run()`. Builds `SKILLS = { [id]: run }` and
-   `CATALOG = [{id, description}]` (the router's menu). Logs each `skill loaded: … -> id`.
-   **Drop-in skills:** no edit here to add one.
+   `CATALOG = [{id, description}]` (the router's menu). Also collects each skill's
+   **optional** `capabilities` export into `CAPS = { [id]: { [name]: fn } }` — the
+   internal skill-to-skill API (see "Composing skills" below). Logs each
+   `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit
+   here to add one.
 4. **Express:** `GET /` health check; `POST /webhook`; `listen(3000)`.
 
 ### The webhook pipeline — `POST /webhook` (per message)
@@ -72,10 +75,12 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, quoted, hasQuotedAudio,
-    catalog, env, evolution, send, sessions, session, lang`. `session` is set **only** on a
-    continuation (else `null`). `ctx.lang` is the conversation language — from the session
-    on a continuation, from the router on a fresh command (set after `route()` returns),
-    default `"en"`; `ctx.send` is bound to it (see the localizing `send` above).
+    catalog, env, evolution, send, sessions, session, lang, hasSkill, callSkill`.
+    `session` is set **only** on a continuation (else `null`). `ctx.lang` is the
+    conversation language — from the session on a continuation, from the router on a fresh
+    command (set after `route()` returns), default `"en"`; `ctx.send` is bound to it (see
+    the localizing `send` above). `ctx.hasSkill`/`ctx.callSkill` are the capability-registry
+    helpers (see "Composing skills" below).
 12. **Dispatch:**
     - **Continuation** → **bypass the router**, run `SKILLS[session.skill](ctx)` directly
       (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
@@ -136,6 +141,28 @@ await ctx.sessions.clear(remoteJid);
 `ctx.session` is set **only** on a continuation (else `null`), and `ctx.sessions` exposes
 `get / set / clear`. A fresh `@brain` command clears any stale session first (starting over
 always wins). Skills that never call `ctx.sessions.set` behave statelessly, exactly as before.
+
+### Composing skills — the capability registry
+Skills compose without importing each other. `loadSkills()` collects each skill's optional
+`capabilities` export into `CAPS = { [id]: { [name]: fn } }`, and the orchestrator injects
+two helpers into every `ctx`:
+```js
+ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
+ctx.callSkill = async (id, name, ...args) => {          // auto-injects THIS ctx
+  const fn = CAPS[id]?.[name];
+  if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
+  const depth = (ctx._skillDepth || 0) + 1;             // loop guard
+  if (depth > MAX_SKILL_DEPTH) throw new Error(`skill-call depth exceeded at ${id}.${name}`);
+  return fn({ ...ctx, _skillDepth: depth }, ...args);
+};
+```
+The callee receives the caller's `ctx` (shared `owner`/`lang`/`sessions`/`send`), so a
+session it opens is tagged with the **callee's** `skill` id and its continuations route
+back to the callee — the caller only initiates. A missing capability throws and is caught
+by the per-skill try/catch (or the caller guards with `hasSkill` for a friendlier reply).
+`capabilities` are **not** in the router catalog — they're internal, addressed by skill id
+(rename-safe). Example: `task_action` turns a to-do assigned to another person into a
+calendar invite by calling `calendar_action.startCreate`, never re-implementing create.
 
 ### External touchpoints, timeouts, completion
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.

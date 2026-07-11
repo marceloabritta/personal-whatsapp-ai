@@ -39,6 +39,8 @@ You type "@brain ..." in a chat
                               ├─────────────┤
                               │ calendar_action   → Google Calendar
                               │ transcribe_audio  → AssemblyAI
+                              │ task_action       → Google Tasks (self)
+                              │                     ↳ Calendar (task for others)
                               └─────────────┘
                                     │
                                     ▼
@@ -49,8 +51,9 @@ You type "@brain ..." in a chat
 
 - **`calendar_action`** — reads the chat and either **creates** or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. (Edit/reschedule is planned, not yet built.)
 - **`transcribe_audio`** — reply to a voice message and type `@brain transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
+- **`task_action`** — your to-do inbox. Add a todo (`@brain add "buy flight" to my todos`), hear your list, or check one off. A todo for **yourself** goes to your private **Google Tasks** list (created instantly, with a short window to correct it); a todo assigned to **someone else** becomes a 5-minute **Calendar** invite so they're notified by email. Google Tasks due dates are date-only.
 
-Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. See `brain/README.md`.
+Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. A skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else). See `brain/README.md`.
 
 ## Repository layout
 
@@ -73,7 +76,7 @@ Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `sk
 - A server to host it (this project uses a DigitalOcean droplet, Ubuntu, ~US$12/mo, 2 GB) with Docker + Docker Compose.
 - A WhatsApp account to link as a "linked device".
 - **Anthropic API key** (the reasoning model).
-- **Google OAuth credentials** (Client ID, Secret, Refresh Token) for the Calendar skill.
+- **Google OAuth credentials** (Client ID, Secret, Refresh Token) for the Calendar and Tasks skills — the refresh token must be minted with **both** the `calendar` and `tasks` scopes.
 - **AssemblyAI API key** for the transcription skill.
 
 ## Setup
@@ -96,7 +99,7 @@ Adding a skill is a drop-in: create a folder under `brain/2. Skills/` with a `sk
 
 ## Language
 
-The default reply strings and LLM prompts are in English. Each skill keeps its language in its own `prompt.js` (and the transcription reply strings in `2. Audio transcriptions/prompt.js`), so switching a skill to another language is a single-file edit. Set `ASSEMBLYAI_LANGUAGE` for the audio language.
+The brain **detects the language you're writing in** (the router sets `ctx.lang`) and **replies in that same language**, system-wide across every skill. English and Portuguese (PT-BR) are maintained natively — each skill keeps its user-facing strings as a per-language `{ en, pt }` map in its own `prompt.js` (dates via `localizeDate`). Any other language is produced from the English copy by a cheap translation fallback in the orchestrator's `send()`; the `[AI Brain]:` header and internal classification prompts always stay English. Audio transcription follows the detected language too, with `ASSEMBLYAI_LANGUAGE` as a fallback. See the "Localization convention" in [ARCHITECTURE.md](ARCHITECTURE.md). (Live since 2026-07-11.)
 
 ## Security
 

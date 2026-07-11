@@ -20,6 +20,13 @@
 > If something needed is missing (the time, who to invite, or an attendee's email), it
 > **asks and waits** — no re-tag — and the answer can come from you **or** the attendee.
 
+> **Reused by other skills.** This skill exports a `capabilities.startCreate` entry —
+> the full confirm-first create flow (draft → `yes` → invite, including chasing a missing
+> email). `task_action` calls it (via `ctx.callSkill`) to turn a **to-do assigned to
+> someone else** into a 5-minute invite, so that path is created and confirmed here, in
+> the owner's language, with no duplicated code. The session it opens is a
+> `calendar_action` session, so the `yes`/modify/email continuations are handled here.
+
 ## What you'll see (the full conversation)
 
 Every brain message is prefixed with `[AI Brain]:` and a blank line.

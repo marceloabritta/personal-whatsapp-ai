@@ -49,6 +49,16 @@ function readReply(msg) {
   return parseJsonReply(out);
 }
 
+// Capabilities exposed to OTHER skills through the orchestrator's registry
+// (ctx.callSkill) — NOT seen by the router. `startCreate` runs the full
+// confirm-first create flow (draft -> "yes" -> invite) on a caller-supplied `info`;
+// the caller (e.g. task_action, for a "task" assigned to someone else) never
+// re-implements it. ctx is injected by the orchestrator; the session/continuation
+// lifecycle is owned by calendar_action (the session it opens is tagged with our id).
+export const capabilities = {
+  startCreate: (ctx, info) => handleCreate(ctx, info),
+};
+
 export const manifest = {
   id: "calendar_action",
   description:

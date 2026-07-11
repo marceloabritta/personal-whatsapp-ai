@@ -21,11 +21,14 @@ brain/
 │       └── router.js        #     calls Claude and returns the task(s)
 └── 2. Skills/               # one folder per skill; the orchestrator scans this at boot
     ├── 1. Calendar Actions/
-    │   ├── skill.js         #   export { manifest, run } — creates or cancels/deletes a Google Calendar event
-    │   └── prompt.js        #   extraction rules (action, participants, date, time, duration)
-    └── 2. Audio transcriptions/
-        ├── skill.js         #   export { manifest, run } — transcribes via AssemblyAI
-        └── prompt.js        #   reply texts (this skill does not use an LLM)
+    │   ├── skill.js         #   export { manifest, run, capabilities.startCreate } — create/cancel a Calendar event
+    │   └── prompt.js        #   extraction rules + localized reply() strings
+    ├── 2. Audio transcriptions/
+    │   ├── skill.js         #   export { manifest, run } — transcribes via AssemblyAI
+    │   └── prompt.js        #   reply texts (this skill does not use an LLM)
+    └── 3. Tasks/
+        ├── skill.js         #   export { manifest, run } — Google Tasks (self) / delegates a task-for-others to Calendar
+        └── prompt.js        #   interpret/review prompts, JSON Schemas, localized reply() strings
 ```
 
 ## How a skill is discovered
@@ -41,12 +44,20 @@ The `manifest.id` goes into the catalog the router uses to classify; `run(ctx)` 
 called when the router picks that id. **Adding a new skill = create a folder here
 with a `skill.js`. You don't edit `server.js` or the router.**
 
+A skill may also export an optional `capabilities` object — an internal API other
+skills can call via `ctx.callSkill(id, name, …)` (never seen by the router). This is how
+one skill composes another without importing its file: e.g. `task_action` turns a to-do
+assigned to someone else into a calendar invite by calling
+`calendar_action.startCreate`. Guard with `ctx.hasSkill(id, name)` for a friendly
+fallback when a capability isn't loaded. See "Composing skills" in `ORCHESTRATOR.md`.
+
 The `ctx` object handed to skills carries everything they need (no imports back to
 the orchestrator): `owner, anthropic, model, order, transcript, nowStr, contact,
 number, remoteJid, quoted, hasQuotedAudio, catalog, tag, fromMe, sessions, session,
-env, evolution, send, lang`. `ctx.quoted` is `{ id, hasAudio, mediaType, text, calendarLink }`.
-`ctx.sessions` is the Redis-backed session store and `ctx.session` is the current chat's
-state, so a skill can drive a multi-step, stateful flow (confirmations, clarifications).
+env, evolution, send, lang, hasSkill, callSkill`. `ctx.quoted` is
+`{ id, hasAudio, mediaType, text, calendarLink }`. `ctx.sessions` is the Redis-backed
+session store and `ctx.session` is the current chat's state, so a skill can drive a
+multi-step, stateful flow (confirmations, clarifications).
 
 ## Localization
 

@@ -65,16 +65,22 @@ const seen = new Set(); // dedup by messageId
 // Scans "2. Skills/*/skill.js". Each skill exports:
 //   export const manifest = { id, description }
 //   export async function run(ctx) { ... }
-// -> SKILLS: { [id]: run }   |   CATALOG: [{ id, description }] (passed to the router)
+//   export const capabilities = { name: (ctx, ...args) => ... }   // OPTIONAL
+// -> SKILLS: { [id]: run }  |  CATALOG: [{ id, description }] (the router's menu)
+//  | CAPS: { [id]: capabilities } — the internal skill-to-skill API (see ctx.callSkill).
+//    Capabilities are NEVER shown to the router; they let one skill compose another
+//    (e.g. task_action delegating a "task for someone" to calendar_action.startCreate)
+//    without importing its file — decoupled from folder paths, graceful when absent.
 async function loadSkills() {
   const skills = {};
   const catalog = [];
+  const caps = {};
   let entries = [];
   try {
     entries = await readdir(SKILLS_DIR, { withFileTypes: true });
   } catch (e) {
     console.error("Could not read the skills folder:", SKILLS_DIR, e.message);
-    return { skills, catalog };
+    return { skills, catalog, caps };
   }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
@@ -88,12 +94,21 @@ async function loadSkills() {
       }
       skills[id] = mod.run;
       catalog.push({ id, description: mod.manifest.description || "" });
-      console.log(`skill loaded: "${e.name}" -> ${id}`);
+      if (mod.capabilities && typeof mod.capabilities === "object") {
+        caps[id] = mod.capabilities;
+        console.log(
+          `skill loaded: "${e.name}" -> ${id} (capabilities: ${Object.keys(
+            mod.capabilities
+          ).join(", ")})`
+        );
+      } else {
+        console.log(`skill loaded: "${e.name}" -> ${id}`);
+      }
     } catch (err) {
       console.error(`failed to load skill "${e.name}":`, err.message);
     }
   }
-  return { skills, catalog };
+  return { skills, catalog, caps };
 }
 
 // LONG-TAIL TRANSLATION FALLBACK. Maintained languages (en/pt) are already
@@ -164,8 +179,11 @@ function orch(lang, key, ...args) {
   return fn(...args);
 }
 
+// Max depth of skill→skill delegation (ctx.callSkill), a loop/recursion backstop.
+const MAX_SKILL_DEPTH = 4;
+
 // ---- Boot -------------------------------------------------------------------
-const { skills: SKILLS, catalog: CATALOG } = await loadSkills();
+const { skills: SKILLS, catalog: CATALOG, caps: CAPS } = await loadSkills();
 console.log(
   "available skills:",
   CATALOG.map((c) => c.id).join(", ") || "(none!)"
@@ -268,6 +286,21 @@ app.post("/webhook", async (req, res) => {
     // so setting it after routing still applies to every skill send.
     ctx.lang = (isContinuation ? session?.lang : null) || "en";
     ctx.send = (number, text) => send(number, text, ctx.lang);
+
+    // Cross-skill composition. `hasSkill` guards a friendly fallback; `callSkill`
+    // invokes another skill's exported capability, auto-injecting THIS ctx (so the
+    // callee shares owner/lang/sessions/send) with a depth guard against loops. A
+    // session the callee opens is tagged with the callee's id, so its continuations
+    // route to the callee. Missing capability -> throws (caught by the per-skill catch).
+    ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
+    ctx.callSkill = async (id, name, ...args) => {
+      const fn = CAPS[id]?.[name];
+      if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
+      const depth = (ctx._skillDepth || 0) + 1;
+      if (depth > MAX_SKILL_DEPTH)
+        throw new Error(`skill-call depth exceeded at ${id}.${name}`);
+      return fn({ ...ctx, _skillDepth: depth }, ...args);
+    };
 
     // CONTINUATION: a follow-up owned by the skill that opened the session.
     // Bypass the router and hand it straight to that skill (it reads ctx.session).

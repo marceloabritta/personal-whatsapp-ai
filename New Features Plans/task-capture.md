@@ -2,11 +2,13 @@
 
 > **Freshness note (2026-07-11).** Aligned to the current codebase: structured
 > outputs (`output_config.format` + JSON Schemas), the stateful session/continuation
-> layer (`ctx.sessions` + `ctx.session`, `awaitFrom`), the per-skill `prompt.js`
-> string convention (NOT a central i18n catalog — see the localization convention in `../ARCHITECTURE.md`),
-> the `SKILL.md` doc convention, and skill folder numbering (`3. Tasks/`).
-> Multilingual is still a plan, so this ships English-only and slots into the
-> per-skill EN+PT map when that lands.
+> layer (`ctx.sessions` + `ctx.session`, `awaitFrom`, sessions persist `lang`),
+> the **live multilingual layer** (`ctx.lang` from the router; `ctx.send` bound to it;
+> per-skill `{ en, pt }` maps in `prompt.js` + `localizeDate`; long-tail translated by
+> `send()` — NOT a central i18n catalog; see the localization convention in
+> `../ARCHITECTURE.md`), the `SKILL.md` doc convention, and skill folder numbering
+> (`3. Tasks/`). **This skill ships `en` + `pt` from day one** — multilingual is in
+> production (2026-07-11), so English-only is no longer an option.
 
 ## Goal
 
@@ -129,7 +131,19 @@ handles create confirmations/modifications.**
 ## New skill — `2. Skills/3. Tasks/`
 
 `skill.js` (logic + Google Tasks client) · `prompt.js` (prompt builders + JSON Schemas
-+ `MSG` strings) · `SKILL.md` (human doc). Auto-discovered at boot.
++ per-language `{ en, pt }` string maps via `reply(lang)`) · `SKILL.md` (human doc).
+Auto-discovered at boot.
+
+> **Localization note (read the pseudocode with this in mind).** `ctx.send` is already
+> bound to `ctx.lang` by the orchestrator — skills never pass a language. In the
+> pseudocode below, `send(MSG.x)` / string literals are **shorthand** for
+> `ctx.send(number, reply(ctx.lang).x(...))`, where `reply(lang)` returns this skill's
+> per-language render functions (Calendar's exact pattern, since Tasks interpolates
+> titles/dues and formats a list — never share one English list-builder across
+> languages). Dates render with `localizeDate(ctx.lang, …)`. Every string ships `en`
+> **and** `pt`; any other detected language is translated from `en` by `send()`.
+> Every session this skill opens must persist `lang: ctx.lang` so continuations
+> (amend, complete-`yes`) answer in the language the flow started in.
 
 - `manifest`:
   ```js
@@ -191,9 +205,10 @@ handleAddSelf(ctx, info):
   task = addTask(env, { title, due: dueDate(info.due_iso) })     # writes NOW
   sessions.set(remoteJid, {
     skill:"task_action", intent:"add", stage:"await_amend", awaitFrom:"owner",
+    lang: ctx.lang,                                # continuation replies in-language
     data:{ taskId: task.id, title, due: info.due_iso },
   }, 600)
-  send(`Added to your list: "${title}"${dueNote}. Change anything, or say "done".`)
+  send(reply(ctx.lang).added({ title, when: localizeDate(ctx.lang, info.due_iso) }))
 
 resumeAmend(ctx, session):                       # runs on EVERY owner msg while open
   review = reviewAdd(ctx, session.data)          # {decision: amend|keep|delete|unrelated, title?, due_iso?}
@@ -230,6 +245,9 @@ handleAddOther(ctx, info):
 - Reuses Calendar's entire stateful flow: if the email is missing it asks and waits;
   shows the draft; `yes` writes + invites; "make it 3pm" modifies — all owned by
   `calendar_action`. Tasks writes **no** create/confirm code for this path.
+- **Localized for free:** `callSkill` passes the same `ctx` (so `ctx.lang`), and
+  Calendar already replies via `reply(ctx.lang)` + persists `lang` in its session —
+  the whole delegated flow answers in the conversation's language with no Tasks work.
 - Fixed slot: **15:00 −03:00, 5 min**, on the due date.
 
 ## LIST — read-back, no session
@@ -237,8 +255,8 @@ handleAddOther(ctx, info):
 ```
 handleList(ctx):
   items = listTasks(env)                 # open only
-  if !items.length: send(MSG.empty); return
-  send(formatList(items))                # numbered, with due dates (deterministic, no LLM)
+  if !items.length: send(reply(ctx.lang).empty()); return
+  send(reply(ctx.lang).formatList(items))   # per-language header + "due" label + localizeDate; no LLM
 ```
 
 ```
@@ -258,8 +276,9 @@ handleComplete(ctx, info):
   match = resolveTaskRef(ctx, info.task_ref, open)     # focused LLM match; null if unsure
   if !match: send(MSG.notFound); return
   sessions.set(remoteJid, { skill:"task_action", intent:"complete",
-    stage:"await_confirmation", awaitFrom:"owner", data:{ taskId, title } }, 600)
-  send(`Mark this done?\n- ${title}\n\nReply "yes" to confirm.`)
+    stage:"await_confirmation", awaitFrom:"owner", lang: ctx.lang,
+    data:{ taskId, title } }, 600)
+  send(reply(ctx.lang).confirmComplete({ title }))
 
 resumeComplete(ctx, session):
   decision = classifyConfirmation(ctx, { action:`mark "${title}" done` })   # Calendar helper + CONFIRM_SCHEMA
@@ -277,24 +296,113 @@ resumeComplete(ctx, session):
   `patchTask(taskId, {title?, due?})` → `tasks.patch`.
 - Due is **date-only** RFC3339 — `dueDate()` truncates; confirm copy shows a date, never a time.
 
-## Strings & multi-lingual (no central catalog)
+## Strings & multi-lingual (LIVE — ship en + pt from day one)
 
-- Ship **English-only**; all user-facing strings in `prompt.js` as a `MSG` object
-  (Audio-skill style), body-only (never the `[AI Brain]:` header). Task **titles stay
-  verbatim**.
-- Multilingual has landed (2026-07-11): give this `MSG` an `{ en, pt }` shape selected by
-  `ctx.lang`, per the per-skill-map convention in `../ARCHITECTURE.md`. No central `i18n.js`.
+Multilingual is in production (2026-07-11). Follow the localization convention in
+`../ARCHITECTURE.md` exactly — this is not optional or deferred.
+
+- **Per-language render map in `prompt.js`.** Export `reply(lang)` (Calendar's pattern,
+  not Audio's flat `MSG`, because Tasks interpolates `title`/`due` and formats the list)
+  returning `{ en, pt }` render functions for **every** message: `added`, `updated`,
+  `removed`, `needTitle`, `noAction`, `listHeader`/`formatList`, `empty`, `notFound`,
+  `confirmComplete`, `completed`, `keptOpen`, `failed`, `calendarUnavailable`. Each ships
+  `en` **and** `pt`.
+- **`ctx.send` is pre-bound to `ctx.lang`** — call `ctx.send(number, reply(ctx.lang).x(...))`;
+  never pass a language. `en`/`pt` go out as authored; any other detected language is
+  translated from the `en` body by the orchestrator's `send()` fallback (cheap
+  `TRANSLATE_MODEL`), header never translated.
+- **Dates** via `localizeDate(ctx.lang, iso)`. Tasks due is **date-only**, so the list/
+  confirm copy shows a date (no time) in the conversation's locale.
+- **List formatting is per-language** — build `formatList` inside `reply(lang)` (localized
+  header + "due" label); do not share one English list-builder across languages.
+- **Task titles stay verbatim** — inserted as the user wrote them; for a non-en/pt language
+  the `send()` fallback is instructed to preserve proper nouns/titles (same behavior as
+  Calendar event titles today).
+- **Sessions persist `lang: ctx.lang`** (shown in the pseudocode) so the amend / complete
+  continuations reply in the flow's language even though they bypass the router.
+- No central `i18n.js` — the map lives in this skill's `prompt.js`.
 
 ## Files touched
 
-- **New:** `2. Skills/3. Tasks/skill.js`, `prompt.js`, `SKILL.md`.
-- **Edit:** `1. Orchestrator/server.js` (capability registry in `loadSkills()` +
+- **New code:** `2. Skills/3. Tasks/skill.js`, `prompt.js`.
+- **Edit code:** `1. Orchestrator/server.js` (capability registry in `loadSkills()` +
   `ctx.hasSkill`/`ctx.callSkill` + `MAX_SKILL_DEPTH`); `2. Skills/1. Calendar Actions/skill.js`
-  (add `capabilities.startCreate`); `ARCHITECTURE.md` ("Composing skills" section +
-  tasks flow); `brain/.env.example` (`GOOGLE_TASKLIST_ID` + tasks scope reminder);
-  `PROJECT_LOG.md` (changelog).
+  (add `capabilities.startCreate`).
+- **New/edit docs:** see **Documentation revisions** below (every doc file enumerated).
+- **Config:** `brain/.env.example` (`GOOGLE_TASKLIST_ID` + tasks scope reminder).
 - **Setup:** re-consent OAuth (calendar + tasks); update `GOOGLE_REFRESH_TOKEN`.
 - No i18n catalog file; no router edits.
+
+## Documentation revisions (all doc files)
+
+Every doc that describes skills, the skill contract, the ctx shape, the flow, or the
+env must be updated. Enumerated so none is missed. **Conventions to propagate
+everywhere:** the `task_action` skill (self→Tasks, other→Calendar), the **capability
+registry** (`capabilities` export, `ctx.hasSkill`/`ctx.callSkill`, `MAX_SKILL_DEPTH`),
+and the `GOOGLE_TASKLIST_ID` + tasks-scope env.
+
+1. **`ARCHITECTURE.md`** (root — data flow)
+   - **Flow section:** add a step for `skill → Google Tasks` (v1 `insert`/`list`/
+     `patch`/`delete`, `@default` list, date-only `due`); note the third-party branch
+     delegates to the existing `skill → Google Calendar` step (no new email path).
+   - **New "Composing skills" section:** the two planes (routable `manifest`+`run` vs
+     internal `capabilities`), the orchestrator-owned `CAPS` registry, `ctx.hasSkill`/
+     `ctx.callSkill` (auto-injects ctx, `MAX_SKILL_DEPTH` loop guard), the
+     session-ownership handoff (a delegated session is tagged with the callee's id, so
+     its continuations route to the callee), and the failure semantics.
+   - **"Adding a skill" block:** mention the optional `capabilities` export next to
+     `{ manifest, run }`.
+   - **Environment variables:** add `GOOGLE_TASKLIST_ID` (optional, default `@default`);
+     note `GOOGLE_REFRESH_TOKEN` now needs the `tasks` **and** `calendar` scopes.
+   - **No localization change needed** — the "Localization convention" section already
+     exists here (added when multilingual shipped 2026-07-11); the Tasks skill simply
+     follows it (`reply(lang)` `{en,pt}` map + `localizeDate`, sessions persist `lang`).
+
+2. **`PROJECT_LOG.md`** (root — project registry + changelog)
+   - **Changelog (§10):** dated entry — "Task capture skill (`task_action`) +
+     cross-skill capability registry." Note self→Tasks, other→Calendar delegation,
+     `ctx.callSkill`, and the OAuth scope addition.
+   - **Docs registry:** list the new `2. Skills/3. Tasks/SKILL.md`.
+   - **OAuth/env note (§8):** record the calendar+tasks re-consent and `GOOGLE_TASKLIST_ID`.
+   - **"Next up" line:** update (task capture no longer pending).
+
+3. **`README.md`** (root — public)
+   - **"Skills (today)":** add a `task_action` bullet (self-todos via Google Tasks;
+     tasks for others become a 5-min Calendar invite).
+   - **ASCII flow diagram:** add `task_action → Google Tasks / Calendar` to the skills box.
+   - **"Adding a skill" note:** one line that skills can also expose `capabilities` for
+     composition (optional).
+   - **Prerequisites:** Google OAuth now needs Calendar **+** Tasks scopes.
+   - **Roadmap:** reconcile the "reminders/lookups" overlap; note task capture shipped.
+
+4. **`brain/README.md`** (developer)
+   - **Structure tree:** add the `3. Tasks/` folder (`skill.js`, `prompt.js`, `SKILL.md`).
+   - **"How a skill is discovered":** add the optional `capabilities` export and a short
+     "Composing skills" paragraph (registry + `ctx.callSkill`).
+   - **ctx contract list:** append `hasSkill`, `callSkill`.
+
+5. **`brain/1. Orchestrator/ORCHESTRATOR.md`** (maintainer detail)
+   - **Boot → `loadSkills()` (step 3):** now also collects each skill's `capabilities`
+     into `CAPS = { [id]: { [name]: fn } }`.
+   - **Build `ctx` (step 11):** append `hasSkill`, `callSkill` to the ctx field list.
+   - **New subsection "Composing skills — the capability registry":** `ctx.hasSkill`/
+     `ctx.callSkill` signatures, ctx auto-injection, `MAX_SKILL_DEPTH`, the
+     missing-capability error path (caught by the per-skill try/catch), and that a
+     delegated flow's session is owned by the callee skill.
+
+6. **`brain/2. Skills/1. Calendar Actions/SKILL.md`** (edit)
+   - Add a short "Reused by other skills" note: Calendar exposes `capabilities.startCreate`;
+     a "5-minute task for someone else" from `task_action` comes in through it and runs
+     the normal confirm-first + invite flow.
+
+7. **`brain/2. Skills/3. Tasks/SKILL.md`** (NEW — every skill ships one)
+   - Human quick-read: the three actions (add / list / complete); the self vs.
+     someone-else split and why (Tasks is private, Calendar emails); the **amend window**
+     (self) and **confirm-first** (complete); worked example conversations; the **OAuth
+     tasks-scope prerequisite** called out so a scope gap is obvious; date-only due caveat.
+   - Show a PT example too (replies follow `ctx.lang`), matching the other SKILL.md docs.
+
+8. **`brain/2. Skills/2. Audio transcriptions/SKILL.md`** — no change.
 
 ## Build order
 
@@ -307,9 +415,12 @@ resumeComplete(ctx, session):
 4. Skill + prompt with `TASK_SCHEMA` (copy `jsonFormat`/`readReply`): **add-self** +
    **list** first.
 5. **add-self amend window** (`resumeAmend` + `reviewAdd`).
-6. **add-other** delegation to `startEventCreate`.
+6. **add-other** delegation via `ctx.callSkill("calendar_action", "startCreate", …)`.
 7. **complete** confirm session (`resumeComplete` + `classifyConfirmation`).
-8. `MSG` strings, `SKILL.md`, PROJECT_LOG changelog.
+8. `reply(lang)` **en + pt** string map + `localizeDate` (mandatory — multilingual is
+   live); then **all doc revisions** (see Documentation revisions) — new
+   `3. Tasks/SKILL.md`, plus ARCHITECTURE / ORCHESTRATOR / both READMEs / Calendar
+   SKILL.md / PROJECT_LOG / `.env.example`.
 9. (Phase 2) Summarizer → batch add.
 
 ## Notes / risks

@@ -105,6 +105,22 @@ DELETE https://www.googleapis.com/calendar/v3/calendars/primary/events/{eventId}
 ```
 `sendUpdates=all` makes Google send the invite (or cancellation) email to the attendees from your account.
 
+### 5b. skill → Google Tasks (add / list / complete) — task_action
+
+Same OAuth client as Calendar (the refresh token must also carry the
+`https://www.googleapis.com/auth/tasks` scope). The Tasks list defaults to `@default`
+(override with `GOOGLE_TASKLIST_ID`).
+```
+POST   https://tasks.googleapis.com/tasks/v1/lists/@default/tasks              (add)
+GET    https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=false  (list)
+PATCH  https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (complete: status=completed; or amend title/due)
+DELETE https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (amend-window "cancel that")
+```
+`due` is **date-only** (stored at UTC midnight). A to-do for **yourself** lands here; a
+to-do assigned to **someone else** has no private-list equivalent (Tasks emails no one),
+so `task_action` **delegates** to `calendar_action` (step 5) via the capability registry —
+a 5-min invite that notifies them by email. See "Composing skills" below.
+
 ### 6. skill → Evolution (fetch audio) — transcribe_audio
 
 When you reply to a voice message, the brain reads `contextInfo.stanzaId` (the quoted
@@ -138,7 +154,9 @@ everyone (a private-reply option is on the roadmap).
 
 **brain (`/opt/brain/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
 (cheap model for the long-tail reply-translation fallback; default `claude-haiku-4-5`),
-`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_CALENDAR_ID`,
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` (needs **both** the
+`calendar` **and** `tasks` scopes), `GOOGLE_CALENDAR_ID`, `GOOGLE_TASKLIST_ID` (optional,
+default `@default`; Skill: `task_action`),
 `ASSEMBLYAI_API_KEY`, `ASSEMBLYAI_LANGUAGE` (now only a *fallback* for the transcription
 language — the transcription follows the detected `ctx.lang` first; it does **not** set the
 reply language, which follows `ctx.lang`), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
@@ -154,8 +172,33 @@ Create `brain/2. Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = { id: "unique_id", description: "what it does (the router reads this)" };
 export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ctx.lang, ... */ }
+export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — see "Composing skills"
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
+
+### Composing skills (the capability registry)
+
+A skill has **two faces**. The *routable* face (`manifest` + `run`) is what the router
+sees and dispatches to. The optional *internal* face — an exported `capabilities`
+object — is a private **skill-to-skill API** the router never sees. Skills never import
+each other's files; the orchestrator collects every skill's `capabilities` at boot into a
+registry and injects two helpers into `ctx`:
+
+```js
+ctx.hasSkill(id, name)              // is capability id.name available?
+await ctx.callSkill(id, name, ...args)  // invoke it; THIS ctx is auto-injected as the first arg
+```
+
+`callSkill` passes the caller's `ctx` (so the callee shares `owner`/`lang`/`sessions`/
+`send`) and enforces `MAX_SKILL_DEPTH` as a loop guard; a missing capability throws (caught
+by the orchestrator's per-skill try/catch). **Decoupled by id, not path** — renaming a
+skill's folder never breaks a caller. Today: `calendar_action` exposes `startCreate` (the
+confirm-first create flow), and `task_action` calls it for a to-do assigned to someone else.
+
+**Session ownership on delegation.** A session the callee opens is tagged with the
+callee's `skill` id, so its continuations (the `yes`, a modify, an email chase) route back
+to the **callee** — the caller initiates and steps out. E.g. a "task for Ana" opens a
+`calendar_action` session; Ana's email or your `yes` is handled by Calendar, not Tasks.
 
 ### Localization convention (applies to every skill)
 
