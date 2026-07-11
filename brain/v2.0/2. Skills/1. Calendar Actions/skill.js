@@ -193,7 +193,7 @@ async function handleCreate(ctx, info) {
     });
     await send(
       number,
-      `Done! Invite created and sent:\n- ${title}\n- ${emails.join(
+      `Done! Invite created and sent:\n\n- ${title}\n- ${emails.join(
         ", "
       )}\n- ${whenStr(info.start_iso)} (${dur} min)\n\nHere is a link for the event:\n${
         ev.htmlLink || ""
