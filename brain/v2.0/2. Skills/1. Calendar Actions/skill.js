@@ -116,7 +116,13 @@ async function interpret(ctx) {
 // ctx (from the orchestrator): { owner, tag, anthropic, model, order, transcript,
 //   nowStr, contact, number, quoted, env, send }
 export async function run(ctx) {
-  const { number, send } = ctx;
+  const { number, send, session } = ctx;
+
+  // CONTINUATION: resume a pending confirmation (e.g. "yes" to a cancellation).
+  // Set by the orchestrator only when this message replies to the brain's prompt.
+  if (session?.intent === "delete" && session.stage === "await_confirmation") {
+    return resumeDelete(ctx, session);
+  }
 
   let info;
   try {
@@ -187,9 +193,12 @@ async function handleCreate(ctx, info) {
   }
 }
 
-// ---- DELETE (reply to a calendar link, confirm-first) ----------------------
+// ---- DELETE (reply to a calendar link) -------------------------------------
+// Initial request: resolve the event from the replied-to link, then open a
+// confirmation SESSION and ask. The "yes" arrives as a continuation (a reply to
+// this message) and is handled by resumeDelete — no @brain tag needed.
 async function handleDelete(ctx, info) {
-  const { number, env, send, tag, quoted } = ctx;
+  const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
 
   const link = quoted?.calendarLink;
   if (!link) {
@@ -222,28 +231,66 @@ async function handleDelete(ctx, info) {
   }
 
   const title = ev.summary || "(untitled)";
+  const when = whenStr(ev.start?.dateTime);
 
-  // Confirm-first: on the initial request, echo the event and wait for a "yes".
-  // The calendar link stays in the message so replying "yes" to THIS message
-  // re-resolves the event (no tag needed — the orchestrator lets that reply through).
-  if (!info.confirm) {
-    await send(
-      number,
-      `Confirm the cancelation of this event?\n- ${title}\n- ${whenStr(
-        ev.start?.dateTime
-      )}\n\nReply to this message with "yes" to confirm.\n${ev.htmlLink || link}`
-    );
+  // Confirm-first: remember the event and ask. No link needed in the message —
+  // the session holds the eventId, so a "yes" reply resolves it.
+  await sessions.set(remoteJid, {
+    skill: "calendar_action",
+    intent: "delete",
+    stage: "await_confirmation",
+    awaitFrom: "owner", // only the owner confirms their own cancellation
+    data: { eventId, title, when },
+  });
+  await send(
+    number,
+    `Confirm the cancelation of this event?\n- ${title}\n- ${when}\n\nReply to this message with "yes" to confirm.`
+  );
+}
+
+// Resume a pending cancellation: the owner replied to the confirmation message.
+async function resumeDelete(ctx, session) {
+  const { number, env, send, sessions, remoteJid, order } = ctx;
+  const { eventId, title } = session.data || {};
+  const ans = classifyYesNo(order);
+
+  if (ans === "no") {
+    await sessions.clear(remoteJid);
+    await send(number, `Okay, I'll keep "${title}".`);
     return;
+  }
+  if (ans !== "yes") {
+    await send(number, `Reply "yes" to cancel "${title}", or "no" to keep it.`);
+    return; // keep the session; the next reply can still resolve it
   }
 
   try {
     await deleteEvent(env, eventId);
+    await sessions.clear(remoteJid);
     await send(number, `Cancelled "${title}" and notified the attendees.`);
   } catch (e) {
     console.error("Calendar delete error:", e?.response?.data || e?.message || e);
+    await sessions.clear(remoteJid);
     await send(
       number,
       "I found the event but failed to cancel it in Google. Error in the log."
     );
   }
+}
+
+// Cheap yes/no classifier (EN + PT-BR), first word or whole message.
+function classifyYesNo(text) {
+  const t = String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!,?]/g, "");
+  const yes = ["y", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "confirm",
+    "confirmed", "confirmo", "confirmar", "sim", "isso", "pode", "vai", "manda",
+    "do it", "go ahead"];
+  const no = ["n", "no", "nope", "nah", "nao", "não", "negativo", "keep",
+    "dont", "don't", "deixa"];
+  const first = t.split(/\s+/)[0];
+  if (yes.includes(t) || yes.includes(first)) return "yes";
+  if (no.includes(t) || no.includes(first)) return "no";
+  return "unknown";
 }

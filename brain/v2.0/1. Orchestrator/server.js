@@ -25,6 +25,7 @@ import {
   buildTranscript,
   contactName,
 } from "./lib/whatsapp.js";
+import { createSessions } from "./lib/sessions.js";
 import { route } from "./router/router.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,6 +46,12 @@ const evolution = createEvolution({
   apikey: APIKEY,
   instance: INSTANCE,
 });
+// Per-chat conversation state (project-wide). Empty REDIS_URL -> in-memory only.
+const REDIS_URL =
+  process.env.REDIS_URL === undefined
+    ? "redis://evolution_redis:6379"
+    : process.env.REDIS_URL;
+const sessions = createSessions({ url: REDIS_URL });
 
 const seen = new Set(); // dedup by messageId
 
@@ -113,16 +120,33 @@ app.post("/webhook", async (req, res) => {
     // buffer EVERY message (context), even the ones that don't trigger the brain.
     if (text) remember(remoteJid, { t, fromMe, text, pushName: data.pushName });
 
-    if (!fromMe) return; // only the owner's order
-
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
     console.log("QUOTED>>>", JSON.stringify(quoted));
 
-    const isTagged = text.toLowerCase().startsWith(TAG);
-    // Act on the trigger tag, OR on a tagless reply to a message that carries a
-    // Google Calendar link — that's the cancel-confirmation flow, where the owner
-    // replies just "yes" to the brain's message (no tag needed).
-    if (!isTagged && !quoted?.calendarLink) return;
+    // Pending conversation state for this chat (confirmations, clarifications, ...).
+    const session = await sessions.get(remoteJid);
+
+    // START: a flow only begins when the OWNER uses the trigger tag.
+    const isTagged = fromMe && text.toLowerCase().startsWith(TAG);
+
+    // CONTINUE: an active session accepts a follow-up, depending on who it waits on
+    // (session.awaitFrom, default "owner"):
+    //   - owner (fromMe): only when replying to one of the brain's own messages,
+    //     so we never grab the owner's normal chatter.
+    //   - contact (!fromMe): any normal message — e.g. the person the owner is
+    //     scheduling with just types their email, not as a reply to the brain.
+    const repliesToBrain = !!quoted?.text && quoted.text.startsWith(HEADER);
+    const awaitFrom = session?.awaitFrom || "owner";
+    let isContinuation = false;
+    if (session && !isTagged) {
+      if (fromMe && repliesToBrain && (awaitFrom === "owner" || awaitFrom === "any"))
+        isContinuation = true;
+      else if (!fromMe && (awaitFrom === "contact" || awaitFrom === "any"))
+        isContinuation = true;
+    }
+
+    // Ignore everything else (incl. non-owner messages with no session for them).
+    if (!isTagged && !isContinuation) return;
     if (id && seen.has(id)) return; // dedup
     if (id) {
       seen.add(id);
@@ -159,13 +183,36 @@ app.post("/webhook", async (req, res) => {
       contact,
       remoteJid,
       number,
+      fromMe, // who sent this message: owner (true) vs the contact (false)
       quoted,
       hasQuotedAudio: !!quoted?.hasAudio,
       catalog: CATALOG,
       env: process.env,
       evolution,
       send,
+      sessions, // store: get/set/clear per-chat state
+      session: isContinuation ? session : null, // present only on a continuation
     };
+
+    // CONTINUATION: a follow-up owned by the skill that opened the session.
+    // Bypass the router and hand it straight to that skill (it reads ctx.session).
+    if (isContinuation) {
+      const run = SKILLS[session.skill];
+      if (!run) {
+        await sessions.clear(remoteJid); // owning skill gone; drop stale state
+        return;
+      }
+      try {
+        await run(ctx);
+      } catch (e) {
+        console.error(`Session skill '${session.skill}' error:`, e);
+        await send(number, "I failed to continue that. Error in the log.");
+      }
+      return;
+    }
+
+    // FRESH COMMAND: a new @brain order overrides any pending session.
+    if (session) await sessions.clear(remoteJid);
 
     // ROUTER: decide which skill(s) to run.
     let tasks;
@@ -180,7 +227,6 @@ app.post("/webhook", async (req, res) => {
 
     // No recognized skill.
     if (!tasks.length || tasks.every((x) => !SKILLS[x])) {
-      if (!isTagged) return; // stay silent on tagless replies we can't act on
       const names = CATALOG.map((c) => c.id).join(", ");
       await send(
         number,
