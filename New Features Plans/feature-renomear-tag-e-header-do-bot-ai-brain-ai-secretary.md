@@ -47,6 +47,8 @@ If the header becomes language-variable but `isBrainMsg` still matches only one 
 
 **Therefore self-detection must be decoupled from any single header string.** Detect "is this my own message" against **all** headers the bot can ever emit — both language variants **and the legacy `[AI Brain]:`** (so messages sent before the rename, still present in fetched history/buffers, are recognized).
 
+> **Note (re-verified 2026-07-11, post calendar-edit deploy):** the recently-shipped calendar edit/reschedule feature *widened* this surface — it opens more owner-awaiting sessions (multiple `awaitFrom:"owner"`) and the scheduling flow uses `awaitFrom:"any"` ([Calendar Actions/skill.js:604](brain/2. Skills/1. Calendar Actions/skill.js#L604)), where any `fromMe` message not recognized as the bot's own is eligible as a continuation. This makes robust `isOwnMessage()` detection *more* load-bearing, not less. No new header/tag code was introduced — the feature reuses the existing session mechanism and sends via `ctx.send`, so the language-aware header applies to it automatically.
+
 ## Changes
 
 ### 1. Centralize identity into one module — `1. Orchestrator/lib/identity.js` (new)
@@ -155,13 +157,13 @@ Goal: the codebase names the product uniformly as **the Secretary**, composed of
 | `brain/2. Skills/4. Feature Requests/skill.js` | 3 | 1 `HEADER` string (already handled in feature) + comments |
 | `brain/2. Skills/4. Feature Requests/prompt.js` | 2 | doc-footer string + comment |
 | `brain/2. Skills/1. Calendar Actions/skill.js` | 3 | comments |
-| `brain/2. Skills/1. Calendar Actions/prompt.js` | 2 | comments |
+| `brain/2. Skills/1. Calendar Actions/prompt.js` | 3 | comments |
 | `brain/2. Skills/2. Audio transcriptions/prompt.js` | 1 | comment |
 | `brain/.env.example` | 3 | comments + `@brain` (tag handled in feature) |
 | `evolution/docker-compose.yml` | 5 | **service/container name, mount + env_file paths, comments** |
 | `ARCHITECTURE.md` | ~23 | docs |
 | `README.md` | ~23 | docs |
-| `PROJECT_LOG.md` | ~68 | docs (historical log — see note) |
+| `PROJECT_LOG.md` | ~70 | docs (historical log — see note) |
 
 ## Naming decisions (confirm before running)
 - **App folder:** `brain/` → **`secretary/`**. (Sub-folders `1. Orchestrator/` and `2. Skills/` already carry the right names — leave them.)
