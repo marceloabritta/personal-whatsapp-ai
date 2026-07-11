@@ -12,6 +12,33 @@
 >
 > If you didn't reply to an audio, it tells you how to do it.
 
+## What you'll see (the full conversation)
+
+Every brain message is prefixed with `[AI Brain]:` and a blank line. This skill is
+one-shot — it sends a confirmation, then the result. It does **not** wait for or pick up
+any follow-up answer.
+
+**Normal run:**
+1. You reply to a voice note with `@brain transcribe`.
+2. Once the audio is downloaded, the brain confirms it's on it:
+   > Got the audio, transcribing... ~1 min.
+3. Then it sends the result:
+   > Audio transcript:
+   >
+   > &lt;the transcribed text&gt;
+   - If the audio was silent/too short: *"I transcribed it, but no text came out (silent or very short audio)."*
+
+**Instead of the above, you may see one of these and nothing more:**
+- Not a reply to an audio: *"To transcribe, reply to the audio you want and call @brain
+  again. E.g.: press and hold the audio, tap Reply and type \"@brain transcribe\"."*
+- Couldn't download it (too old / not saved): *"I couldn't download that audio from
+  WhatsApp. It may be too old or was not saved. Try a more recent audio."*
+- Transcription failed (or API key missing): *"I downloaded the audio, but the
+  transcription failed. Error in the log. Try again?"*
+
+Note: the "Got the audio…" confirmation is sent **after** the download succeeds — so if
+you see it, the audio was fetched and only the transcription step remains.
+
 ---
 
 ## For AI / maintainers — detailed

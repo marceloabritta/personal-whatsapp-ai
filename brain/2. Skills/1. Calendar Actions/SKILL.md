@@ -19,6 +19,59 @@
 > If something's genuinely missing from the chat (no time, no email anywhere), it tells
 > you what it still needs.
 
+## What you'll see (the full conversation)
+
+Every brain message is prefixed with `[AI Brain]:` and a blank line.
+
+### Creating an event
+1. You (in a chat where the person, time, and email have come up): `@brain schedule this`.
+2. If everything needed is in the chat, the brain creates it and replies:
+   > Done! Invite created and sent:
+   >
+   > - &lt;title&gt;
+   > - &lt;attendee emails&gt;
+   > - &lt;date, hh:mm AM/PM&gt; (&lt;duration&gt; min)
+   >
+   > Here is a link for the event:
+   > &lt;calendar link&gt;
+3. If the **time or an email isn't anywhere in the chat**, it asks:
+   > Almost there. Still missing: &lt;start_iso and/or email&gt;. Send it in the chat and call @brain again.
+   - **What it picks up:** *nothing automatically here* — creating is not stateful yet.
+     Add the missing detail to the chat and call `@brain` again. *(Phase C will make this
+     wait for your answer like cancel does.)*
+4. Other one-off replies: *"I understood the request but failed to create it in Google.
+   Error in the log."* (Google error) · *"I didn't identify a calendar action. …"* (the
+   order wasn't calendar-related) · *"I hit an error while thinking. Try again?"* (LLM error).
+
+### Cancelling an event (this one waits for your answer)
+1. You **reply to the invite message** (the one with the calendar link) with
+   `@brain cancel this`.
+2. The brain looks the event up and asks to confirm — and now **watches this chat for
+   your answer for 10 minutes, no tag needed**:
+   > Confirm the cancelation of this event?
+   > - &lt;title&gt;
+   > - &lt;date, hh:mm AM/PM&gt;
+   >
+   > Reply "yes" to confirm, or "no" to keep it.
+3. **What it picks up next** — any message you send in that chat while it's waiting:
+   - a **yes**-type answer ("yes", "sim", "go ahead", "do it", …) → it cancels and emails
+     the attendees:
+     > Cancelled "&lt;title&gt;" and notified the attendees.
+   - a **no**-type answer ("no", "keep it", "não", …) →
+     > Okay, I'll keep "&lt;title&gt;".
+   - **anything else (normal conversation)** → **ignored silently**; it keeps waiting.
+   - **after 10 minutes** with no yes/no → the request expires; a later "yes" does nothing
+     (start over with `@brain cancel this`).
+4. If step 1 wasn't a reply to a message with a calendar link, or the link is unreadable,
+   or the event is already gone, you'll get one of:
+   > To cancel an event, reply to the message that has its Google Calendar link and call @brain again.
+
+   > I couldn't read the calendar link on that message. Reply to the message that has the Google Calendar link.
+
+   > I couldn't find that event — it may already be cancelled or gone.
+
+   > I found the event but failed to cancel it in Google. Error in the log.
+
 ---
 
 ## For AI / maintainers — detailed
