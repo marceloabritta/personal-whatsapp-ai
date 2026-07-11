@@ -62,7 +62,7 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    in-memory short-term buffer, even ones that won't trigger the secretary. (Context.)
 4. **`getQuoted(data)`** → `quoted = { id, hasAudio, mediaType, text, calendarLink } | null`
    (the replied-to message; Evolution puts a plain-text reply's context at the *sibling*
-   `data.contextInfo`). Logged as `QUOTED>>>`.
+   `data.contextInfo`).
 5. **`isOwnMsg`** = `isOwnMessage(text)` (from `lib/identity.js`) — true when the text starts
    with **any** header variant the secretary could have emitted (both languages **plus** the
    legacy `[AI Brain]:` for its own older messages), so the secretary's own sends are never

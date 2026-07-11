@@ -209,7 +209,6 @@ app.post("/webhook", async (req, res) => {
     if (text) remember(remoteJid, { t, fromMe, text, pushName: data.pushName });
 
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
-    console.log("QUOTED>>>", JSON.stringify(quoted));
 
     // Never react to the secretary's OWN messages. They arrive with fromMe=true
     // (same account as the owner), so this header check is the ONLY thing telling
