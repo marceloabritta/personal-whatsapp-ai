@@ -1,137 +1,245 @@
 # Task Capture ("Todo Inbox") — Implementation Plan
 
-> **Freshness note (2026-07-11).** Re-aligned to the current codebase: structured
+> **Freshness note (2026-07-11).** Aligned to the current codebase: structured
 > outputs (`output_config.format` + JSON Schemas), the stateful session/continuation
 > layer (`ctx.sessions` + `ctx.session`, `awaitFrom`), the per-skill `prompt.js`
-> string convention (NOT a central i18n catalog — that was rejected in
-> `multilingual-brain.md`), the `SKILL.md` doc convention, and skill folder
-> numbering (`3. Tasks/`, not `5.`). Multilingual is still a plan, so this ships
-> English-only now and slots into the per-skill EN+PT map when that lands.
+> string convention (NOT a central i18n catalog — see the localization convention in `../ARCHITECTURE.md`),
+> the `SKILL.md` doc convention, and skill folder numbering (`3. Tasks/`).
+> Multilingual is still a plan, so this ships English-only and slots into the
+> per-skill EN+PT map when that lands.
 
 ## Goal
 
-Capture todos from chat and read them back, backed by Google Tasks.
+Capture todos from chat, back them with the right Google service depending on WHO
+the todo is for, and read them back.
 
-- Add explicitly: `@brain add "buy flight to SP" to my todos`
+- Add for yourself: `@brain add "buy flight to SP" to my todos`
+- Add for someone else: `@brain remind João to send the contract by Friday`
 - Capture from a message: reply with `@brain turn this into a task`
 - Read back: `@brain what's on my list?`
 - Complete: `@brain mark the flight one done` (confirm-first)
 - (Phase 2) From a summary's action items: "save these 3 as tasks?"
 
-## Why it fits the architecture
+## Core design decision — split by TARGET
 
-- **Same Google OAuth client** already wired for Calendar Actions
-  (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN`) — Google
-  Tasks is the same `googleapis` package (already a dependency, `>=140`) and the
-  same OAuth2 auth, just a different API surface (`google.tasks`).
-- **Auto-discovery is unchanged.** Drop a folder under `2. Skills/` exporting
-  `{ manifest, run }`; the orchestrator loads it at boot and the router starts
-  routing to it. No edits to `server.js` or the router.
-- **The stateful layer already exists.** `complete` reuses the same confirm-first
-  session mechanics the Calendar delete flow uses today (`ctx.sessions` +
-  `ctx.session` + `awaitFrom`), so "type yes" continuations need no new plumbing.
+A "task" means two different things depending on the recipient, so it maps to two
+backends. **Google Tasks has no attendees, no sharing, and sends no email** — it's a
+private, single-user list. So:
+
+| Target | Backend | Why |
+|---|---|---|
+| **Yourself** | Google Tasks (private list) | No one to notify; a fast personal inbox |
+| **Someone else** | Google **Calendar** (5-min event, you + them as attendees) | Calendar already emails the invite (`sendUpdates=all`) — the only Google surface that notifies an external person |
+
+The third-party case **reuses the existing Calendar create flow** rather than
+duplicating it (see "Composing skills" below). This keeps one maintained
+implementation of the confirm-first + email-chase + modify lifecycle.
+
+## Both paths are STATEFUL at creation
+
+| Target | Stateful model | Session owner |
+|---|---|---|
+| **Yourself** | Create immediately (`addTask`) → **amend window**: a session stays open ~10 min so a follow-up patches/deletes the just-created task. No draft step (a private todo has no external side-effect). | `task_action` |
+| **Someone else** | **Draft → `yes` → create + invite** (Calendar's existing confirm-first flow; nothing is written until you approve, because it emails a real person). | `calendar_action` (delegated) |
+
+## Composing skills — capability registry (orchestrator-owned)
+
+Skills never import each other's files. They compose through a **capability registry
+the orchestrator builds at boot and injects into `ctx`**. This is the robust design:
+decoupled from folder paths, graceful when a skill is absent, and centralized.
+
+**Two planes per skill.** The *routable* face (`manifest` + `run`) is what the router
+sees. The new *internal* face is an optional `capabilities` export — functions other
+skills may call. Capabilities are NEVER shown to the router; they're a private
+skill-to-skill API.
+
+- Calendar exposes its create flow **by id, not by path** — a thin wrapper over the
+  existing private `handleCreate(ctx, info)`:
+  ```js
+  // 2. Skills/1. Calendar Actions/skill.js
+  export const capabilities = {
+    // ctx is injected by the orchestrator; caller passes only the event info.
+    startCreate: (ctx, info) => handleCreate(ctx, info),
+  };
+  ```
+- The orchestrator collects these into `CAPS[skillId]` in `loadSkills()` and injects
+  two helpers into every `ctx`:
+  ```js
+  ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
+  ctx.callSkill = async (id, name, ...args) => {
+    const fn = CAPS[id]?.[name];
+    if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
+    const depth = (ctx._skillDepth || 0) + 1;
+    if (depth > MAX_SKILL_DEPTH) throw new Error(`skill-call depth exceeded at ${id}.${name}`);
+    return fn({ ...ctx, _skillDepth: depth }, ...args);   // auto-injects THIS ctx + loop guard
+  };
+  ```
+- Tasks consumes it with **zero coupling to Calendar's file location**:
+  ```js
+  if (!ctx.hasSkill("calendar_action", "startCreate"))
+    return ctx.send(ctx.number, MSG.calendarUnavailable);
+  return ctx.callSkill("calendar_action", "startCreate", mappedInfo);
+  ```
+
+**Why this is the robust choice:**
+- **No path coupling** — the skill *id* is the contract; renaming the Calendar folder
+  never breaks Tasks (its `manifest.id` stays `calendar_action`).
+- **Graceful absence** — `hasSkill` gives a friendly "calendar unavailable" message;
+  `callSkill` throws a typed error otherwise, caught by the orchestrator's per-skill
+  try/catch. A skill that fails to load simply isn't in the registry.
+- **Centralized** — ctx-injection and the loop/recursion guard (`MAX_SKILL_DEPTH`)
+  live in one place, not scattered across skills.
+- **Testable** — inject a fake `CAPS` into `ctx` and assert delegation without loading
+  the real Calendar skill.
+- `ARCHITECTURE.md` gains a "Composing skills" section documenting the two planes, the
+  `capabilities` export, `ctx.hasSkill`/`ctx.callSkill`, and the session-ownership rule
+  (below).
+
+### Delegation hands off the whole lifecycle
+
+When Tasks calls `calendar_action.startCreate`, Calendar opens a session tagged
+`skill: "calendar_action"`. So the `yes`, the "make it 3pm", and the *chase-the-
+missing-email* continuations all flow back to **Calendar's** `run` via the
+orchestrator — automatically. **Tasks only initiates the third-party case; it never
+handles create confirmations/modifications.**
+
+### Failure semantics (what happens if Calendar breaks)
+
+- **Missing/not loaded** → `hasSkill` is false → Tasks sends `MSG.calendarUnavailable`;
+  self-tasks, list, complete keep working.
+- **Throws during delegation** (synchronous, inside Tasks' `run`) → bubbles to the
+  orchestrator's per-skill try/catch → generic error; **nothing written** (the
+  third-party path writes nothing until `yes`, and never calls `addTask`).
+- **Throws at the `yes`** → owned entirely by Calendar's `resumeCreate` try/catch
+  (clears the session, tells the owner it failed in Google). Tasks isn't involved.
+- **No partial state ever**: self → Tasks only; other → Calendar only. Mutually
+  exclusive branches, so no double-write or orphan.
 
 ## Prerequisite: Google Tasks scope (blocking)
 
-- The current refresh token is scoped for Calendar only
-  (`https://www.googleapis.com/auth/calendar`). Google Tasks needs
+- Current refresh token is Calendar-only (`.../auth/calendar`). Google Tasks needs
   `https://www.googleapis.com/auth/tasks`.
-- **Re-consent with BOTH scopes at once** (calendar + tasks) and mint a new refresh
-  token, so Calendar keeps working. Same OAuth app; use the OAuth Playground → gear
-  → own client id/secret → both scopes → authorize → exchange → copy the `1//…`
-  token into `/opt/brain/.env` `GOOGLE_REFRESH_TOKEN=` → `--force-recreate`.
-- The consent screen must be **"In production"** — in "Testing" the refresh token
-  expires in ~7 days and Google returns `invalid_grant` (see PROJECT_LOG §8).
-- Document this in `SKILL.md` so a scope gap fails loudly, not silently.
+- **Re-consent with BOTH scopes at once** (calendar + tasks) so Calendar keeps working;
+  mint a new refresh token (OAuth Playground → own client id/secret → both scopes →
+  exchange → copy `1//…` into `/opt/brain/.env` `GOOGLE_REFRESH_TOKEN=` →
+  `--force-recreate`).
+- Consent screen must be **"In production"** (else ~7-day `invalid_grant`; PROJECT_LOG §8).
+- Note it in `SKILL.md` so a scope gap fails loudly.
 
 ## New skill — `2. Skills/3. Tasks/`
 
-Standard skill contract (`manifest` + `run`), auto-discovered at boot. Files mirror
-the Calendar skill: `skill.js` (logic + Google Tasks client), `prompt.js` (prompt
-builders + **JSON Schemas** + user-facing strings), `SKILL.md` (human doc).
+`skill.js` (logic + Google Tasks client) · `prompt.js` (prompt builders + JSON Schemas
++ `MSG` strings) · `SKILL.md` (human doc). Auto-discovered at boot.
 
 - `manifest`:
   ```js
   export const manifest = {
     id: "task_action",
     description:
-      "add a task/todo, list the owner's open tasks, or complete/check off a task in Google Tasks",
+      "add a to-do for the owner OR for another person, list the owner's open tasks, or complete a task",
   };
   ```
 
-- `run(ctx)` — mirror Calendar's shape:
-  1. **Continuation first.** If `ctx.session?.intent === "complete"` and
-     `stage === "await_confirmation"`, resume the pending completion (see below) and
-     return. The orchestrator only sets `ctx.session` when this message is a genuine
-     continuation of *this* skill's session.
-  2. Otherwise **interpret**: one Claude call (`interpret`) with the skill's system
-     prompt and a `TASK_SCHEMA` structured output that classifies the action and
-     extracts data:
-     `{ action: "add" | "list" | "complete" | "other", title: string|null, due_iso: string|null, task_ref: string|null }`.
-  3. Dispatch on `info.action`:
-     - **add** → `addTask`, then confirm:
-       `Added to your list: "<title>"[ · due <localized when>]`.
-     - **list** → `listTasks`, format the open items (see below).
-     - **complete** → resolve which task `task_ref` means (a focused second LLM pass
-       matching against the fetched open list, same spirit as Calendar's
-       `inspectMissing`/`matchDeletionTargets`), then **open a confirm session** and
-       mark done only on a "yes" continuation.
-     - **other / unmatched** → a short "I didn't identify a task action" reply.
-  4. Source of the title:
-     - reply/quote (`@brain turn this into a task`) → `ctx.quoted.text`.
-     - inline (`add "…" to my todos`) → the extracted `title`.
+### `run(ctx)` dispatch (mirrors Calendar's shape)
 
-### Structured outputs (match the Calendar skill exactly)
+```
+run(ctx):
+  # 1. CONTINUATIONS owned by this skill
+  if session.intent === "add"      && stage === "await_amend":        return resumeAmend(ctx, session)
+  if session.intent === "complete" && stage === "await_confirmation": return resumeComplete(ctx, session)
+  # (third-party CREATE continuations belong to calendar_action, not here)
 
-The Calendar skill no longer asks for "JSON only" prose — it passes a JSON Schema via
-`output_config: { format: { type: "json_schema", schema } }` and reads the guaranteed
--valid reply. Copy that verbatim:
+  # 2. FRESH ORDER — one structured call
+  info = interpret(ctx)     # { action, title, due_iso, task_ref, assignee }
+  if info.action === "add" and assignee is me/absent:  return handleAddSelf(ctx, info)
+  if info.action === "add" and assignee is someone:    return handleAddOther(ctx, info)
+  if info.action === "list":                            return handleList(ctx)
+  if info.action === "complete":                        return handleComplete(ctx, info)
+  send(MSG.noAction)
+```
 
-- Define schemas in `prompt.js` (`TASK_SCHEMA`, and for `complete` a `COMPLETE_SCHEMA`
-  and a `CONFIRM_SCHEMA`). Every object needs `additionalProperties: false` and a full
-  `required` list; optional fields use a nullable union (`{ type: ["string","null"] }`).
-- Copy the `jsonFormat()` + `readReply()` helpers (and the `parseJsonReply` balanced-
-  brace fallback) from `2. Skills/1. Calendar Actions/skill.js` — they handle a model
-  refusal and a non-structured fallback. Don't reinvent them.
-- Reuse Calendar's `CONFIRM_SCHEMA` shape (`{ decision: "confirm"|"decline"|"unrelated" }`)
-  and its `buildConfirmSystem`/`classifyConfirmation` pattern for the complete "yes".
+### interpret (structured output)
 
-### Google Tasks client (in `skill.js`)
+`anthropic.messages.create` with `output_config: jsonFormat(TASK_SCHEMA)`, read via the
+`readReply` helper copied from Calendar. Schema:
 
-- Build `google.tasks({ version: "v1", auth })` the same way `calendarClient(env)`
-  builds the calendar client (OAuth2 with the refresh token).
-- Helpers: `addTask(env, {title, notes, due})`, `listTasks(env)`,
-  `completeTask(env, taskId)`. Default task list = `@default` (or a
-  `GOOGLE_TASKLIST_ID` env override, mirroring `GOOGLE_CALENDAR_ID` / `calId()`).
-- Due handling: Google Tasks stores `due` as an **RFC3339 date (date-only, no time)**.
-  Convert `due_iso` accordingly and set expectations in the confirm copy.
+```js
+TASK_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["action", "title", "due_iso", "task_ref", "assignee"],
+  properties: {
+    action:   { type: "string", enum: ["add", "list", "complete", "other"] },
+    title:    { type: ["string", "null"] },
+    due_iso:  { type: ["string", "null"] },   // -03:00
+    task_ref: { type: ["string", "null"] },    // free-text, for complete
+    assignee: {                                // null/owner => self; else => Calendar
+      anyOf: [{ type: "null" },
+              { type: "object", additionalProperties: false,
+                required: ["name", "email"],
+                properties: { name: {type:["string","null"]}, email:{type:["string","null"]} } }],
+    },
+  },
+};
+```
 
-### Complete flow — reuse the confirm-first SESSION pattern
+## ADD (self) — immediate write + amend window
 
-Model it on Calendar's delete (`handleDelete` → `resumeDelete`):
+```
+handleAddSelf(ctx, info):
+  title = info.title || ctx.quoted?.text
+  if !title: send(MSG.needTitle); return
+  task = addTask(env, { title, due: dueDate(info.due_iso) })     # writes NOW
+  sessions.set(remoteJid, {
+    skill:"task_action", intent:"add", stage:"await_amend", awaitFrom:"owner",
+    data:{ taskId: task.id, title, due: info.due_iso },
+  }, 600)
+  send(`Added to your list: "${title}"${dueNote}. Change anything, or say "done".`)
 
-1. Resolve `task_ref` to a specific open task (LLM match against `listTasks`). If no
-   confident match, ask which one instead of guessing.
-2. `ctx.sessions.set(remoteJid, { skill: "task_action", intent: "complete",
-   stage: "await_confirmation", awaitFrom: "owner", data: { taskId, title } }, 600)`
-   and send the confirm prompt.
-3. The "yes" arrives as a **continuation** (no `@brain`, no reply needed): the
-   orchestrator sees the open session, sets `ctx.session`, and calls `run(ctx)`
-   again. `run` routes to `resumeComplete`, which uses `classifyConfirmation`
-   (`confirm`/`decline`/`unrelated`) — staying **silent on chatter** — and calls
-   `completeTask` + `ctx.sessions.clear` on confirm.
+resumeAmend(ctx, session):                       # runs on EVERY owner msg while open
+  review = reviewAdd(ctx, session.data)          # {decision: amend|keep|delete|unrelated, title?, due_iso?}
+  if unrelated: return                            # silent on chatter
+  if keep:   sessions.clear(remoteJid); return    # "done" — silent close
+  if delete: deleteTask(env, taskId); sessions.clear; send(`Removed "${title}".`); return
+  # amend
+  patchTask(env, taskId, { title?, due? })
+  sessions.set(... refreshed data + TTL ...)      # re-arm for further edits
+  send(`Updated: "${newTitle}"${dueNote}.`)
+```
 
-### Prompt (`2. Skills/3. Tasks/prompt.js`)
+- No draft/confirm before writing: private, reversible (the amend window includes
+  `delete`, so "actually cancel that" undoes it).
+- `reviewAdd` is Calendar-`reviewCreate`-shaped but patches an already-created task.
 
-- `buildSystem(owner)` + `buildUserPrompt(owner, { order, transcript, nowStr, contact, quoted })`
-  — classify into add/list/complete/other and extract `{title, due_iso, task_ref}`.
-  Use `nowStr` for relative-date conversion (same convention as Calendar).
-- `TASK_SCHEMA`, `COMPLETE_SCHEMA`, `CONFIRM_SCHEMA` live here (single source of truth
-  for reply shape).
-- For `complete`, `task_ref` is free-text; the skill matches it to an open task via a
-  focused second pass over the fetched list.
+## ADD (other) — delegate to Calendar (confirm-first, emails the invite)
 
-## Read-back formatting (example)
+```
+handleAddOther(ctx, info):
+  if !ctx.hasSkill("calendar_action", "startCreate"):
+      send(MSG.calendarUnavailable); return
+  start_iso = atThreePM(info.due_iso)     # due date @ 15:00 -03:00; no due => today (or tomorrow if past 15:00)
+  return ctx.callSkill("calendar_action", "startCreate", {
+    action: "create",
+    title: info.title || ctx.quoted?.text,
+    participants: [{ name: info.assignee.name, email: info.assignee.email }],
+    start_iso,
+    duration_min: 5,
+    summary: info.title || "",
+  })
+```
+
+- Reuses Calendar's entire stateful flow: if the email is missing it asks and waits;
+  shows the draft; `yes` writes + invites; "make it 3pm" modifies — all owned by
+  `calendar_action`. Tasks writes **no** create/confirm code for this path.
+- Fixed slot: **15:00 −03:00, 5 min**, on the due date.
+
+## LIST — read-back, no session
+
+```
+handleList(ctx):
+  items = listTasks(env)                 # open only
+  if !items.length: send(MSG.empty); return
+  send(formatList(items))                # numbered, with due dates (deterministic, no LLM)
+```
 
 ```
 [AI Brain]:
@@ -142,53 +250,74 @@ Your list (3 open):
 3. Call the accountant
 ```
 
-## Strings & multi-lingual (updated — no central catalog)
+## COMPLETE — confirm-first session (mirror Calendar delete)
 
-- **Multilingual is not built yet** (`ctx.lang` / a `send()`-level localizer do not
-  exist today). Ship this skill **English-only now**, with all user-facing strings
-  isolated in `prompt.js` as a `MSG`-style object (exactly like the Audio skill's
-  `MSG`, and where Calendar is heading).
-- **When multilingual lands**, `multilingual-brain.md` decided **against** a central
-  `i18n.js` catalog: each skill keeps its own EN + PT string maps in its `prompt.js`,
-  language rides in `ctx.lang`, and the `send()` choke point handles the long tail via
-  LLM translation. So keep the strings structured and body-only (never touch the
-  `[AI Brain]:` header). Task **titles** always stay verbatim as written.
-- Suggested keys: `task.added`, `task.listHeader`, `task.empty`, `task.completed`,
-  `task.confirmComplete`, `task.notFound`, `task.failed`.
+```
+handleComplete(ctx, info):
+  open = listTasks(env); if !open.length: send(MSG.empty); return
+  match = resolveTaskRef(ctx, info.task_ref, open)     # focused LLM match; null if unsure
+  if !match: send(MSG.notFound); return
+  sessions.set(remoteJid, { skill:"task_action", intent:"complete",
+    stage:"await_confirmation", awaitFrom:"owner", data:{ taskId, title } }, 600)
+  send(`Mark this done?\n- ${title}\n\nReply "yes" to confirm.`)
 
-## Composability
+resumeComplete(ctx, session):
+  decision = classifyConfirmation(ctx, { action:`mark "${title}" done` })   # Calendar helper + CONFIRM_SCHEMA
+  if unrelated: return                                                       # silent on chatter
+  if decline: sessions.clear; send(`Okay, leaving "${title}" open.`); return
+  completeTask(env, taskId); sessions.clear; send(`Done — checked off "${title}".`)
+```
 
-- **Summarizer (idea 2):** after a summary with action items, hand them here to
-  batch-add via a confirmation session. Keep as phase 2.
+## Google Tasks client (in `skill.js`)
+
+- `tasksClient(env)` = `google.tasks({version:"v1", auth})`, OAuth2 + refresh token,
+  same shape as `calendarClient`. `listId(env)` = `GOOGLE_TASKLIST_ID || "@default"`.
+- Helpers: `addTask({title, due})` → `tasks.insert`; `listTasks()` → `tasks.list({showCompleted:false})`;
+  `completeTask(taskId)` → `tasks.patch({status:"completed"})`; `deleteTask(taskId)` → `tasks.delete`;
+  `patchTask(taskId, {title?, due?})` → `tasks.patch`.
+- Due is **date-only** RFC3339 — `dueDate()` truncates; confirm copy shows a date, never a time.
+
+## Strings & multi-lingual (no central catalog)
+
+- Ship **English-only**; all user-facing strings in `prompt.js` as a `MSG` object
+  (Audio-skill style), body-only (never the `[AI Brain]:` header). Task **titles stay
+  verbatim**.
+- Multilingual has landed (2026-07-11): give this `MSG` an `{ en, pt }` shape selected by
+  `ctx.lang`, per the per-skill-map convention in `../ARCHITECTURE.md`. No central `i18n.js`.
 
 ## Files touched
 
-- **New:** `2. Skills/3. Tasks/skill.js`, `2. Skills/3. Tasks/prompt.js`,
-  `2. Skills/3. Tasks/SKILL.md` (every skill now ships a human doc).
-- **Edit:** `brain/.env.example` (add `GOOGLE_TASKLIST_ID` note + the tasks scope
-  reminder); `ARCHITECTURE.md` (add the tasks flow to the "Flow" section);
-  `PROJECT_LOG.md` (changelog entry).
-- **Setup:** re-consent OAuth with calendar **+** tasks scopes; update
-  `GOOGLE_REFRESH_TOKEN` in `/opt/brain/.env`.
-- **No i18n catalog file** (there isn't one). No `server.js` / router edits.
+- **New:** `2. Skills/3. Tasks/skill.js`, `prompt.js`, `SKILL.md`.
+- **Edit:** `1. Orchestrator/server.js` (capability registry in `loadSkills()` +
+  `ctx.hasSkill`/`ctx.callSkill` + `MAX_SKILL_DEPTH`); `2. Skills/1. Calendar Actions/skill.js`
+  (add `capabilities.startCreate`); `ARCHITECTURE.md` ("Composing skills" section +
+  tasks flow); `brain/.env.example` (`GOOGLE_TASKLIST_ID` + tasks scope reminder);
+  `PROJECT_LOG.md` (changelog).
+- **Setup:** re-consent OAuth (calendar + tasks); update `GOOGLE_REFRESH_TOKEN`.
+- No i18n catalog file; no router edits.
 
 ## Build order
 
-1. OAuth scope + new refresh token (blocking prerequisite).
-2. Tasks client helpers (add / list / complete).
-3. Skill + prompt with `TASK_SCHEMA`: **add** and **list** paths first (copy the
-   `jsonFormat`/`readReply` structured-output helpers from Calendar).
-4. **complete** path with the confirm session (`resumeComplete` + `classifyConfirmation`).
-5. `MSG` strings in `prompt.js` (English), structured for later PT.
-6. `SKILL.md` + PROJECT_LOG changelog entry.
-7. (Phase 2) Summarizer → batch add action items.
+1. OAuth scope + new refresh token (blocking).
+2. **Capability registry** in the orchestrator (`loadSkills` collects `capabilities`;
+   `ctx.hasSkill`/`ctx.callSkill` + `MAX_SKILL_DEPTH`); expose `capabilities.startCreate`
+   from Calendar; document both in ARCHITECTURE "Composing skills". Land this first —
+   it's the shared plumbing, independently testable with a fake `CAPS`.
+3. Google Tasks client helpers (add / list / complete / delete / patch).
+4. Skill + prompt with `TASK_SCHEMA` (copy `jsonFormat`/`readReply`): **add-self** +
+   **list** first.
+5. **add-self amend window** (`resumeAmend` + `reviewAdd`).
+6. **add-other** delegation to `startEventCreate`.
+7. **complete** confirm session (`resumeComplete` + `classifyConfirmation`).
+8. `MSG` strings, `SKILL.md`, PROJECT_LOG changelog.
+9. (Phase 2) Summarizer → batch add.
 
 ## Notes / risks
 
-- **Scope gap** is the main gotcha — without re-consent, Tasks calls 401 and, worse,
-  a wrong re-consent could drop the calendar scope. Re-consent with BOTH scopes and
-  fail loudly with a clear message if Tasks returns 401/403.
-- Google Tasks due dates are **date-only** (no time). Set expectations in the confirm
-  copy; a precise-time nudge would need Reminders/Calendar, not Tasks.
-- **Complete is destructive-ish** (marks done) → always confirm-first via the session,
-  never auto-complete on a bare match.
+- **Scope gap** — re-consent with BOTH scopes; a wrong re-consent could drop calendar.
+  Fail loudly on Tasks 401/403.
+- **Tasks due is date-only** — no time nudge; that's what the Calendar path is for.
+- **Complete + delete are state-changing** → always via a session, never on a bare match.
+- **Self vs other must be unambiguous** — the interpret prompt keys off an explicit
+  recipient other than the owner. "schedule a *meeting* with X" is still a Calendar
+  action via the router; "add a *task/todo* for X" flows through here then delegates.

@@ -168,5 +168,6 @@ the locale sets day/month order). Any language you did *not* write a map for is 
 from the `en` copy by the orchestrator's `send()` translation fallback — a safety net for
 unmaintained languages, **not** a substitute for authoring `en`/`pt`. Never translate the
 `[AI Brain]:` header; internal/classification prompts (router + skill system prompts) stay
-English. Maintained languages today: **en + pt-BR**. Full design:
-`New Features Plans/multilingual-brain.md`.
+English. Maintained languages today: **en + pt-BR**. The map is **per-skill** (in each
+skill's `prompt.js`) — deliberately *not* a central `i18n.js` catalog; prose stays with the
+skill that owns it. Live in production since 2026-07-11.

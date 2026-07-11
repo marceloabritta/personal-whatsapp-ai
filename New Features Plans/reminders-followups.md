@@ -89,9 +89,9 @@ Standard skill contract (`manifest` + `run`), discovered by the orchestrator at 
 ## Multi-lingual
 
 - Store `ctx.lang` on the job so the fired message is localized even though no live
-  message triggers it. All user-facing strings go through the i18n catalog
-  (`reminder.set`, `reminder.missingTime`, `reminder.due`, …). See
-  `multilingual-brain.md`.
+  message triggers it. User-facing strings live in this skill's `prompt.js` as a per-skill
+  `{ en, pt }` map (`reminder.set`, `reminder.missingTime`, `reminder.due`, …) selected by
+  `ctx.lang`. See the localization convention in `../ARCHITECTURE.md`.
 
 ## Files touched
 

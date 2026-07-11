@@ -124,7 +124,6 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 ├── .gitignore
 ├── New Features Plans/    # per-feature implementation plans (not yet built)
 │   ├── calendar-actions.md     #   smart scheduling + edit/reschedule (next up)
-│   ├── multilingual-brain.md
 │   ├── message-summarizer.md
 │   ├── reminders-followups.md
 │   └── task-capture.md
@@ -224,8 +223,8 @@ selected at send time with `ctx.lang`; every new message must ship its `en` *and
 entries (English is canonical). Dates use `localizeDate(ctx.lang, …)`. Any language without
 a map is produced from the `en` copy by the orchestrator's `send()` translation fallback —
 a safety net, not a reason to skip `pt`. Never translate the `[AI Brain]:` header;
-classification/system prompts stay English. Full design:
-`New Features Plans/multilingual-brain.md`.
+classification/system prompts stay English. Full convention: `ARCHITECTURE.md`
+("Localization convention").
 
 Two-LLM-call design is intentional: the router classifies (call 1), then a skill like
 `calendar_action` extracts details (call 2). `transcribe_audio` makes no LLM call.
@@ -334,14 +333,14 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
-- **2026-07-11 — multilingual brain (built, not yet deployed).** The brain now detects
-  the conversation language (the router returns `lang`, schema-enforced) and replies in it,
-  system-wide. Prose lives per-skill in `prompt.js` as `{ en, pt }` maps selected by
-  `ctx.lang`; the `send()` choke point localizes — en/pt pass through, any other language
-  is body-translated by a cheap `TRANSLATE_MODEL` (header never translated). Dates via
-  `localizeDate` (3-letter month + AM/PM; locale day/month order). `lang` is persisted in
-  the session so continuations answer in-language. Maintained: en + pt-BR. Design:
-  `New Features Plans/multilingual-brain.md`.
+- **2026-07-11 — multilingual brain (DEPLOYED).** The brain now detects the conversation
+  language (the router returns `lang`, schema-enforced) and replies in it, system-wide.
+  Prose lives per-skill in `prompt.js` as `{ en, pt }` maps selected by `ctx.lang`; the
+  `send()` choke point localizes — en/pt pass through, any other language is body-translated
+  by a cheap `TRANSLATE_MODEL` (header never translated). Dates via `localizeDate` (3-letter
+  month + AM/PM; locale day/month order). `lang` is persisted in the session so
+  continuations answer in-language. Maintained: en + pt-BR. Convention: `ARCHITECTURE.md`
+  ("Localization convention"). Shipped to production the same day (`git pull` + restart).
 - **2026-07-11 — calendar structured outputs.** All four calendar LLM calls moved to
   native structured outputs (`output_config.format` + JSON Schemas in `prompt.js`), with a
   `parseJsonReply`/refusal-guard fallback; `@anthropic-ai/sdk` bumped to `^0.111`.

@@ -73,7 +73,7 @@ Dates:
 
 ## Multi-lingual
 
-- Two layers, both consistent with `multilingual-brain.md`:
+- Two layers, both consistent with the localization convention in `../ARCHITECTURE.md`:
   1. The model writes the summary body in the **source language** (instructed in the
      prompt) — this naturally matches the chat.
   2. Fixed labels ("Summary", "Action items", "Dates", error strings) come from the

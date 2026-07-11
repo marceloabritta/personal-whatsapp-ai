@@ -5,19 +5,31 @@ mechanism these rely on is built and live; it's documented in
 [ORCHESTRATOR.md](../brain/1.%20Orchestrator/ORCHESTRATOR.md) (the gate, session shape, and
 skill contract) and [ARCHITECTURE.md](../ARCHITECTURE.md) (the end-to-end flow).
 
-## Status snapshot (as of 2026-07-10)
+## Status snapshot (as of 2026-07-11)
 
-Done and live:
+Done and in the codebase:
 - `calendar_action` skill: **create** and **cancel/delete** events.
 - **Stateful conversation layer** (Redis sessions): a flow starts on `@brain`, then
   continues without the tag; the brain uses the LLM to detect the awaited answer and
   ignores normal chatter. `awaitFrom` selects who may answer (owner / contact / any).
 - Delete uses a confirm-first session: the owner just types `yes`/`no`.
+- **Phase C** (create improvements): conversation-inferred titles, confirm-first create
+  with a modify path, and the fully-stateful missing-field chase (C1 + C2/C3 merged).
+- **Structured outputs** live at all four LLM call sites (`output_config.format`), on
+  `@anthropic-ai/sdk ^0.111.0` — see the extraction section for details.
+- **Multilingual layer** (commit `7e86855`): the flow's language is detected once and
+  persisted on the session; every calendar reply is rendered per-`lang` and the session
+  answers ("yes"/edits) in the language it started in. Woven through this skill's
+  sessions, `reply(lang)`, and `localizeDate`.
 - Message polish: `[AI Brain]:` header, `SECRETARY_TAG` single source, clean invite text.
 
-Implemented 2026-07-11 (not yet deployed): **Phase C** — conversation-inferred titles,
-confirm-first create with a modify path, and the stateful missing-email chase (C2+C3
-merged). Remaining: **edit/reschedule (Phase B)**.
+Remaining: **edit/reschedule (Phase B)** — not yet built (no `handleEdit`; the
+`CAL_SCHEMA` action enum is `create | delete | other`, no `edit`).
+
+**Deploy status:** Phase C, structured outputs, and the multilingual layer are all
+committed; whether they're running on the droplet still needs a production check
+(`git log` on the droplet + a restart if it's behind). The manifest already advertises
+"edit/reschedule," which oversells until Phase B lands.
 
 ---
 
@@ -27,7 +39,7 @@ The original goal: name the event by its topic, know how many people should atte
 and collect any missing emails — asking the owner *or the attendee themselves*.
 Built in three testable steps.
 
-### C1 — Conversation-inferred naming + confirm-first create (IMPLEMENTED 2026-07-11, not yet deployed)
+### C1 — Conversation-inferred naming + confirm-first create (IMPLEMENTED — in codebase)
 Merged with the "confirm before writing" improvement below — the two ship together:
 inferring the title is safe precisely because the owner now confirms the draft.
 - **Title from the conversation (not just an explicit order).** The LLM infers a
@@ -53,7 +65,7 @@ inferring the title is safe precisely because the owner now confirms the draft.
   NEVER writes to Google without an explicit owner confirmation; the draft can be
   edited by plain reply before confirming.
 
-### C2 + C3 — Fully-stateful gathering with a focused resolver (IMPLEMENTED 2026-07-11, not yet deployed)
+### C2 + C3 — Fully-stateful gathering with a focused resolver (IMPLEMENTED — in codebase)
 **Generalized well past the original C2/C3.** Every create is now stateful and always
 converges on a session; there are **no re-tag dead-ends**. The email-only chase became a
 single mechanism that gathers *any* required field — date/time, attendees, and each
@@ -167,10 +179,10 @@ add, but the confirm step already gives the human that final check for free.
 ---
 
 ## Suggested order
-C1 + create-confirm ✅ → C2/C3 email-chase ✅ (both implemented 2026-07-11, **not yet
-deployed**) → **Phase B (edit)** is what's next. Each step: implement → deploy → test → next.
+C1 + create-confirm ✅ → C2/C3 email-chase ✅ (both in the codebase) → **Phase B (edit)**
+is what's next. Each step: implement → deploy → test → next.
 
-## Prompt-quality pass (2026-07-11, not yet deployed)
+## Prompt-quality pass (IMPLEMENTED — in codebase)
 Reviewed the four JSON-producing prompts. Applied:
 - **Dropped dead fields** from the interpret schema (`prompt.js`): `confirm` (delete now
   runs entirely through the session/`classifyConfirmation` path) and `missing`
@@ -180,13 +192,24 @@ Reviewed the four JSON-producing prompts. Applied:
   longer event-body agenda.
 - **Resolver contract** made structured (`buildResolveUser` takes
   `needsTime`/`needsAttendees`/`needEmailFor` instead of prose phrases).
-- **Hardened JSON extraction** (`parseJsonReply` in `skill.js`, all 4 call sites):
-  strips ```json fences, whole-string parse, then a BALANCED `{...}` scan — replaces
-  the greedy `/\{[\s\S]*\}/` that silently returned null on any trailing brace / second
-  object. Verified against the old regex on adversarial inputs.
-- **Follow-up (needs SDK bump):** native structured outputs (`output_config.format` /
-  `messages.parse`) would guarantee schema-valid JSON and retire the parser, but require
-  bumping `@anthropic-ai/sdk` from the pinned `^0.30.1`; deferred until that's tested.
+
+## Structured outputs (IMPLEMENTED — in codebase)
+The SDK-bump follow-up is **done**. `@anthropic-ai/sdk` is on `^0.111.0` and every calendar
+LLM call passes a JSON Schema via `output_config.format` so the API returns only
+schema-valid JSON:
+- **Schemas** are the single source of truth for reply shape (`prompt.js`):
+  `CAL_SCHEMA`, `CONFIRM_SCHEMA`, `REVIEW_SCHEMA`, `RESOLVE_SCHEMA` (each
+  `additionalProperties:false` + full `required`, nullable unions for optionals). The
+  prompts describe what fields MEAN; the schema enforces type/enum/shape.
+- **`skill.js`** wraps them via `jsonFormat(schema)` and reads the guaranteed-valid reply
+  with `readReply` at all four sites (`interpret`, `reviewCreate`, `inspectMissing`,
+  `classifyConfirmation`).
+- **`parseJsonReply` kept as a defensive fallback**, not retired: `readReply` falls back
+  to it only if the model refuses or is ever swapped to one without structured-output
+  support. It still strips ```json fences and does a BALANCED `{...}` scan (never the old
+  greedy `/\{[\s\S]*\}/`).
+- **Possible future add:** a pure verifier ("is any *present* field likely wrong?") — but
+  the confirm step already gives the human that final check for free.
 
 ## Notes / smaller follow-ups
 - Remove the temporary `QUOTED>>>` diagnostic log in `server.js` once the calendar

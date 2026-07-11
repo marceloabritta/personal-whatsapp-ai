@@ -55,8 +55,7 @@ its user-facing strings in its `prompt.js` as a per-language map (`{ en, pt }`) 
 `ctx.lang`, and **must ship both `en` and `pt` for every message** (English is canonical;
 dates use `localizeDate(ctx.lang, …)`). A language without a map is auto-translated from the
 `en` copy by the orchestrator's `send()` fallback; the `[AI Brain]:` header is never
-translated. See the convention in `../ARCHITECTURE.md` and the design in
-`../New Features Plans/multilingual-brain.md`.
+translated. See the "Localization convention" in `../ARCHITECTURE.md`.
 
 ## Stateful flow (starting vs. continuing)
 

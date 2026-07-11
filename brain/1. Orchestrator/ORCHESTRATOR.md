@@ -96,7 +96,8 @@ bound to the conversation's `ctx.lang`, so their call sites don't pass a languag
 
 The orchestrator's own strings ("I didn't understand…", router/continuation/skill errors)
 live in an `en`/`pt` map (`ORCH_MSG` + `orch(lang, key, …)`); a non-en/pt language is
-produced from the English copy by the same fallback. See `New Features Plans/multilingual-brain.md`.
+produced from the English copy by the same fallback. See the "Localization convention" in
+`../../ARCHITECTURE.md`.
 
 ### State the orchestrator holds
 - **`sessions`** (Redis / in-memory) — per-chat pending actions; skills open/clear them,
