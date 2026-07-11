@@ -1,7 +1,7 @@
 // ============================================================================
 //  Skill "Feature Requests" (spec-a-feature) — LOGIC.
 //  An OPEN-ENDED clarifying conversation (not a slot-filler). The owner starts with
-//  `@brain I have a feature idea …`; the brain becomes stateful and interviews him,
+//  `@secretary I have a feature idea …`; the secretary becomes stateful and interviews him,
 //  accumulating a running DRAFT in the session, until he signals he's done. Then it
 //  renders a Markdown feature spec (ALWAYS English) and delivers it as a real,
 //  saveable `.md` document on the chat.
@@ -9,7 +9,7 @@
 //  Run by the orchestrator when the router picks "feature_request".
 //
 //  Flow:
-//    fresh  @brain <idea>        -> startFeatureRequest -> ask + open session
+//    fresh  @secretary <idea>    -> startFeatureRequest -> ask + open session
 //    every owner reply while open -> resumeClarify -> ask more / finalize / cancel
 //    finalize                    -> generateDoc (English) -> sendMedia(.md) -> clear
 //

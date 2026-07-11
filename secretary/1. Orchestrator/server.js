@@ -1,5 +1,5 @@
 // ============================================================================
-//  BRAIN (v2.0)  —  ORCHESTRATOR.
+//  SECRETARY (v2.0)  —  ORCHESTRATOR.
 //  Receives the Evolution webhook, filters (fromMe + trigger tag), builds the
 //  context, DISCOVERS the available skills (../2. Skills/*/skill.js), calls the
 //  ROUTER to classify intent and dispatches to the chosen skill(s).
@@ -44,7 +44,7 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 const TRANSLATE_MODEL =
   process.env.TRANSLATE_MODEL || "claude-haiku-4-5-20251001";
 const OWNER_NAME = process.env.OWNER_NAME || "User";
-// Languages the brain writes natively (skills carry en/pt maps). Any other
+// Languages the secretary writes natively (skills carry en/pt maps). Any other
 // detected language is handled by the LLM-translation fallback in send().
 const MAINTAINED_LANGS = new Set(["en", "pt"]);
 
@@ -141,7 +141,7 @@ async function localizeBody(text, lang) {
   }
 }
 
-// Sends text to WhatsApp with the brain's standard header (header + blank line).
+// Sends text to WhatsApp with the secretary's standard header (header + blank line).
 // `lang` drives the long-tail translation fallback; en/pt pass through unchanged.
 // Skills receive a `ctx.send` already bound to the conversation's language.
 async function send(number, text, lang = "en") {
@@ -194,7 +194,7 @@ console.log(
 const app = express();
 app.use(express.json({ limit: "8mb" }));
 
-app.get("/", (_req, res) => res.send("Brain v2.0 up."));
+app.get("/", (_req, res) => res.send("Secretary v2.0 up."));
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // reply fast so Evolution does not resend
@@ -205,7 +205,7 @@ app.post("/webhook", async (req, res) => {
     const text = extractText(data.message).trim();
     const t = Number(data.messageTimestamp) || Math.floor(Date.now() / 1000);
 
-    // buffer EVERY message (context), even the ones that don't trigger the brain.
+    // buffer EVERY message (context), even the ones that don't trigger the secretary.
     if (text) remember(remoteJid, { t, fromMe, text, pushName: data.pushName });
 
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
@@ -215,7 +215,7 @@ app.post("/webhook", async (req, res) => {
     // (same account as the owner), so this header check is the ONLY thing telling
     // them apart from a genuine owner message — it must match every header variant
     // the secretary emits (both languages + legacy), see lib/identity.js.
-    const isBrainMsg = isOwnMessage(text);
+    const isOwnMsg = isOwnMessage(text);
 
     // Pending conversation state for this chat (confirmations, clarifications, ...).
     const session = await sessions.get(remoteJid);
@@ -232,7 +232,7 @@ app.post("/webhook", async (req, res) => {
     // | any. (The contact case lets the person the owner is scheduling with answer.)
     const awaitFrom = session?.awaitFrom || "owner";
     let isContinuation = false;
-    if (session && !isTagged && !isBrainMsg) {
+    if (session && !isTagged && !isOwnMsg) {
       if (fromMe && (awaitFrom === "owner" || awaitFrom === "any"))
         isContinuation = true;
       else if (!fromMe && (awaitFrom === "contact" || awaitFrom === "any"))
@@ -368,5 +368,5 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () =>
-  console.log("Brain v2.0 (orchestrator) listening on port 3000")
+  console.log("Secretary v2.0 (orchestrator) listening on port 3000")
 );

@@ -7,20 +7,21 @@
 > **It handles one task:** transcribe a voice note you **reply to**.
 >
 > **How you call it:** press-and-hold the voice message → **Reply** → type
-> `@brain transcribe`. It downloads that audio, transcribes it, and sends you the text.
+> `@secretary transcribe`. It downloads that audio, transcribes it, and sends you the text.
 > Takes roughly up to a minute for short notes.
 >
 > If you didn't reply to an audio, it tells you how to do it.
 
 ## What you'll see (the full conversation)
 
-Every brain message is prefixed with `[AI Brain]:` and a blank line. This skill is
+Every secretary message is prefixed with the language-aware header — `[Marcelo's AI Secretary]:`
+in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`) — and a blank line. This skill is
 one-shot — it sends a confirmation, then the result. It does **not** wait for or pick up
 any follow-up answer.
 
 **Normal run:**
-1. You reply to a voice note with `@brain transcribe`.
-2. Once the audio is downloaded, the brain confirms it's on it:
+1. You reply to a voice note with `@secretary transcribe`.
+2. Once the audio is downloaded, the secretary confirms it's on it:
    > Got the audio, transcribing... ~1 min.
 3. Then it sends the result:
    > Audio transcript:
@@ -29,8 +30,8 @@ any follow-up answer.
    - If the audio was silent/too short: *"I transcribed it, but no text came out (silent or very short audio)."*
 
 **Instead of the above, you may see one of these and nothing more:**
-- Not a reply to an audio: *"To transcribe, reply to the audio you want and call @brain
-  again. E.g.: press and hold the audio, tap Reply and type \"@brain transcribe\"."*
+- Not a reply to an audio: *"To transcribe, reply to the audio you want and call @secretary
+  again. E.g.: press and hold the audio, tap Reply and type \"@secretary transcribe\"."*
 - Couldn't download it (too old / not saved): *"I couldn't download that audio from
   WhatsApp. It may be too old or was not saved. Try a more recent audio."*
 - Transcription failed (or API key missing): *"I downloaded the audio, but the
@@ -55,7 +56,7 @@ any language without a map is translated from `en` by the orchestrator's `send()
 (the transcript text itself is the audio's own words and isn't localized).
 
 ### How it's invoked
-The router classifies an `@brain` order as `transcribe_audio` — disambiguated by
+The router classifies an `@secretary` order as `transcribe_audio` — disambiguated by
 `ctx.hasQuotedAudio` (the orchestrator tells the router when the replied-to message is a
 voice note). The orchestrator then calls `run(ctx)`. **Single-shot; never stateful.**
 

@@ -1,4 +1,4 @@
-# Brain v2.0 — Orchestrator + Skills
+# Secretary v2.0 — Orchestrator + Skills
 
 Evolution of v1.0 (a single scheduling agent) into a **network of skills** with a
 router that classifies intent and dispatches to the right skill.
@@ -6,7 +6,7 @@ router that classifies intent and dispatches to the right skill.
 ## Structure
 
 ```
-brain/
+secretary/
 ├── 1. Orchestrator/         # the Node app that runs (webhook + router + skill loading)
 │   ├── server.js            #   receives the webhook, filters the trigger tag (SECRETARY_TAG), builds context,
 │   │                        #   DISCOVERS the skills, calls the router and dispatches
@@ -68,24 +68,26 @@ Replies follow `ctx.lang` (the conversation language the router detects). Each s
 its user-facing strings in its `prompt.js` as a per-language map (`{ en, pt }`) selected by
 `ctx.lang`, and **must ship both `en` and `pt` for every message** (English is canonical;
 dates use `localizeDate(ctx.lang, …)`). A language without a map is auto-translated from the
-`en` copy by the orchestrator's `send()` fallback; the `[AI Brain]:` header is never
-translated. See the "Localization convention" in `../ARCHITECTURE.md`.
+`en` copy by the orchestrator's `send()` fallback; the reply header is never translated — it
+is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Secretary]:`, pt →
+`[Secretaria IA do Marcelo]:`). See the "Localization convention" in `../ARCHITECTURE.md`.
 
 ## Stateful flow (starting vs. continuing)
 
-The brain is **stateful**: it keeps per-chat conversation state in Redis (`lib/sessions.js`).
+The secretary is **stateful**: it keeps per-chat conversation state in Redis (`lib/sessions.js`).
 A flow only **starts** on a message that is from the owner (`fromMe === true`) and begins with
-the trigger tag (`SECRETARY_TAG`, default `@brain`). Once a session is active, though, it can
-**continue without the tag**: the brain uses the LLM to ignore normal chatter and watch for the
+a trigger tag (`SECRETARY_TAG` is **comma-separated**, default `@secretaria,@secretary`; the old
+`@brain` is retired). Once a session is active, though, it can
+**continue without the tag**: the secretary uses the LLM to ignore normal chatter and watch for the
 answer it's waiting on. That answer can also come from the **other person** in the chat (e.g.
 they type their email), so the old blanket rule "only acts if `fromMe` and the text starts with
 the tag" no longer holds — a non-owner message can be a valid continuation of an active session.
 
 ## Run / deploy
 
-The app is the contents of the `brain/` folder (that's where `package.json` lives,
+The app is the contents of the `secretary/` folder (that's where `package.json` lives,
 and `server.js` looks for the skills at `../2. Skills`). A single `node_modules`
-at the `brain/` root is shared by the orchestrator and the skills. Start it with
+at the `secretary/` root is shared by the orchestrator and the skills. Start it with
 `npm start` (which runs `node "1. Orchestrator/server.js"`). New `.env` variables:
 `ASSEMBLYAI_API_KEY` (and optionally `ASSEMBLYAI_LANGUAGE`), and `REDIS_URL` for the
 session store (defaults to `redis://evolution_redis:6379` — the same Redis the stack uses

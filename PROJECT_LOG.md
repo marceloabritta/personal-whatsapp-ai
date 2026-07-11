@@ -13,14 +13,14 @@ deliberately kept out of version control.
 
 ## 1. What this is
 
-A self-hosted personal AI secretary on WhatsApp. You type `@brain <order>` in any
+A self-hosted personal AI secretary on WhatsApp. You type `@secretary <order>` in any
 chat; the system reads that chat's recent context, an LLM **router** classifies the
 intent, and a task-specific **skill** does the work and replies to you on WhatsApp.
-The brain is **stateful**: a flow starts on `@brain` and can then continue without the
+The secretary is **stateful**: a flow starts on `@secretary` and can then continue without the
 tag (see §6 — the delete confirmation and, later, scheduling clarifications).
 
 Stack: **Evolution API** (WhatsApp gateway, self-hosted) + a Node app called the
-**brain** (orchestrator + skills) + **Claude** (reasoning) + **Redis** (per-chat session
+**secretary** (orchestrator + skills) + **Claude** (reasoning) + **Redis** (per-chat session
 state, shared with Evolution's cache) + per-skill external APIs (Google Calendar,
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
@@ -31,47 +31,48 @@ Four skills exist today:
   reply-driven change (move/relength/rename/add-remove attendee), confirm-first and stays
   open until saved, clarifying when ambiguous. See
   `New Features Plans/calendar-actions.md` for the remaining backlog.
-- `transcribe_audio` — reply to a voice message + `@brain transcribe`; downloads the
+- `transcribe_audio` — reply to a voice message + `@secretary transcribe`; downloads the
   audio from WhatsApp and transcribes it via AssemblyAI.
 - `task_action` — a to-do inbox: add / list / complete todos. A todo for the owner goes to
   Google Tasks; one assigned to someone else becomes a 5-min Calendar invite (via
   `calendar_action`'s `startCreate` capability).
-- `feature_request` — talk through a new feature idea; the brain interviews the owner, then
+- `feature_request` — talk through a new feature idea; the secretary interviews the owner, then
   writes a Markdown spec and sends it as a `.md` document.
 
 ---
 
 ## 2. Current status (read this first)
 
-- **Code:** `brain` (orchestrator + auto-discovered skills) is the only version now.
+- **Code:** `secretary` (orchestrator + auto-discovered skills) is the only version now.
   The original single-agent `brain/v1.0` was removed 2026-07-10; it lives in git history
   (commit `3ce1e69` / `c01d817`) if ever needed.
 - **GitHub:** repo `personal-whatsapp-ai` is **PRIVATE**. This local folder is a working
   **git clone** tracking `origin/main` (`gh` provides auth).
 - **Production (the droplet): ✅ v2.0 is DEPLOYED and LIVE** (cut over 2026-07-10). Trigger
-  kept as **`@brain`** and instance kept as **`secretaria`** (via compose env overrides
-  `SECRETARY_TAG=@brain`, `EVOLUTION_INSTANCE=secretaria`) so WhatsApp stayed linked. Old
+  now **`@secretaria` / `@secretary`** (comma-separated `SECRETARY_TAG=@secretaria,@secretary`;
+  the legacy `@brain` is retired and silently ignored) and instance kept as **`secretaria`**
+  (`EVOLUTION_INSTANCE=secretaria`) so WhatsApp stayed linked. Old
   v3.3 code backed up at `/opt/brain_v3.3_backup`; compose backup at
   `/opt/evolution/docker-compose.yml.v3.3.bak`.
 - **Deploy pipeline: ✅ set up.** Read-only GitHub **deploy key** on the droplet + repo
-  cloned at `/opt/personal-whatsapp-ai`; `/opt/brain` is a **symlink** to `brain`, so
+  cloned at `/opt/personal-whatsapp-ai`; `/opt/secretary` is a **symlink** to `secretary`, so
   `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
   (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
 
 **What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
 Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
-(confirm-first via a stateful session: `@brain cancel` replying to an invite → type `yes`).
+(confirm-first via a stateful session: `@secretary cancel` replying to an invite → type `yes`).
 `transcribe_audio` — reply-detection bug fixed (see §8); verify end-to-end when convenient.
 The stateful session layer (Redis) is live; see §6.
 
 > ✅ **DONE 2026-07-10 — folder-flatten migration (kept for reference).** The repo
-> dropped the `brain/v2.0/` level — `brain/` is the app root. The droplet's `/opt/brain`
-> symlink was re-pointed from `brain/v2.0` to `brain/` and the brain restarted (a fresh
+> dropped the `brain/v2.0/` level — `secretary/` is the app root. The droplet's `/opt/secretary`
+> symlink was re-pointed from `brain/v2.0` to `secretary/` and the secretary restarted (a fresh
 > `npm install` ran because `node_modules` moved with the flatten). Steps that were run:
 > ```bash
 > ssh secretaria-droplet 'cd /opt/personal-whatsapp-ai && git pull --ff-only'
-> ssh secretaria-droplet 'ln -sfn /opt/personal-whatsapp-ai/brain /opt/brain'
-> ssh secretaria-droplet 'cd /opt/evolution && docker compose restart brain'
+> ssh secretaria-droplet 'ln -sfn /opt/personal-whatsapp-ai/secretary /opt/secretary'
+> ssh secretaria-droplet 'cd /opt/evolution && docker compose restart secretary'
 > ```
 > The normal runbook below now applies to all further deploys.
 
@@ -83,17 +84,17 @@ git add -A && git commit -m "..." && git push      # (git status is slow on Goog
 
 # 2. deploy on the droplet
 ssh secretaria-droplet 'cd /opt/personal-whatsapp-ai && git pull --ff-only'
-ssh secretaria-droplet 'cd /opt/evolution && docker compose restart brain'   # code-only change
-#   if /opt/brain/.env (secrets) changed:  docker compose up -d --force-recreate brain
+ssh secretaria-droplet 'cd /opt/evolution && docker compose restart secretary'   # code-only change
+#   if /opt/secretary/.env (secrets) changed:  docker compose up -d --force-recreate secretary
 
 # 3. verify / read logs
-ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orchestrator) listening..."
+ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v2.0 (orchestrator) listening..."
 ```
 - **Production writes are gated per Claude Code session** — a fresh session must be
   *explicitly asked* to run the `git pull`/restart (naming the action). Reading logs is
   read-only and not gated.
 - `docker compose restart` reloads code but **not** `.env`; after a secret change use
-  `up -d --force-recreate`. Rollback: repoint the `/opt/brain` symlink to
+  `up -d --force-recreate`. Rollback: repoint the `/opt/secretary` symlink to
   `/opt/brain_v3.3_backup` (+ restore the compose `.bak`), then `--force-recreate`.
 
 ---
@@ -103,10 +104,10 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 1. ~~**Deploy v2.0 to the droplet.**~~ ✅ **DONE (2026-07-10)** — clone-on-droplet +
    `git pull` deploys (runbook in §2). App Platform was considered and rejected (can't run
    `docker-compose.yml`; would need paid managed Postgres/Redis + a session-persistence fix).
-2. ~~**Cut over the trigger + instance names.**~~ ✅ **DONE** — kept `@brain` / instance
+2. ~~**Cut over the trigger + instance names.**~~ ✅ **DONE** — kept instance
    `secretaria` via compose env overrides so WhatsApp stayed linked (no QR re-scan / webhook reset).
 3. **Verify `transcribe_audio` end-to-end (open).** Reply-detection fixed 2026-07-10;
-   `calendar_action` is confirmed working. Send a real quoted voice note + `@brain transcreva`
+   `calendar_action` is confirmed working. Send a real quoted voice note + `@secretary transcreva`
    to confirm the AssemblyAI round-trip.
 4. **Security TODO (pre-existing).** Evolution's port `8080` is open to the internet,
    protected only by the API key. Lock it down with `ufw`.
@@ -114,7 +115,7 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
    (Phase B) are ✅ **shipped**. Remaining, see `New Features Plans/calendar-actions.md`:
    conflict/availability check on create, read/query events, and recurring events.
 6. **Product upgrades (backlog).** More skills (each a folder under `2. Skills/`),
-   private reply when `@brain` is used in a group. (A "confirm before acting" step now
+   private reply when `@secretary` is used in a group. (A "confirm before acting" step now
    exists for cancellations, built on the stateful session layer.)
 
 ---
@@ -134,8 +135,8 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │   ├── reminders-followups.md
 │   └── task-improvements.md    #   NEXT for tasks: batch create/complete + edit existing
 │                               #   (task-capture.md retired + deleted after task_action shipped)
-├── brain/                 # the app — run this (v1.0 removed; in git history)
-│   ├── package.json       #   at the brain/ ROOT (shared node_modules for orchestrator+skills)
+├── secretary/             # the app — run this (v1.0 removed; in git history)
+│   ├── package.json       #   at the secretary/ ROOT (shared node_modules for orchestrator+skills)
 │   ├── .env.example
 │   ├── README.md
 │   ├── 1. Orchestrator/
@@ -148,7 +149,7 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │       ├── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
 │       └── 4. Feature Requests/{skill,prompt}.js   # clarify conversation → Markdown spec sent as a .md document
 └── evolution/
-    ├── docker-compose.yml # Evolution API + Postgres + Redis + brain
+    ├── docker-compose.yml # Evolution API + Postgres + Redis + secretary
     └── .env.example
 ```
 
@@ -165,7 +166,7 @@ cd personal-whatsapp-ai
 WhatsApp, but confirms wiring and skill discovery):
 
 ```bash
-cd "brain"
+cd "secretary"
 npm install
 ANTHROPIC_API_KEY=dummy npm start
 # expect: "skill loaded: ..." x2, "available skills: calendar_action, transcribe_audio"
@@ -173,11 +174,11 @@ ANTHROPIC_API_KEY=dummy npm start
 ```
 
 **Important layout facts:**
-- `package.json` sits at the `brain/` root, **not** inside `1. Orchestrator/`. It has to:
+- `package.json` sits at the `secretary/` root, **not** inside `1. Orchestrator/`. It has to:
   Node resolves `node_modules` by walking up from each file, and the skills live in a
-  different branch than the orchestrator, so a single `node_modules` at the `brain/` root
+  different branch than the orchestrator, so a single `node_modules` at the `secretary/` root
   is the only place both can reach. Start command is `node "1. Orchestrator/server.js"`
-  run from `brain/` (that's what `npm start` does).
+  run from `secretary/` (that's what `npm start` does).
 - Folder names have spaces and numbers (`1. Orchestrator`, `2. Skills/1. Calendar
   Actions`). The orchestrator loads skills via dynamic `import(pathToFileURL(...))`,
   which handles the spaces. Don't convert these to static imports across folders.
@@ -185,7 +186,7 @@ ANTHROPIC_API_KEY=dummy npm start
   `node:20-alpine`.
 
 **Full local run (optional):** bring up the whole `evolution/` docker-compose locally,
-link a WhatsApp test number, point the webhook at the brain. Heavier; usually not worth
+link a WhatsApp test number, point the webhook at the secretary. Heavier; usually not worth
 it for iterating on skill logic — prefer mocked tests (§9).
 
 ---
@@ -209,7 +210,8 @@ folder. No edits to `server.js` or the router.**
 `ctx` handed to every skill: `owner, tag, anthropic, model, order, transcript, nowStr,
 contact, number, remoteJid, fromMe, quoted, hasQuotedAudio, catalog, env, evolution,
 send, sessions, session, lang`.
-- `ctx.send(number, text)` — reply on WhatsApp (adds the `[AI Brain]:` header + a blank
+- `ctx.send(number, text)` — reply on WhatsApp (adds the language-aware header from
+  `headerFor(lang)` — `[Marcelo's AI Secretary]:` (en) / `[Secretaria IA do Marcelo]:` (pt) — + a blank
   line; no footer). Localizes the body to `ctx.lang` (see the convention below).
 - `ctx.lang` — the detected conversation language (ISO code; `"en"` default). The router
   detects it on a fresh command; it's persisted in the session for continuations.
@@ -220,18 +222,22 @@ send, sessions, session, lang`.
 - `ctx.session` — the active session for this chat when the message is a **continuation**
   (else null); `ctx.fromMe` says whether the owner (true) or the contact (false) sent it.
 
-**Stateful flow (§ see `brain/1. Orchestrator/ORCHESTRATOR.md`):** a flow STARTS only when the
-owner sends `@brain`. While a session is open, the orchestrator hands each message from
+**Stateful flow (§ see `secretary/1. Orchestrator/ORCHESTRATOR.md`):** a flow STARTS only when the
+owner sends `@secretary`. While a session is open, the orchestrator hands each message from
 the awaited party (`session.awaitFrom`: owner / contact / any) to the owning skill,
 which uses the LLM to detect the awaited answer and ignores normal chatter — no reply or
-tag needed. The brain never reacts to its own `[AI Brain]:` messages.
+tag needed. Trigger tags + the reply header live in the shared module
+`secretary/1. Orchestrator/lib/identity.js` (exports `TAGS`, `headerFor`, `isOwnMessage`,
+`matchedTag`); the secretary never reacts to its own header'd messages (`isOwnMessage`
+matches every header variant, incl. the legacy `[AI Brain]:`).
 
 Convention: prompt/text lives in the skill's `prompt.js`, logic in `skill.js`.
 **Localization:** user-facing strings are a per-language map (`{ en, pt }`) in `prompt.js`,
 selected at send time with `ctx.lang`; every new message must ship its `en` *and* `pt`
 entries (English is canonical). Dates use `localizeDate(ctx.lang, …)`. Any language without
 a map is produced from the `en` copy by the orchestrator's `send()` translation fallback —
-a safety net, not a reason to skip `pt`. Never translate the `[AI Brain]:` header;
+a safety net, not a reason to skip `pt`. Never translate the reply header
+(`[Marcelo's AI Secretary]:` / `[Secretaria IA do Marcelo]:`);
 classification/system prompts stay English. Full convention: `ARCHITECTURE.md`
 ("Localization convention").
 
@@ -251,31 +257,31 @@ Run in the DigitalOcean web console (root). Replace `<repo-url>` and confirm pat
 # 1. Get the repo onto the server
 cd /opt && git clone <repo-url> personal-whatsapp-ai
 
-# 2. Point the brain at the app folder.
-#    The compose 'brain' service mounts /opt/brain and runs `npm install && npm start`,
-#    and npm start = node "1. Orchestrator/server.js". So /opt/brain must contain the
-#    CONTENTS of brain (package.json at its root, "1. Orchestrator/", "2. Skills/").
-#    Simplest: back up the current /opt/brain, then repoint it:
-mv /opt/brain /opt/brain_v1_backup
-ln -s /opt/personal-whatsapp-ai/brain /opt/brain     # or copy the contents
+# 2. Point the secretary at the app folder.
+#    The compose 'secretary' service mounts /opt/secretary and runs `npm install && npm start`,
+#    and npm start = node "1. Orchestrator/server.js". So /opt/secretary must contain the
+#    CONTENTS of secretary (package.json at its root, "1. Orchestrator/", "2. Skills/").
+#    Simplest: back up the current /opt/secretary, then repoint it:
+mv /opt/secretary /opt/brain_v1_backup
+ln -s /opt/personal-whatsapp-ai/secretary /opt/secretary     # or copy the contents
 
 # 3. Bring your secrets across (do NOT commit these)
-cp /opt/brain_v1_backup/.env /opt/brain/.env
+cp /opt/brain_v1_backup/.env /opt/secretary/.env
 #    then add the new key:  ASSEMBLYAI_API_KEY=...   (and ASSEMBLYAI_LANGUAGE=pt for PT audio)
-#    decide trigger/instance: keep the old ones by setting in the compose 'brain' env:
-#      SECRETARY_TAG: "@brain"        # if you want to keep the old trigger
+#    decide trigger/instance: set them in the compose 'secretary' env:
+#      SECRETARY_TAG: "@secretaria,@secretary"   # comma-separated; the legacy @brain is retired
 #      EVOLUTION_INSTANCE: secretaria # if you want to keep the existing linked instance
 
-# 4. Recreate the brain (force-recreate because .env changed)
-cd /opt/evolution && docker compose up -d --force-recreate brain
-docker compose logs -f brain     # expect "Brain v2.0 (orchestrator) listening..."
+# 4. Recreate the secretary (force-recreate because .env changed)
+cd /opt/evolution && docker compose up -d --force-recreate secretary
+docker compose logs -f secretary     # expect "Secretary v2.0 (orchestrator) listening..."
 ```
 
 Gotcha: `docker compose restart` re-reads code but **not** `.env`. After any secret
 change use `up -d --force-recreate`.
 
 Future updates once this is set up: `cd /opt/personal-whatsapp-ai && git pull` then
-`cd /opt/evolution && docker compose restart brain`.
+`cd /opt/evolution && docker compose restart secretary`.
 
 If you keep the old instance/trigger, you skip re-linking WhatsApp and re-setting the
 webhook. If you adopt the new `secretary` instance, you must re-scan the QR and re-run
@@ -298,11 +304,11 @@ the `/webhook/set/secretary` call (see README §Setup step 4).
   is **date-only** (stored at UTC midnight). Without the scope, calls 401 and the skill
   replies `failed()`. A to-do assigned to another person is created as a Calendar invite
   instead (via the capability registry) — Tasks itself notifies no one.
-- **Redis (brain session state):** in addition to being Evolution's cache, the brain
+- **Redis (secretary session state):** in addition to being Evolution's cache, the secretary
   stores per-chat conversation state in Redis (`lib/sessions.js`, key prefix
-  `brain:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
+  `secretary:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
   (same `evolution-net`, no auth). No Redis → automatic in-memory fallback (lost on
-  restart). This is what lets a flow continue without re-tagging `@brain`.
+  restart). This is what lets a flow continue without re-tagging `@secretary`.
 - **AssemblyAI:** `ASSEMBLYAI_API_KEY`. Flow (verified): `POST /v2/upload` (raw bytes)
   → `POST /v2/transcript` `{audio_url, language_code}` → poll `GET /v2/transcript/{id}`
   until `status==completed`. `ASSEMBLYAI_LANGUAGE` sets the language (`en` default; set
@@ -335,9 +341,9 @@ the `/webhook/set/secretary` call (see README §Setup step 4).
   Published + token re-minted 2026-07-10 (OAuth Playground, scope
   `https://www.googleapis.com/auth/calendar`, "Use your own OAuth credentials"). To re-mint:
   Playground → gear → own client id/secret → scope above → authorize → exchange → copy the
-  `1//…` refresh token into `/opt/brain/.env` `GOOGLE_REFRESH_TOKEN=` → `--force-recreate`.
+  `1//…` refresh token into `/opt/secretary/.env` `GOOGLE_REFRESH_TOKEN=` → `--force-recreate`.
 
-Env var reference: see `brain/.env.example` and `evolution/.env.example`.
+Env var reference: see `secretary/.env.example` and `evolution/.env.example`.
 
 ---
 
@@ -356,6 +362,19 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — AI Brain → AI Secretary rename SHIPPED (DEPLOYED).** Shipped in two layers.
+  **Layer 1 (deployed first)** introduced `secretary/1. Orchestrator/lib/identity.js` as the
+  single source of truth for trigger tags + the reply header: `SECRETARY_TAG` is now
+  **comma-separated** (`@secretaria,@secretary` both trigger; the legacy `@brain` is **retired**
+  and silently ignored), the header is **language-aware** (`headerFor(lang)`:
+  `[Marcelo's AI Secretary]:` / `[Secretaria IA do Marcelo]:`, owner name from `OWNER_NAME`),
+  and self-message detection (`isOwnMessage`, matching all header variants incl. the legacy
+  `[AI Brain]:`) replaced the old `isBrainMsg`/fixed-header check. **Layer 2 (this change)**
+  removed the "Brain" name everywhere: the `brain/` folder → `secretary/` (git mv), the Redis
+  session prefix `brain:session:` → `secretary:session:`, the Docker service/container `brain`
+  → `secretary` and host mount `/opt/brain` → `/opt/secretary`, plus all comments/banners/docs.
+  Note the live compose that actually runs the stack is the hand-maintained
+  `/opt/evolution/docker-compose.yml` (drifted from the repo copy; `EVOLUTION_INSTANCE: secretaria`).
 - **2026-07-11 — calendar edit/reschedule SHIPPED (DEPLOYED + verified).** Phase B is done
   and confirmed working in production. Final design is **confirm-first + stays open**: an
   unambiguous edit no longer applies immediately (the first cut did, which meant a *second*

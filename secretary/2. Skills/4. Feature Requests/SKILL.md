@@ -3,12 +3,12 @@
 > **For humans — quick read.**
 >
 > Turn a passing "I should build…" thought into a real spec, from WhatsApp. You message
-> yourself an idea; the brain **interviews you** until the feature is clear, then hands
+> yourself an idea; the secretary **interviews you** until the feature is clear, then hands
 > back a **Markdown spec file** you can save and drop into your repo.
 >
 > **How it works:**
-> 1. Start it: `@brain I want a feature that lets me snooze a task to next week`.
-> 2. The brain **becomes stateful and starts talking** — it asks the fewest, sharpest
+> 1. Start it: `@secretary I want a feature that lets me snooze a task to next week`.
+> 2. The secretary **becomes stateful and starts talking** — it asks the fewest, sharpest
 >    questions to fill the gaps (problem, the user's flow, edge cases). You answer
 >    normally, **no re-tagging** needed.
 > 3. When you're done, say so — `that's it`, `write it up`, `ship the doc` — and it
@@ -22,23 +22,24 @@
 >   off it closes on its own. `nevermind`/`cancel` drops it.
 >
 > **No setup** — this skill needs no new API keys or OAuth scopes (just Anthropic +
-> WhatsApp, which the brain already has).
+> WhatsApp, which the secretary already has).
 
 ## What you'll see (the full conversation)
 
-Every brain message is prefixed with `[AI Brain]:` and a blank line.
+Every secretary message is prefixed with the language-aware header — `[Marcelo's AI Secretary]:`
+in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`) — and a blank line.
 
 ### Spec a feature end-to-end
 
-1. You: `@brain I have a feature idea: let me snooze a task to next week`.
-2. Brain: `Got it — let's spec this. What problem does snoozing solve for you, and how
+1. You: `@secretary I have a feature idea: let me snooze a task to next week`.
+2. Secretary: `Got it — let's spec this. What problem does snoozing solve for you, and how
    would you start it (a command, a reply, a button)?`
 3. You: `tasks I can't do yet clutter the list. I'd reply "snooze" to the task.`
-4. Brain: `Makes sense. Which snooze options — tomorrow, next week, a custom date? And
+4. Secretary: `Makes sense. Which snooze options — tomorrow, next week, a custom date? And
    should it come back at a set time?`
 5. You: `tomorrow / next week / custom date. morning is fine.`
 6. You: `that's it, write it up`.
-7. Brain sends a **document**: `feature-snooze-a-task.md` with the caption
+7. Secretary sends a **document**: `feature-snooze-a-task.md` with the caption
    `Here's the spec for "Snooze a task". Save it and drop it into your repo. 📄`
 
 The `.md` is written from the **user's point of view** — a Summary, the Problem, the
@@ -52,11 +53,11 @@ sent). If you go quiet, the session expires quietly after ~30 minutes.
 
 ### Em português (o idioma segue a conversa; o documento sai em inglês)
 
-1. Você: `@brain quero uma funcionalidade pra adiar uma tarefa pra semana que vem`.
-2. Brain: `Beleza — vamos detalhar. Que problema isso resolve, e como você começaria o
+1. Você: `@secretary quero uma funcionalidade pra adiar uma tarefa pra semana que vem`.
+2. Secretary: `Beleza — vamos detalhar. Que problema isso resolve, e como você começaria o
    fluxo?`
 3. … (a conversa segue em português) … Você: `pode escrever` →
-4. Brain envia `feature-snooze-a-task.md` (o **documento em inglês**) com uma legenda em
+4. Secretary envia `feature-snooze-a-task.md` (o **documento em inglês**) com uma legenda em
    português.
 
 ## For AI / maintainers — detailed
@@ -91,8 +92,8 @@ unrelated chatter.
 - **`finalize`** → `generateDoc` (a second call, **plain prose, no schema**, system prompt
   hard-pinned to **English** + a fixed skeleton) → base64 the markdown →
   `ctx.evolution.sendMedia({ mediatype:"document", mimetype:"text/markdown", media,
-  fileName:"feature-<slug>.md", caption })`. The caption carries the `[AI Brain]:` header
-  (media framing is the caller's job, like `sendText`). Session is cleared after send; a
+  fileName:"feature-<slug>.md", caption })`. The caption carries the language-aware header
+  (`headerFor(lang)`; media framing is the caller's job, like `sendText`). Session is cleared after send; a
   **render** failure keeps the session so the owner can retry the write without
   re-speccing, a **send** failure replies `reply().sendFailed()`.
 
@@ -116,4 +117,4 @@ to `1. Orchestrator/lib/evolution.js` (`POST /message/sendMedia/{instance}`, bas
 ### Setup
 None. No new env var, no OAuth scope. If media sending is ever unavailable on the running
 Evolution image, `finalize` reports `reply().sendFailed()` and logs the HTTP error — the
-draft/notes are already gone with the session, so re-run from `@brain`.
+draft/notes are already gone with the session, so re-run from `@secretary`.

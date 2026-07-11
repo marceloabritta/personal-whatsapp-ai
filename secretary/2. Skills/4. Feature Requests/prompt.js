@@ -64,7 +64,7 @@ function langName(lang) {
   return LANG_NAME[lang] || `the language with ISO 639-1 code "${lang}"`;
 }
 
-// ---- Clarify call (the conversation brain) -----------------------------------
+// ---- Clarify call (the conversation engine) ----------------------------------
 export function buildClarifySystem(owner, lang) {
   return `You are ${owner}'s product assistant on WhatsApp. ${owner} is capturing a NEW
 FEATURE idea for software he is building (a note to himself). Your job is to interview
@@ -143,7 +143,7 @@ empty:
 - **Open:** <unresolved question>
 
 ---
-*Drafted by @brain on WhatsApp. Save to the repo and refine.*
+*Drafted by @secretary on WhatsApp. Save to the repo and refine.*
 
 Keep it concise and concrete. Do not add sections that aren't in the skeleton.`;
 }

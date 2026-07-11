@@ -166,7 +166,7 @@ null/empty; they are not used for edits.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----
-// Used while a session is open. The brain sees EVERY message from the awaited
+// Used while a session is open. The secretary sees EVERY message from the awaited
 // party and must ignore normal chatter, acting only on a real yes/no.
 export function buildConfirmSystem(action) {
   return `You decide whether the LATEST message is a response to a pending confirmation.
@@ -186,7 +186,7 @@ Latest message: ${latest}`;
 }
 
 // ---- Continuation: review a pending CREATE (confirm / modify / cancel) --------
-// After proposing an event, the brain shows a draft and asks the owner to confirm.
+// After proposing an event, the secretary shows a draft and asks the owner to confirm.
 // This runs for EVERY owner message while that session is open: it BOTH classifies
 // the reply AND, when the owner asks for a change, returns the full updated draft
 // (one call keeps the correlated fields consistent — same reasoning as create).
@@ -289,7 +289,7 @@ Change request: ${latest}`;
 }
 
 // ---- Phase B: confirm-step review (edit) ------------------------------------
-// After proposing the edited event, the brain shows the target state and asks the owner
+// After proposing the edited event, the secretary shows the target state and asks the owner
 // to confirm. This runs for EVERY owner message while that session is open: it BOTH
 // classifies the reply AND, when the owner asks for a further change, returns the change
 // to fold onto the draft (one call keeps the correlated fields consistent — same as

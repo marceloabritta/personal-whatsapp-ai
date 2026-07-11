@@ -1,5 +1,5 @@
 # ============================================================================
-#  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis + brain
+#  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis + secretary
 #  Runs on a single droplet. Everything talks over the internal "evolution-net".
 # ============================================================================
 services:
@@ -43,18 +43,18 @@ services:
     networks:
       - evolution-net
 
-  brain:
-    container_name: brain
+  secretary:
+    container_name: secretary
     image: node:20-alpine
     restart: always
     working_dir: /app
     depends_on:
       - api
     volumes:
-      - /opt/brain:/app        # the brain code lives here, mounted from the host
-                               # (put the contents of brain/ in /opt/brain)
+      - /opt/secretary:/app    # the secretary code lives here, mounted from the host
+                               # (put the contents of secretary/ in /opt/secretary)
     env_file:
-      - /opt/brain/.env        # brain secrets (Claude, Google, AssemblyAI)
+      - /opt/secretary/.env    # secretary secrets (Claude, Google, AssemblyAI)
     command: sh -c "npm install --no-audit --no-fund && npm start"
     environment:
       EVOLUTION_URL: http://api:8080

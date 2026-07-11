@@ -9,7 +9,7 @@ export function createEvolution({ url, apikey, instance }) {
   const base = `${url}`;
   const headers = { "Content-Type": "application/json", apikey };
 
-  // Sends RAW text (no header). The [AI Brain]: header framing
+  // Sends RAW text (no header). The secretary's header framing
   // is the orchestrator's job (server.js), not this client's.
   async function sendText(number, text) {
     const res = await fetch(`${base}/message/sendText/${instance}`, {
@@ -23,7 +23,7 @@ export function createEvolution({ url, apikey, instance }) {
 
   // Sends a MEDIA message (document / image / …) as base64. Used by feature_request
   // to deliver the generated spec as a real, saveable `.md` document
-  // (mediatype:"document", mimetype:"text/markdown"). Like sendText, the [AI Brain]:
+  // (mediatype:"document", mimetype:"text/markdown"). Like sendText, the secretary's
   // header framing is the CALLER's job — pass it inside `caption`. Returns res.ok.
   async function sendMedia(number, { mediatype, mimetype, media, fileName, caption }) {
     const res = await fetch(`${base}/message/sendMedia/${instance}`, {

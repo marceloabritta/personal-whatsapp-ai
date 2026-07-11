@@ -2,7 +2,7 @@
 
 What is sent to each service, with what content, as the system runs. This replaces
 the original personal handover document; it describes the current version
-(`brain/`: orchestrator + skills).
+(`secretary/`: orchestrator + skills).
 
 ## Components
 
@@ -12,23 +12,23 @@ Four containers on one host, talking over the internal Docker network `evolution
 |----------------------|--------------------------------------|---------------|------|
 | `evolution_api`      | `evoapicloud/evolution-api:latest`   | `8080` public | WhatsApp gateway |
 | `evolution_postgres` | `postgres:15`                        | internal 5432 | Evolution database |
-| `evolution_redis`    | `redis:latest`                       | internal 6379 | Evolution cache + brain session store |
-| `brain`              | `node:20-alpine`                     | internal 3000 | The AI app (orchestrator + skills) |
+| `evolution_redis`    | `redis:latest`                       | internal 6379 | Evolution cache + secretary session store |
+| `secretary`          | `node:20-alpine`                     | internal 3000 | The AI app (orchestrator + skills) |
 
 Only `8080` is published to the internet.
 
 ## Flow
 
 ```
-webhook  ->  filter (start on fromMe + @brain, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
+webhook  ->  filter (start on fromMe + @secretary, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
 ```
 
-### 1. Evolution → brain (incoming webhook)
+### 1. Evolution → secretary (incoming webhook)
 
 Configured once via `POST /webhook/set/secretary`. On every message Evolution sends:
 
 ```
-POST http://brain:3000/webhook
+POST http://secretary:3000/webhook
 ```
 Body (`MESSAGES_UPSERT`), example:
 ```json
@@ -38,32 +38,32 @@ Body (`MESSAGES_UPSERT`), example:
   "data": {
     "key": { "remoteJid": "5531999...@s.whatsapp.net", "fromMe": true, "id": "3EB0..." },
     "pushName": "User",
-    "message": { "conversation": "@brain schedule..." },
+    "message": { "conversation": "@secretary schedule..." },
     "messageType": "conversation",
     "messageTimestamp": 1751560000
   }
 }
 ```
-The brain **buffers every message** (for context). A flow only **starts** when `fromMe === true`
-**and** the text starts with `@brain`. But the brain is **stateful** — it keeps per-chat state
+The secretary **buffers every message** (for context). A flow only **starts** when `fromMe === true`
+**and** the text starts with a trigger tag (`@secretaria`/`@secretary`). But the secretary is **stateful** — it keeps per-chat state
 in Redis (see `1. Orchestrator/lib/sessions.js`) — so once a session is active it can **continue
-without the tag**: the brain uses the LLM to ignore normal chatter and watch for the awaited
+without the tag**: the secretary uses the LLM to ignore normal chatter and watch for the awaited
 answer (a confirmation or clarification). That continuation can also come from the **other person**
 in the chat (e.g. they reply with their email), so a non-owner message can be a valid continuation
 of an active session. Dedup by `key.id`. Messages that are neither a trigger nor a continuation
 pass through but are discarded and never sent to any external API.
 
-### 2. brain → Evolution (fetch history)
+### 2. secretary → Evolution (fetch history)
 
 ```
 POST http://api:8080/chat/findMessages/secretary
 apikey: <AUTHENTICATION_API_KEY>
 ```
-Body: `{ "where": { "key": { "remoteJid": "..." } } }`. The brain merges this with its
+Body: `{ "where": { "key": { "remoteJid": "..." } } }`. The secretary merges this with its
 in-memory buffer, dedups, sorts by time and builds a transcript of the last ~30
 messages as `ME: ...` / `OTHER: ...`.
 
-### 3. brain → Claude (router)
+### 3. secretary → Claude (router)
 
 ```
 POST https://api.anthropic.com/v1/messages   (via @anthropic-ai/sdk)
@@ -79,7 +79,7 @@ schema-enforced (`output_config.format` with `ROUTER_SCHEMA`) and returns:
 "Adding a skill"). Only the content of that one conversation leaves for Anthropic, and only
 at that moment.
 
-### 4. brain → Claude (skill: calendar_action)
+### 4. secretary → Claude (skill: calendar_action)
 
 A second call, with the calendar skill's own prompt, extracts:
 ```json
@@ -98,7 +98,7 @@ confirm-first and stays open until you save).
 
 ### 5. skill → Google Calendar (create or cancel/delete event)
 
-OAuth (Client ID + Secret + Refresh Token); the brain exchanges the refresh token for
+OAuth (Client ID + Secret + Refresh Token); the secretary exchanges the refresh token for
 an access token automatically.
 ```
 POST   https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all   (create)
@@ -124,7 +124,7 @@ a 5-min invite that notifies them by email. See "Composing skills" below.
 
 ### 6. skill → Evolution (fetch audio) — transcribe_audio
 
-When you reply to a voice message, the brain reads `contextInfo.stanzaId` (the quoted
+When you reply to a voice message, the secretary reads `contextInfo.stanzaId` (the quoted
 message id) and downloads the decrypted bytes:
 ```
 POST http://api:8080/chat/getBase64FromMediaMessage/secretary
@@ -146,9 +146,11 @@ GET  https://api.assemblyai.com/v2/transcript/{id}   (poll until status=complete
 ```
 POST http://api:8080/message/sendText/secretary
 apikey: <AUTHENTICATION_API_KEY>
-Body: { "number": "5531999...", "text": "[AI Brain]:\n\n..." }
+Body: { "number": "5531999...", "text": "[Marcelo's AI Secretary]:\n\n..." }
 ```
-The reply goes to the originating chat. In a group, the confirmation is visible to
+The reply header is **language-aware** — `headerFor(ctx.lang)` from `1. Orchestrator/lib/identity.js`
+stamps `[Marcelo's AI Secretary]:` (en) or `[Secretaria IA do Marcelo]:` (pt), derived from
+`OWNER_NAME`. The reply goes to the originating chat. In a group, the confirmation is visible to
 everyone (a private-reply option is on the roadmap).
 
 ### 8b. skill → Evolution (send a document) — feature_request
@@ -161,9 +163,9 @@ POST http://api:8080/message/sendMedia/secretary
 apikey: <AUTHENTICATION_API_KEY>
 Body: { "number": "5531999...", "mediatype": "document", "mimetype": "text/markdown",
         "media": "<base64 of the .md>", "fileName": "feature-<slug>.md",
-        "caption": "[AI Brain]:\n\n..." }
+        "caption": "[Marcelo's AI Secretary]:\n\n..." }
 ```
-The caption carries the `[AI Brain]:` header (media framing is the caller's job, like
+The caption carries the language-aware header (`headerFor(ctx.lang)`; media framing is the caller's job, like
 `sendText`). The **conversation** follows `ctx.lang`, but the **document body is always
 English** by design — it's destined for the owner's (English) codebase; only the caption
 localizes (see the localization note below). This is the only skill that sends a file;
@@ -172,7 +174,7 @@ localizes (see the localization note below). This is the only skill that sends a
 
 ## Environment variables
 
-**brain (`/opt/brain/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
+**secretary (`/opt/secretary/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
 (cheap model for the long-tail reply-translation fallback; default `claude-haiku-4-5`),
 `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` (needs **both** the
 `calendar` **and** `tasks` scopes), `GOOGLE_CALENDAR_ID`, `GOOGLE_TASKLIST_ID` (optional,
@@ -181,14 +183,16 @@ default `@default`; Skill: `task_action`),
 language — the transcription follows the detected `ctx.lang` first; it does **not** set the
 reply language, which follows `ctx.lang`), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
 `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
-`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tag, default `@brain`).
+`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tags —
+**comma-separated**, default `@secretaria,@secretary`; both trigger the secretary. The old
+`@brain` tag is **retired** — a message using it is silently ignored).
 
 **Evolution (`/opt/evolution/.env`)** — `AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`,
 `DATABASE_CONNECTION_URI`, `CACHE_REDIS_URI`, etc.
 
 ## Adding a skill
 
-Create `brain/2. Skills/<Your Skill>/skill.js`:
+Create `secretary/2. Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = { id: "unique_id", description: "what it does (the router reads this)" };
 export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ctx.lang, ... */ }
@@ -229,8 +233,8 @@ send time with `ctx.lang` (fall back to `en`); every new message must ship its `
 `skill.js`. Dates use a `localizeDate(ctx.lang, …)` helper (always 3-letter month + AM/PM;
 the locale sets day/month order). Any language you did *not* write a map for is produced
 from the `en` copy by the orchestrator's `send()` translation fallback — a safety net for
-unmaintained languages, **not** a substitute for authoring `en`/`pt`. Never translate the
-`[AI Brain]:` header; internal/classification prompts (router + skill system prompts) stay
+unmaintained languages, **not** a substitute for authoring `en`/`pt`. The reply header is
+not translated by `send()` — it is produced per-language by `headerFor(lang)`; internal/classification prompts (router + skill system prompts) stay
 English. Maintained languages today: **en + pt-BR**. The map is **per-skill** (in each
 skill's `prompt.js`) — deliberately *not* a central `i18n.js` catalog; prose stays with the
 skill that owns it. Live in production since 2026-07-11.

@@ -6,7 +6,7 @@
 //
 //  LOCALIZATION: strings are a per-language map { en, pt }, selected at send time
 //  with ctx.lang (see msg()). English is the canonical source; any language the
-//  brain doesn't maintain a map for is produced from `en` by the orchestrator's
+//  the secretary doesn't maintain a map for is produced from `en` by the orchestrator's
 //  send() translation fallback. Add BOTH en + pt for every new message.
 // ============================================================================
 

@@ -2,25 +2,25 @@
 
 > **For humans — quick read.**
 >
-> The orchestrator is the brain's front door. Every WhatsApp message hits it; it decides
-> whether the brain should act, works out *what* you want, and hands the job to the right
+> The orchestrator is the secretary's front door. Every WhatsApp message hits it; it decides
+> whether the secretary should act, works out *what* you want, and hands the job to the right
 > **skill**.
 >
 > **What it does:**
 > - Receives every message from WhatsApp (via the Evolution API webhook).
-> - **Starts** a task only when *you* (the owner) write the `@brain` tag.
+> - **Starts** a task only when *you* (the owner) write a trigger tag (`@secretaria`/`@secretary`).
 > - Once a task is mid-conversation (e.g. a cancel awaiting your "yes"), it lets the
 >   follow-up through **without** the tag — and can even pick up the *other person's*
 >   reply — while ignoring normal chatter.
 > - Figures out the intent (the **router**) and runs the matching skill.
-> - Adds the `[AI Brain]:` header to every reply it or a skill sends.
+> - Adds the language-aware header (`[Marcelo's AI Secretary]:` / `[Secretaria IA do Marcelo]:`) to every reply it or a skill sends.
 >
 > You never call the orchestrator directly — you call skills, and it routes you there.
 
 ## Messages the orchestrator itself sends
 
 Most replies come from skills. The orchestrator only speaks up on routing/plumbing
-problems (all prefixed with `[AI Brain]:`):
+problems (all prefixed with the language-aware header from `headerFor(lang)`):
 - Couldn't classify the order → *"I didn't understand what you want me to do. Available
   skills: …"*
 - The router call failed → *"I hit an error understanding the request. Try again?"*
@@ -36,10 +36,13 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
 
 ### Boot (once, at startup)
 1. **Config from env:** `EVOLUTION_URL`, `EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`
-   (default `secretary`; prod overrides to `secretaria`), `SECRETARY_TAG` (→ `TAG`,
-   default `@brain`, lowercased), `CLAUDE_MODEL` (default `claude-sonnet-5`),
-   `OWNER_NAME`, `ANTHROPIC_API_KEY`, `REDIS_URL` (default
-   `redis://evolution_redis:6379`; set empty to force in-memory). `HEADER = "[AI Brain]:"`.
+   (default `secretary`; prod overrides to `secretaria`), `CLAUDE_MODEL` (default
+   `claude-sonnet-5`), `OWNER_NAME`, `ANTHROPIC_API_KEY`, `REDIS_URL` (default
+   `redis://evolution_redis:6379`; set empty to force in-memory). The trigger tags and reply
+   header live in `lib/identity.js`: `TAGS` is parsed from `SECRETARY_TAG` (**comma-separated**,
+   lowercased, default `@secretaria,@secretary`; the old `@brain` is retired), and the header
+   is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Secretary]:`, pt →
+   `[Secretaria IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
 2. **Clients:** `anthropic` (SDK), `evolution` (`createEvolution`), `sessions`
    (`createSessions` — Redis or in-memory fallback).
 3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
@@ -56,16 +59,20 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    after, wrapped in try/catch (`"Webhook error"` on throw).
 2. Read `data.key` → `{ fromMe, remoteJid, id }`; `text = extractText(data.message)`.
 3. **`remember(remoteJid, …)`** — buffer **every** message (owner and contact) in the
-   in-memory short-term buffer, even ones that won't trigger the brain. (Context.)
+   in-memory short-term buffer, even ones that won't trigger the secretary. (Context.)
 4. **`getQuoted(data)`** → `quoted = { id, hasAudio, mediaType, text, calendarLink } | null`
    (the replied-to message; Evolution puts a plain-text reply's context at the *sibling*
    `data.contextInfo`). Logged as `QUOTED>>>`.
-5. **`isBrainMsg`** = text starts with `HEADER` — the brain's own sends are never acted on.
+5. **`isOwnMsg`** = `isOwnMessage(text)` (from `lib/identity.js`) — true when the text starts
+   with **any** header variant the secretary could have emitted (both languages **plus** the
+   legacy `[AI Brain]:` for its own older messages), so the secretary's own sends are never
+   acted on.
 6. **`session = await sessions.get(remoteJid)`** — any open per-chat state.
 7. **The gate (start vs continue vs ignore):**
-   - `isTagged = fromMe && text.startsWith(TAG)` → a **fresh** command (owner only).
-   - `isContinuation` = there's a `session`, it's not tagged, not a brain message, **and**
-     the sender matches `session.awaitFrom`: `owner`→`fromMe`, `contact`→`!fromMe`, `any`→both.
+   - `isTagged = fromMe && !!matchedTag(text)` → a **fresh** command (owner only); `matchedTag`
+     returns whichever tag in `TAGS` the message starts with (or null).
+   - `isContinuation` = there's a `session`, it's not tagged, not one of the secretary's own
+     messages, **and** the sender matches `session.awaitFrom`: `owner`→`fromMe`, `contact`→`!fromMe`, `any`→both.
    - If **neither** → `return` (ignored — incl. all non-owner messages with no session for them).
 8. **Dedup** by `id` via the `seen` set (capped at 500).
 9. `order` = text minus the tag (fresh) or the whole text (continuation);
@@ -85,18 +92,20 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     - **Continuation** → **bypass the router**, run `SKILLS[session.skill](ctx)` directly
       (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
       → "I failed to continue that."
-    - **Fresh** → first `sessions.clear` any stale session (a new `@brain` overrides), then
+    - **Fresh** → first `sessions.clear` any stale session (a new `@secretary` overrides), then
       **`route(ctx)`** (one Claude call via the router) → `tasks[]`, validated against the
       catalog. Empty/unknown → "I didn't understand… Available skills: …". Otherwise run
       each `SKILLS[task](ctx)` in order; per-skill errors → "I failed to run that task."
 
 ### `send(number, text)` — the localizing choke point
-Prepends `HEADER` + a blank line and calls `evolution.sendText`. The single choke point
+Prepends the language-aware header (`headerFor(ctx.lang)` from `lib/identity.js`) + a blank
+line and calls `evolution.sendText`. The single choke point
 for every user-facing message (skills call `ctx.send`). It also **localizes**: skills and
 the orchestrator author each message in `en`/`pt` (the maintained languages), so those
 pass through untouched; for any **other** detected language (`ctx.lang`) it LLM-translates
-the **body only** (a cheap model, `TRANSLATE_MODEL`) — the `HEADER` is added afterwards and
-is never translated. English never calls the model. Skills receive a `ctx.send` already
+the **body only** (a cheap model, `TRANSLATE_MODEL`) — the header is added afterwards and
+is never translated (it comes from `headerFor(lang)`, which falls back to the English header for
+unmaintained languages). English never calls the model. Skills receive a `ctx.send` already
 bound to the conversation's `ctx.lang`, so their call sites don't pass a language.
 
 The orchestrator's own strings ("I didn't understand…", router/continuation/skill errors)
@@ -113,7 +122,7 @@ produced from the English copy by the same fallback. See the "Localization conve
 
 ### Sessions — shape & skill contract
 A **session** is a short-lived pending action, keyed by `remoteJid`, that lets a flow
-continue without the `@brain` tag. Shape:
+continue without the `@secretary` tag. Shape:
 ```jsonc
 {
   "skill": "calendar_action",     // which skill owns the follow-up (dispatch target)
@@ -139,7 +148,7 @@ await ctx.sessions.set(remoteJid, { skill:"calendar_action", intent:"delete",
 await ctx.sessions.clear(remoteJid);
 ```
 `ctx.session` is set **only** on a continuation (else `null`), and `ctx.sessions` exposes
-`get / set / clear`. A fresh `@brain` command clears any stale session first (starting over
+`get / set / clear`. A fresh `@secretary` command clears any stale session first (starting over
 always wins). Skills that never call `ctx.sessions.set` behave statelessly, exactly as before.
 
 ### Composing skills — the capability registry
@@ -168,7 +177,7 @@ calendar invite by calling `calendar_action.startCreate`, never re-implementing 
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.
   A skill may also call `evolution.sendMedia({ mediatype, mimetype, media, fileName,
   caption })` (`POST /message/sendMedia`, base64 `media`) to deliver a file — the caller
-  frames the `[AI Brain]:` header inside `caption`, exactly as `send()` does for text.
+  frames the language-aware header (`headerFor(lang)`) inside `caption`, exactly as `send()` does for text.
   Used by `feature_request` to send its generated `.md` spec as a document.
 - **Anthropic:** one router call per **fresh** command (continuations skip it; the skill
   does its own LLM work).

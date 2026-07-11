@@ -11,31 +11,32 @@
 > 3. **Complete** a to-do — **confirm-first**: it asks, you type **`yes`**.
 >
 > **A to-do for someone else is different.** Google Tasks is private and emails no one,
-> so a task you assign to another person (`@brain remind João to send the contract by
+> so a task you assign to another person (`@secretary remind João to send the contract by
 > Friday`) is created as a **5-minute Google Calendar invite** (you + them, at 15:00 on
 > the due date) — that's the only way they get notified by email. That path is
 > **confirm-first** and runs through the Calendar skill (it even chases a missing email).
 >
 > **How you call it:**
-> - Add for you: `@brain add "buy flight to SP" to my todos` (or reply to any message
->   with `@brain turn this into a task`).
-> - Add for someone: `@brain remind Ana to send the deck by Friday, ana@example.com`.
-> - List: `@brain what's on my list?`
-> - Complete: `@brain mark the flight one done`, then `yes`.
+> - Add for you: `@secretary add "buy flight to SP" to my todos` (or reply to any message
+>   with `@secretary turn this into a task`).
+> - Add for someone: `@secretary remind Ana to send the deck by Friday, ana@example.com`.
+> - List: `@secretary what's on my list?`
+> - Complete: `@secretary mark the flight one done`, then `yes`.
 >
 > **Heads-up:** Google Tasks due dates are **date-only** (no time). And this skill needs
 > the Google **Tasks** OAuth scope — see *Setup* at the bottom.
 
 ## What you'll see (the full conversation)
 
-Every brain message is prefixed with `[AI Brain]:` and a blank line. Replies come back
+Every secretary message is prefixed with the language-aware header — `[Marcelo's AI Secretary]:`
+in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`) — and a blank line. Replies come back
 in the language you wrote in (English and Portuguese are hand-tuned; other languages are
 auto-translated).
 
 ### Add a to-do for yourself (immediate, then a short window to change it)
 
-1. You: `@brain add "buy flight to SP" by friday`.
-2. Brain:
+1. You: `@secretary add "buy flight to SP" by friday`.
+2. Secretary:
    ```
    Added to your list:
    17/jul - buy flight to SP
@@ -43,7 +44,7 @@ auto-translated).
    Tell me if you need something to change, if not we are good.
    ```
 3. You (optional, no tag needed): `make it a return flight`.
-4. Brain:
+4. Secretary:
    ```
    Updated your list:
    17/jul - buy return flight to SP
@@ -60,13 +61,13 @@ auto-translated).
 
 ### Capture a to-do from a message
 
-Reply to any message with `@brain turn this into a task` — the quoted message's text
+Reply to any message with `@secretary turn this into a task` — the quoted message's text
 becomes the task.
 
 ### List your open todos
 
-1. You: `@brain what's on my list?`
-2. Brain:
+1. You: `@secretary what's on my list?`
+2. Secretary:
    ```
    Here are your open tasks:
    17/jul - buy flight to SP
@@ -76,22 +77,22 @@ becomes the task.
 
 ### Complete a to-do (confirm-first)
 
-1. You: `@brain mark the flight one done`.
-2. Brain: `Mark this done?\n- Buy flight to SP\n\nReply "yes" to confirm.`
+1. You: `@secretary mark the flight one done`.
+2. Secretary: `Mark this done?\n- Buy flight to SP\n\nReply "yes" to confirm.`
 3. You: `yes` → `Done — checked off "Buy flight to SP".`
    *(Anything that isn't a clear yes/no is treated as normal chatter and ignored.)*
 
 ### A to-do for someone else (becomes a calendar invite)
 
-1. You: `@brain remind Ana to send the deck by Friday, ana@example.com`.
-2. Brain (via the Calendar skill): `Confirm this event:\n- remind Ana to send the deck…`
+1. You: `@secretary remind Ana to send the deck by Friday, ana@example.com`.
+2. Secretary (via the Calendar skill): `Confirm this event:\n- remind Ana to send the deck…`
    — you type `yes`, Ana gets the invite email. If you didn't give her email, it asks
    for it and waits.
 
 ### Em português (o idioma segue a conversa)
 
-1. Você: `@brain adiciona "comprar passagem pra SP" até sexta`.
-2. Brain: `Adicionei à sua lista: "comprar passagem pra SP" · vence 17 de jul. Me diga se
+1. Você: `@secretary adiciona "comprar passagem pra SP" até sexta`.
+2. Secretary: `Adicionei à sua lista: "comprar passagem pra SP" · vence 17 de jul. Me diga se
    quer mudar algo, ou diga "pronto".`
 
 ## For AI / maintainers — detailed

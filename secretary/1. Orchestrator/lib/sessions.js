@@ -1,20 +1,20 @@
 // ============================================================================
 //  lib/sessions.js  —  per-chat CONVERSATION STATE (project-wide).
 //  A "session" is a short-lived pending action keyed by remoteJid, so a follow-up
-//  (confirmation, clarification, edit) can continue WITHOUT re-tagging @brain.
+//  (confirmation, clarification, edit) can continue WITHOUT re-tagging @secretary.
 //
 //  Generic on purpose: any skill can open/resume/clear a session. Shape is
 //  skill-defined, but by convention:
 //    { skill, intent, stage, data, expiresAt }
 //
-//  Backed by Redis (native TTL, survives brain restarts). Falls back to an
+//  Backed by Redis (native TTL, survives secretary restarts). Falls back to an
 //  in-memory Map (with manual TTL) when REDIS_URL is unset/unreachable or the
 //  `redis` package isn't installed — keeps local dev and no-Redis runs working.
 //  Same interface either way. The `redis` dependency is imported dynamically so
 //  the module loads fine without it.
 // ============================================================================
 
-const PREFIX = "brain:session:";
+const PREFIX = "secretary:session:";
 const DEFAULT_TTL = 15 * 60; // seconds
 
 const nowSec = () => Math.floor(Date.now() / 1000);

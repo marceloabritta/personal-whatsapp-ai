@@ -328,7 +328,7 @@ export async function run(ctx) {
   const { number, send, session } = ctx;
 
   // CONTINUATION: resume a pending confirmation (e.g. "yes" to a cancellation).
-  // Set by the orchestrator only when this message replies to the brain's prompt.
+  // Set by the orchestrator only when this message replies to the secretary's prompt.
   if (session?.intent === "delete" && session.stage === "await_confirmation") {
     return resumeDelete(ctx, session);
   }
@@ -1085,7 +1085,7 @@ async function resumeEditConfirm(ctx, session) {
 // (start time, participant emails) PLUS the id decoded from any replied-to link,
 // then MATCH that against the real calendar. Only open the confirmation SESSION
 // when a confident match is found. The "yes" arrives as a continuation (handled
-// by resumeDelete) — no @brain tag needed.
+// by resumeDelete) — no @secretary tag needed.
 async function handleDelete(ctx, info) {
   const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
 
@@ -1124,7 +1124,7 @@ async function handleDelete(ctx, info) {
   const ids = matches.map((e) => e.id);
 
   // Confirm-first: remember the matched ids + identity and ask. The owner can just
-  // type "yes"/"no" (no reply, no tag); the brain watches and ignores chatter.
+  // type "yes"/"no" (no reply, no tag); the secretary watches and ignores chatter.
   await sessions.set(
     remoteJid,
     {

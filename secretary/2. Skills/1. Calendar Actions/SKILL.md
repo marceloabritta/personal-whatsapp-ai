@@ -14,15 +14,15 @@
 > 3. **Cancel/delete** an event you replied to — with a "type *yes* to confirm" step.
 >
 > **How you call it:**
-> - Create: just `@brain schedule this` — it reads the recent conversation for the
+> - Create: just `@secretary schedule this` — it reads the recent conversation for the
 >   subject, who's invited, the time, and their emails. You don't have to spell it out
->   (though you can: `@brain schedule a Q3 budget review with ana@example.com tomorrow 3pm`).
+>   (though you can: `@secretary schedule a Q3 budget review with ana@example.com tomorrow 3pm`).
 > - Edit: **reply to the invite message** (the one with the calendar link) with the change,
->   e.g. `@brain move it to 4pm`, `@brain make it 30 min`, `@brain add carlos@example.com`,
->   `@brain rename to Kickoff`. If it's ambiguous ("move it earlier") it asks, and you can
+>   e.g. `@secretary move it to 4pm`, `@secretary make it 30 min`, `@secretary add carlos@example.com`,
+>   `@secretary rename to Kickoff`. If it's ambiguous ("move it earlier") it asks, and you can
 >   answer without re-tagging.
 > - Cancel: **reply to the invite message** (the one with the calendar link) with
->   `@brain cancel this`, then just type **`yes`** to confirm (no tag needed).
+>   `@secretary cancel this`, then just type **`yes`** to confirm (no tag needed).
 >
 > If something needed is missing (the time, who to invite, or an attendee's email), it
 > **asks and waits** — no re-tag — and the answer can come from you **or** the attendee.
@@ -36,13 +36,14 @@
 
 ## What you'll see (the full conversation)
 
-Every brain message is prefixed with `[AI Brain]:` and a blank line.
+Every secretary message is prefixed with the language-aware header — `[Marcelo's AI Secretary]:`
+in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`) — and a blank line.
 
 ### Creating an event (confirm-first, and it waits for what's missing)
 
 1. You (in a chat where the subject, people, time, and emails have come up):
-   `@brain schedule this`.
-2. **The brain never writes to Google first — it shows a draft and asks you to confirm**,
+   `@secretary schedule this`.
+2. **The secretary never writes to Google first — it shows a draft and asks you to confirm**,
    then watches this chat for your answer for 10 minutes (no tag needed):
    > Confirm this event:
    > - &lt;title&gt;
@@ -64,7 +65,7 @@ Every brain message is prefixed with `[AI Brain]:` and a blank line.
      the draft and shows the updated confirmation again.
    - a **cancel** ("no", "forget it", "deixa") → *"Okay, I won't create "&lt;title&gt;"."*
    - **anything else (normal conversation)** → **ignored silently**; it keeps waiting.
-4. **If something needed is missing** (the brain first re-inspects the chat for it, then
+4. **If something needed is missing** (the secretary first re-inspects the chat for it, then
    asks only if it truly can't find it):
    - one attendee's email → *"Ana, I'm missing your email. Can you send it so I can add
      you to the invite?"* — and the answer may come from **you or from Ana herself**.
@@ -82,9 +83,9 @@ the confirm step ("rename to …").
 ### Editing / rescheduling an event (confirm-first, and it stays open)
 
 1. You **reply to the invite message** (the one with the calendar link) with the change:
-   `@brain move it to 4pm` · `@brain make it 30 min` · `@brain add carlos@example.com` ·
-   `@brain remove ana@example.com` · `@brain rename to Kickoff`.
-2. **The brain doesn't write to Google yet — it shows the updated event and asks you to
+   `@secretary move it to 4pm` · `@secretary make it 30 min` · `@secretary add carlos@example.com` ·
+   `@secretary remove ana@example.com` · `@secretary rename to Kickoff`.
+2. **The secretary doesn't write to Google yet — it shows the updated event and asks you to
    confirm**, then watches this chat for your answer for 10 minutes (no tag needed):
    > Here's the updated event:
    > - &lt;title&gt;
@@ -116,8 +117,8 @@ the confirm step ("rename to …").
 ### Cancelling an event (also waits for your answer)
 
 1. You **reply to the invite message** (the one with the calendar link) with
-   `@brain cancel this`.
-2. The brain looks the event up and asks to confirm — watching this chat for your answer
+   `@secretary cancel this`.
+2. The secretary looks the event up and asks to confirm — watching this chat for your answer
    for 10 minutes, no tag needed:
    > Confirm the cancelation of this event?
    > - &lt;title&gt;
@@ -129,7 +130,7 @@ the confirm step ("rename to …").
      > Cancelled "&lt;title&gt;" and notified the attendees.
    - a **no**-type answer → *"Okay, I'll keep "&lt;title&gt;"."*
    - **anything else** → **ignored silently**; it keeps waiting.
-   - **after 10 minutes** with no yes/no → expires (start over with `@brain cancel this`).
+   - **after 10 minutes** with no yes/no → expires (start over with `@secretary cancel this`).
 4. If step 1 wasn't a reply to a message with a readable calendar link, or the event is
    already gone, you get a plain-language message explaining what to do.
 
@@ -147,8 +148,8 @@ dates via `localizeDate(ctx.lang, …)` (always 3-letter month + AM/PM; the loca
 day/month order). List grammar and pluralization are rendered **per language** (never a
 shared English builder). Sessions persist `lang` so the confirm/cancel/gather continuations
 answer in the flow's language. Any language without a map is translated from the `en` copy
-by the orchestrator's `send()` fallback; the `[AI Brain]:` header and the LLM system prompts
-stay as-is. The example strings below are the **en** copy.
+by the orchestrator's `send()` fallback; the reply header (produced per-language by
+`headerFor(lang)`) and the LLM system prompts stay as-is. The example strings below are the **en** copy.
 
 ### Structured outputs (all six LLM calls)
 Every LLM call passes `output_config: { format: { type: "json_schema", schema } }`, so the
@@ -163,7 +164,7 @@ without structured-output support. Requires `@anthropic-ai/sdk` ≥ 0.111 (insta
 container boot via `npm install`; the model is `claude-sonnet-5`).
 
 ### How it's invoked
-- **Fresh command:** the router classifies an `@brain` order as `calendar_action` and the
+- **Fresh command:** the router classifies an `@secretary` order as `calendar_action` and the
   orchestrator calls `run(ctx)`.
 - **Continuation (stateful):** while a session is open, the orchestrator routes the awaited
   party's next messages here too (no router call) — `run(ctx)` sees `ctx.session` set and
@@ -319,7 +320,7 @@ attendees: case-insensitive remove then dedup add).
   onto the draft and re-shows, until `yes`. All TTL **600 s (10 min)**, refreshed on each
   re-show.
 - **Timeout:** no confirmation/answer within 10 min → the session expires; a later bare
-  `yes`/answer is ignored (start over with `@brain`).
+  `yes`/answer is ignored (start over with `@secretary`).
 - **Completes when:** CREATE → owner confirms and `events.insert` succeeds (message + link
   sent). DELETE → owner confirms and `events.delete` succeeds. EDIT → owner confirms and
   `events.patch` succeeds (message + link sent; session cleared). **No calendar write until
