@@ -45,7 +45,11 @@ export const CAL_SCHEMA = {
     summary: { type: "string" },
     // action="list" only (null for every other action): the read-only query window.
     // list_mode "next" = forward-scan for the soonest event; "window" = a bounded span.
-    list_mode: { type: ["string", "null"], enum: ["window", "next", null] },
+    // anyOf (not a type-union + enum): the structured-output validator rejects an enum
+    // whose declared type is ["string","null"] — same nullable pattern RESOLVE_SCHEMA uses.
+    list_mode: {
+      anyOf: [{ type: "null" }, { type: "string", enum: ["window", "next"] }],
+    },
     range_start_iso: { type: ["string", "null"] },
     range_end_iso: { type: ["string", "null"] },
   },
