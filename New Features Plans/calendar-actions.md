@@ -25,9 +25,11 @@ Done and live in production:
 
 - **Phase B** (edit/reschedule): ✅ **shipped 2026-07-11** — reply to an invite (or the
   summary/confirm bubble) to move / relength / rename / add-remove-attendee; confirm-first
-  and stays open so changes chain tagless until `yes`. **Hardened 2026-07-11:** edit now
-  shares delete's `matchEventTargets` (decoded link **or** start-time + attendee-email), so
-  replies to the linkless summary bubble resolve too. Promoted out of this plan to
+  and stays open so changes chain tagless until `yes`. **Hardened & verified live 2026-07-11:**
+  edit now shares delete's `matchEventTargets` (decoded link **or** start-time + attendee-email)
+  and the interpret prompt reads `start_iso` as the event's CURRENT start (not the new time),
+  so replies to the linkless summary bubble resolve too — confirmed working in production.
+  Promoted out of this plan to
   [`Shipped Features/2026-07-11 - calendar-edit-reschedule.md`](../Shipped%20Features/2026-07-11%20-%20calendar-edit-reschedule.md).
 
 **Remaining (not started) — the backlog this plan now tracks:**

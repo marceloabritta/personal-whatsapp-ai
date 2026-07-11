@@ -89,3 +89,9 @@ replied-to invite/summary or the conversation — explicitly *not* the new time)
 No new reply strings; the summary/confirm bubble stays exactly as it was — resolution now
 searches the calendar from the full context (link is just one more signal), rather than
 trusting the link alone.
+
+**Verified live (2026-07-11).** Both hardening commits (`980712e` matcher share, `84bc59f`
+extraction contract) are deployed and confirmed working in production: replying to a
+summary/confirm bubble with "muda pra 14:30" now resolves the event and opens the
+edit-confirm, where it previously returned "no match". This closes out the edit/reschedule
+feature — no further edit-robustness work planned.
