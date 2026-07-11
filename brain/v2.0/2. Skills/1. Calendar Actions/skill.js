@@ -12,7 +12,12 @@
 //    export async function run(ctx)
 // ============================================================================
 import { google } from "googleapis";
-import { buildSystem, buildUserPrompt } from "./prompt.js";
+import {
+  buildSystem,
+  buildUserPrompt,
+  buildConfirmSystem,
+  buildConfirmUser,
+} from "./prompt.js";
 
 export const manifest = {
   id: "calendar_action",
@@ -234,36 +239,45 @@ async function handleDelete(ctx, info) {
   const when = whenStr(ev.start?.dateTime);
 
   // Confirm-first: remember the event and ask. No link needed in the message —
-  // the session holds the eventId, so a "yes" reply resolves it.
-  await sessions.set(remoteJid, {
-    skill: "calendar_action",
-    intent: "delete",
-    stage: "await_confirmation",
-    awaitFrom: "owner", // only the owner confirms their own cancellation
-    data: { eventId, title, when },
-  });
+  // the session holds the eventId. The owner can just type "yes"/"no" (no reply,
+  // no tag); the brain watches for it and ignores unrelated chatter.
+  await sessions.set(
+    remoteJid,
+    {
+      skill: "calendar_action",
+      intent: "delete",
+      stage: "await_confirmation",
+      awaitFrom: "owner", // only the owner confirms their own cancellation
+      data: { eventId, title, when },
+    },
+    600 // 10 min window to confirm
+  );
   await send(
     number,
-    `Confirm the cancelation of this event?\n- ${title}\n- ${when}\n\nReply to this message with "yes" to confirm.`
+    `Confirm the cancelation of this event?\n- ${title}\n- ${when}\n\nReply "yes" to confirm, or "no" to keep it.`
   );
 }
 
-// Resume a pending cancellation: the owner replied to the confirmation message.
+// Resume a pending cancellation. Called for EVERY owner message while the session
+// is open — so we ask the LLM whether this message actually confirms/declines, and
+// stay SILENT on normal chatter (no nagging, no accidental deletes).
 async function resumeDelete(ctx, session) {
-  const { number, env, send, sessions, remoteJid, order } = ctx;
-  const { eventId, title } = session.data || {};
-  const ans = classifyYesNo(order);
+  const { number, env, send, sessions, remoteJid } = ctx;
+  const { eventId, title, when } = session.data || {};
 
-  if (ans === "no") {
+  const decision = await classifyConfirmation(ctx, {
+    action: `cancel the event "${title}"${when ? ` at ${when}` : ""}`,
+  });
+
+  if (decision === "unrelated") return; // not a response to us — ignore silently
+
+  if (decision === "decline") {
     await sessions.clear(remoteJid);
     await send(number, `Okay, I'll keep "${title}".`);
     return;
   }
-  if (ans !== "yes") {
-    await send(number, `Reply "yes" to cancel "${title}", or "no" to keep it.`);
-    return; // keep the session; the next reply can still resolve it
-  }
 
+  // decision === "confirm"
   try {
     await deleteEvent(env, eventId);
     await sessions.clear(remoteJid);
@@ -278,19 +292,31 @@ async function resumeDelete(ctx, session) {
   }
 }
 
-// Cheap yes/no classifier (EN + PT-BR), first word or whole message.
-function classifyYesNo(text) {
-  const t = String(text || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[.!,?]/g, "");
-  const yes = ["y", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "confirm",
-    "confirmed", "confirmo", "confirmar", "sim", "isso", "pode", "vai", "manda",
-    "do it", "go ahead"];
-  const no = ["n", "no", "nope", "nah", "nao", "não", "negativo", "keep",
-    "dont", "don't", "deixa"];
-  const first = t.split(/\s+/)[0];
-  if (yes.includes(t) || yes.includes(first)) return "yes";
-  if (no.includes(t) || no.includes(first)) return "no";
-  return "unknown";
+// LLM judgment: does the latest message respond to a pending confirmation?
+// Returns "confirm" | "decline" | "unrelated" (defaults to "unrelated" on doubt/error).
+async function classifyConfirmation(ctx, { action }) {
+  const { anthropic, model, transcript, order } = ctx;
+  try {
+    const msg = await anthropic.messages.create({
+      model,
+      max_tokens: 50,
+      system: buildConfirmSystem(action),
+      messages: [
+        { role: "user", content: buildConfirmUser({ transcript, latest: order }) },
+      ],
+    });
+    const out = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    console.log("CONFIRM RAW:", out);
+    const m = out.match(/\{[\s\S]*\}/);
+    const decision = m ? JSON.parse(m[0])?.decision : null;
+    return decision === "confirm" || decision === "decline"
+      ? decision
+      : "unrelated";
+  } catch (e) {
+    console.error("confirm classify error:", e?.message || e);
+    return "unrelated"; // on error, do nothing (safe)
+  }
 }

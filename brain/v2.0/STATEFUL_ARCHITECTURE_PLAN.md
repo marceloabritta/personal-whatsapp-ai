@@ -34,16 +34,21 @@ A session is a short-lived "pending action" keyed by `remoteJid`:
 
 - **Only the owner starts a flow**, and only with the `@brain` tag. Non-owner
   messages never start anything.
-- **Continuation depends on `awaitFrom`** — because a stateful flow may involve the
-  brain talking to the *other person* in the chat (through the owner's account):
-  - `awaitFrom: "owner"` — the owner answers, but **only by replying to a brain
-    message** (so the brain never grabs the owner's normal chatter). Used by the
-    delete confirmation.
-  - `awaitFrom: "contact"` — the *other person* answers with **any normal message**
-    (not necessarily a reply). Used by smart scheduling: when an attendee's email is
-    missing, the brain can ask the contact, and capture the email from their plain
-    reply. (Phase C.)
-  - `awaitFrom: "any"` — either, by the rules above.
+- **No replies or tags are needed to continue.** While a session is open, the
+  owning skill is handed **every** message from the party it waits on
+  (`awaitFrom`), and the **LLM decides** whether that message actually supplies the
+  awaited info. Normal chatter is ignored **silently** (no nagging, no accidental
+  actions); the brain acts only when it detects a real answer.
+  - `awaitFrom: "owner"` — messages from the owner (`fromMe`). e.g. the delete
+    confirmation: the owner just types "yes"/"no" somewhere in the chat.
+  - `awaitFrom: "contact"` — messages from the other person (`!fromMe`). e.g. smart
+    scheduling: the attendee types their email in a normal message. (Phase C.)
+  - `awaitFrom: "any"` — either.
+- **The brain never reacts to its own messages** (they start with the `[AI Brain]:`
+  header), so confirmations/prompts it sends don't re-trigger the flow.
+- The chatter-vs-answer judgment is a small LLM call per candidate message, given
+  the pending question + recent conversation, returning e.g.
+  `confirm | decline | unrelated` (delete) — defaulting to "do nothing" on doubt.
 
 - A skill **opens** a session when it needs a follow-up (confirm/clarify).
 - The skill **resumes** it on the next message in that chat, **consumes/clears** it
@@ -76,20 +81,25 @@ New decision at the top of the webhook, after computing `remoteJid`:
 
 ```
 load session for remoteJid (if any, non-expired)
+isBrainMsg = text starts with "[AI Brain]:"            // the brain's own output
 
 isTagged = fromMe AND text starts with @brain          // only owner starts
-isContinuation = session exists AND:
-    (fromMe AND repliesToBrain AND awaitFrom in {owner,any})   // owner follow-up
-    OR (!fromMe AND awaitFrom in {contact,any})                // contact follow-up
+isContinuation = session AND NOT isTagged AND NOT isBrainMsg AND:
+    (fromMe AND awaitFrom in {owner,any})              // owner follow-up
+    OR (!fromMe AND awaitFrom in {contact,any})        // contact follow-up
 
 if isTagged:            fresh command -> clear stale session, ROUTER, dispatch
-elif isContinuation:    dispatch straight to session.skill with ctx.session
+elif isContinuation:    dispatch to session.skill; the skill LLM-judges the message
+                        and acts only if it supplies the awaited info (else silent)
 else:                   ignore
 ```
 
-Note the blanket `if (!fromMe) return` is gone — a non-owner message can now be a
-valid continuation (contact answering), but only when a session explicitly waits on
-the contact; otherwise it's still ignored.
+Notes:
+- The blanket `if (!fromMe) return` is gone — a non-owner message can be a valid
+  continuation (contact answering), but only when a session waits on the contact.
+- No reply requirement: `repliesToBrain` was removed. Chatter filtering moves into
+  the skill (LLM), which is where the "detect the missing info" intelligence lives.
+- `isBrainMsg` guard stops the brain from reacting to its own sent messages.
 
 - Skills receive `ctx.session` (current session or null) and a `ctx.sessions`
   store (`get/set/clear`), plus `ctx.remoteJid` (already passed).

@@ -123,23 +123,24 @@ app.post("/webhook", async (req, res) => {
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
     console.log("QUOTED>>>", JSON.stringify(quoted));
 
+    // Never react to the brain's OWN messages (they start with the header).
+    const isBrainMsg = text.startsWith(HEADER);
+
     // Pending conversation state for this chat (confirmations, clarifications, ...).
     const session = await sessions.get(remoteJid);
 
     // START: a flow only begins when the OWNER uses the trigger tag.
     const isTagged = fromMe && text.toLowerCase().startsWith(TAG);
 
-    // CONTINUE: an active session accepts a follow-up, depending on who it waits on
-    // (session.awaitFrom, default "owner"):
-    //   - owner (fromMe): only when replying to one of the brain's own messages,
-    //     so we never grab the owner's normal chatter.
-    //   - contact (!fromMe): any normal message — e.g. the person the owner is
-    //     scheduling with just types their email, not as a reply to the brain.
-    const repliesToBrain = !!quoted?.text && quoted.text.startsWith(HEADER);
+    // CONTINUE: while a session is active, the owning skill inspects EVERY message
+    // from the party it waits on (session.awaitFrom) and decides — with the LLM —
+    // whether the message supplies the awaited info. No reply/tag required; normal
+    // chatter is ignored by the skill. awaitFrom: owner (fromMe) | contact (!fromMe)
+    // | any. (The contact case lets the person the owner is scheduling with answer.)
     const awaitFrom = session?.awaitFrom || "owner";
     let isContinuation = false;
-    if (session && !isTagged) {
-      if (fromMe && repliesToBrain && (awaitFrom === "owner" || awaitFrom === "any"))
+    if (session && !isTagged && !isBrainMsg) {
+      if (fromMe && (awaitFrom === "owner" || awaitFrom === "any"))
         isContinuation = true;
       else if (!fromMe && (awaitFrom === "contact" || awaitFrom === "any"))
         isContinuation = true;

@@ -35,6 +35,26 @@ For action="create", also fill these (leave them empty/null for delete/other):
 - "summary": a short description/agenda of the meeting.`;
 }
 
+// ---- Continuation: judge whether a message answers a pending confirmation ----
+// Used while a session is open. The brain sees EVERY message from the awaited
+// party and must ignore normal chatter, acting only on a real yes/no.
+export function buildConfirmSystem(action) {
+  return `You decide whether the LATEST message is a response to a pending confirmation.
+The assistant asked to confirm: ${action}.
+Use the recent conversation only as context; judge ONLY the latest message.
+Reply with ONLY valid JSON, no text around it: {"decision":"confirm"|"decline"|"unrelated"}
+- "confirm": the latest message clearly agrees to proceed (e.g. yes, confirm, go ahead, sim, pode, isso).
+- "decline": the latest message clearly refuses (e.g. no, don't, keep it, não, deixa).
+- "unrelated": the latest message is normal conversation, NOT a reply to this confirmation. If unsure, choose "unrelated".`;
+}
+
+export function buildConfirmUser({ transcript, latest }) {
+  return `Recent conversation:
+${transcript || "(none)"}
+
+Latest message: ${latest}`;
+}
+
 // Builds the "user" message sent along with the system prompt.
 export function buildUserPrompt(
   OWNER_NAME,
