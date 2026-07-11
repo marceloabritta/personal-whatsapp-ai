@@ -126,7 +126,8 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 │   ├── calendar-actions.md     #   smart scheduling + edit/reschedule (next up)
 │   ├── message-summarizer.md
 │   ├── reminders-followups.md
-│   └── task-capture.md         #   BUILT (task_action); pending OAuth tasks-scope to deploy
+│   └── task-improvements.md    #   NEXT for tasks: batch create/complete + edit existing
+│                               #   (task-capture.md retired + deleted after task_action shipped)
 ├── brain/                 # the app — run this (v1.0 removed; in git history)
 │   ├── package.json       #   at the brain/ ROOT (shared node_modules for orchestrator+skills)
 │   ├── .env.example
@@ -365,8 +366,8 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   replies `sendFailed()` + logs the HTTP error; verify from logs / fix forward (see §8).
   Docs: `2. Skills/4. Feature Requests/SKILL.md`, ARCHITECTURE flow step 8b + localization
   exception, ORCHESTRATOR external-touchpoints note.
-- **2026-07-11 — task capture skill + cross-skill capability registry (BUILT, not yet
-  deployed).** New `task_action` skill (`2. Skills/3. Tasks/`): a to-do inbox backed by
+- **2026-07-11 — task capture skill + cross-skill capability registry (DEPLOYED).** New
+  `task_action` skill (`2. Skills/3. Tasks/`): a to-do inbox backed by
   Google Tasks. A to-do for **yourself** is created immediately in Google Tasks, then a
   short **amend window** (session) lets you correct/delete it with no confirm step; **list**
   reads open tasks; **complete** is confirm-first. A to-do for **someone else** is delegated
@@ -374,9 +375,16 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   new **capability registry**: skills may export a `capabilities` object, and the orchestrator
   injects `ctx.hasSkill`/`ctx.callSkill` (auto-injects ctx, `MAX_SKILL_DEPTH` loop guard) so
   skills compose without importing each other's files. Calendar exposes
-  `capabilities.startCreate`. en+pt localized per the convention. **Blocking to deploy:**
-  re-consent OAuth with the **tasks** scope added to `GOOGLE_REFRESH_TOKEN` (see §8). Docs:
-  `2. Skills/3. Tasks/SKILL.md`, ARCHITECTURE "Composing skills", ORCHESTRATOR registry note.
+  `capabilities.startCreate`. en+pt localized per the convention. **OAuth:** the
+  `GOOGLE_REFRESH_TOKEN` was re-minted with the `tasks` scope added alongside `calendar`
+  (see §8); the previously-missing `/opt/brain/.env` was also restored from the running
+  container (backup at `/root/brain.env.bak`) — a latent break on any future recreate.
+  Reply layout: `Added to your list:\n<dd/mmm> - <title>\n\nTell me if you need something to
+  change…`; list as `Here are your open tasks:` + one `<dd/mmm> - <title>` per line
+  (`localizeDueDate` → localized `dd/mmm`). Self add/list/complete verified in production.
+  Known gaps (next): no batch create/complete, no editing an existing task — see
+  `New Features Plans/task-improvements.md`. Docs: `2. Skills/3. Tasks/SKILL.md`,
+  ARCHITECTURE "Composing skills", ORCHESTRATOR registry note.
 - **2026-07-11 — multilingual brain (DEPLOYED).** The brain now detects the conversation
   language (the router returns `lang`, schema-enforced) and replies in it, system-wide.
   Prose lives per-skill in `prompt.js` as `{ en, pt }` maps selected by `ctx.lang`; the

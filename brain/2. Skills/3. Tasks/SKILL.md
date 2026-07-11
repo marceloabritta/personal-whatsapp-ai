@@ -35,14 +35,28 @@ auto-translated).
 ### Add a to-do for yourself (immediate, then a short window to change it)
 
 1. You: `@brain add "buy flight to SP" by friday`.
-2. Brain: `Added to your list: "buy flight to SP" · due Jul 17. Tell me to change
-   anything, or say "done".`
+2. Brain:
+   ```
+   Added to your list:
+   17/jul - buy flight to SP
+
+   Tell me if you need something to change, if not we are good.
+   ```
 3. You (optional, no tag needed): `make it a return flight`.
-4. Brain: `Updated: "buy return flight to SP" · due Jul 17.`
+4. Brain:
+   ```
+   Updated your list:
+   17/jul - buy return flight to SP
+
+   Tell me if you need something to change, if not we are good.
+   ```
 5. You: `done` → (the window closes silently). Or say nothing — it closes on its own.
 
 > Changed your mind? While the window is open, `actually cancel that` removes the task:
 > `Removed "buy return flight to SP" from your list.`
+>
+> Dates render as **dd/mmm**, localized (`17/jul`; in PT-BR a May date reads `03/mai`,
+> in English `03/may`). Tasks without a due date show just the title.
 
 ### Capture a to-do from a message
 
@@ -54,10 +68,10 @@ becomes the task.
 1. You: `@brain what's on my list?`
 2. Brain:
    ```
-   Your list (3 open):
-   1. Buy flight to SP — due Jul 17
-   2. Send contract to João
-   3. Call the accountant
+   Here are your open tasks:
+   17/jul - buy flight to SP
+   send contract to João
+   03/may - call the accountant
    ```
 
 ### Complete a to-do (confirm-first)
@@ -118,3 +132,14 @@ for Calendar only, so **re-consent with BOTH scopes** (calendar + tasks) and upd
 `GOOGLE_REFRESH_TOKEN` — otherwise every Tasks call returns 401 and the skill replies
 with `reply().failed()`. Keep the consent screen **"In production"** (a Testing token
 expires in ~7 days). Optional: `GOOGLE_TASKLIST_ID` to target a non-default list.
+*(Done in production 2026-07-11: token re-minted with both scopes.)*
+
+### Known limitations (next iteration)
+This first version is **single-item** and can't edit an existing task:
+- **No batch create** — "add A, B and C" captures one task, not three.
+- **No batch complete** — "mark A and B done" resolves only one ref (the extractor
+  collapses the list); a multi-task request gets lost.
+- **No edit of a stored task** — you can only change a task inside its brief post-add
+  amend window; there's no "change the flight task's due to Monday" for an older task.
+
+These are scoped in `New Features Plans/task-improvements.md`.
