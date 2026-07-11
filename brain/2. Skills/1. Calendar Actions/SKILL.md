@@ -8,8 +8,9 @@
 > 1. **Create** an event and email the invite to the attendees — **confirm-first**:
 >    it shows you a draft and waits for your **`yes`** before writing anything.
 > 2. **Edit/reschedule** an event you replied to — move it, change its length, rename it,
->    or add/remove an attendee. Applies straight away and re-notifies; if the change is
->    ambiguous it asks a quick question first.
+>    or add/remove an attendee. **Confirm-first**: it shows the updated event and waits
+>    for your **`yes`**, and **stays open** so you can keep telling it changes ("actually
+>    4:30", "also add bruno@x.com") before saving. Nothing is written until you confirm.
 > 3. **Cancel/delete** an event you replied to — with a "type *yes* to confirm" step.
 >
 > **How you call it:**
@@ -78,31 +79,39 @@ The **title** is inferred from what the meeting is about (e.g. "Q3 budget review
 the chat gives no subject it falls back to `Owner & <names>`. You can always fix it at
 the confirm step ("rename to …").
 
-### Editing / rescheduling an event
+### Editing / rescheduling an event (confirm-first, and it stays open)
 
 1. You **reply to the invite message** (the one with the calendar link) with the change:
    `@brain move it to 4pm` · `@brain make it 30 min` · `@brain add carlos@example.com` ·
    `@brain remove ana@example.com` · `@brain rename to Kickoff`.
-2. **If the change is clear**, the brain applies it right away (Google re-emails the
-   attendees) and confirms with the new state:
-   > Done! Updated the event and notified the attendees:
-   >
+2. **The brain doesn't write to Google yet — it shows the updated event and asks you to
+   confirm**, then watches this chat for your answer for 10 minutes (no tag needed):
+   > Here's the updated event:
    > - &lt;title&gt;
    > - &lt;attendee emails&gt;
    > - &lt;date, hh:mm AM/PM&gt; (&lt;duration&gt; min)
    >
-   > Here is a link for the event:
-   > &lt;calendar link&gt;
-3. **If the change is ambiguous** (e.g. "move it earlier" with no target time, or "add
-   João" with no email on record), it asks a short question and watches this chat for your
-   answer for 10 minutes (no tag needed):
+   > Reply "yes" to save and notify everyone, or tell me what else to change.
+3. **What it picks up next** — any message you send while it's waiting (all tagless):
+   - a **yes**-type answer → it saves the change and Google re-emails the attendees:
+     > Done! Updated the event and notified the attendees:
+     >
+     > - &lt;title&gt; / - &lt;attendee emails&gt; / - &lt;date, hh:mm AM/PM&gt; (&lt;duration&gt; min)
+     >
+     > Here is a link for the event: &lt;calendar link&gt;
+   - a **further change** ("actually 4:30", "also add bruno@example.com", "rename to
+     Kickoff") → it folds it into the same draft and shows the updated confirmation again,
+     **staying open** — so you can refine as many times as you like before saving.
+   - a **cancel** ("no", "leave it", "deixa") → *"Okay, I'll leave "&lt;title&gt;" as it was."*
+   - **anything else (normal conversation)** → **ignored silently**; it keeps waiting.
+4. **If the first change is ambiguous** (e.g. "move it earlier" with no target time, or
+   "add João" with no email on record), it asks a short question first:
    > About when should I move it to?
 
-   Your plain reply ("4pm") is applied; unrelated chatter is ignored while it waits.
-4. If step 1 wasn't a reply to a message with a readable calendar link, or the event is
+   Your plain reply ("4pm") is folded in and rolls into the confirmation in step 2.
+5. If step 1 wasn't a reply to a message with a readable calendar link, or the event is
    already gone, you get a plain-language message explaining what to do (reply to the
-   invite and try again). Edit is **not** confirm-first — it isn't destructive, so a clear
-   change applies immediately.
+   invite and try again).
 
 ### Cancelling an event (also waits for your answer)
 
@@ -141,11 +150,12 @@ answer in the flow's language. Any language without a map is translated from the
 by the orchestrator's `send()` fallback; the `[AI Brain]:` header and the LLM system prompts
 stay as-is. The example strings below are the **en** copy.
 
-### Structured outputs (all five LLM calls)
+### Structured outputs (all six LLM calls)
 Every LLM call passes `output_config: { format: { type: "json_schema", schema } }`, so the
-API returns **only** schema-valid JSON. The five schemas live in `prompt.js` as the single
+API returns **only** schema-valid JSON. The six schemas live in `prompt.js` as the single
 source of truth for reply *shape* (`CAL_SCHEMA`, `CONFIRM_SCHEMA`, `REVIEW_SCHEMA`,
-`RESOLVE_SCHEMA`, `EDIT_SCHEMA`); the prompts describe what each field *means*. In `skill.js`,
+`RESOLVE_SCHEMA`, `EDIT_SCHEMA`, `EDIT_REVIEW_SCHEMA`); the prompts describe what each field
+*means*. In `skill.js`,
 `jsonFormat(schema)` builds the `output_config`, and `readReply(msg)` reads it — guarding
 `stop_reason:"refusal"` (→ `null`, a safe no-op) and falling back to `parseJsonReply`
 (fence-strip + whole-parse + balanced-brace scan) if the model is ever swapped to one
@@ -165,7 +175,9 @@ Continuation checks first (each reads `ctx.session`):
 1. `intent:"delete"` + `stage:"await_confirmation"` → `resumeDelete`.
 2. `intent:"create"` + `stage:"await_info"` → `resumeInfo` (gathering).
 3. `intent:"create"` + `stage:"await_confirmation"` → `resumeCreate` (yes/modify/cancel).
-4. `intent:"edit"` + `stage:"await_clarification"` → `resumeEdit` (apply once resolved).
+4. `intent:"edit"` + `stage:"await_clarification"` → `resumeEditClarify` (first request
+   was ambiguous; roll into confirm once resolved).
+5. `intent:"edit"` + `stage:"await_confirmation"` → `resumeEditConfirm` (yes/modify/cancel).
 
 Otherwise **`interpret(ctx)`** — one Claude call (`buildSystem`/`buildUserPrompt`,
 `CAL_SCHEMA`, `max_tokens: 4096`) that extracts from the **whole conversation**, not just
@@ -242,14 +254,19 @@ emails) and `start_iso` for deletes too.
    `findConfirmedDuplicates`, each `events.delete` with `sendUpdates:"all"`; `410` counts as
    success) → clear + "Cancelled…".
 
-### Task: EDIT — `handleEdit` + `resumeEdit` (Phase B)
-Change an existing event the owner **replied to**. Not confirm-first (an edit isn't
-destructive); a clear change applies immediately, an ambiguous one asks first.
+### Task: EDIT — `handleEdit` + `resumeEditClarify` + `resumeEditConfirm` (Phase B)
+Change an existing event the owner **replied to**. **Confirm-first and stays open** (reuses
+create's confirm/modify machinery): the change is folded into a **draft** of the event's
+target state, shown for confirmation, and written to Google only on `yes`. While the confirm
+session is open the owner can keep refining the same event tagless. **The draft** — seeded by
+`editDraftFromEvent(ev)` — is `{ title, start_iso, duration_min, summary, emails[] }`;
+`applyPatchToDraft(draft, patch)` folds a change onto it (overwrite touched fields; merge
+attendees: case-insensitive remove then dedup add).
+
 1. **`handleEdit`:** `eventId = resolveEventId(quoted.calendarLink)` — no link id → ask the
    owner to reply to the invite and stop. `getEvent` the current state; not `confirmed` →
-   "couldn't find that event". Then a **focused pass** `interpretEdit` (`buildEditSystem`,
-   `EDIT_SCHEMA`, `max_tokens: 2048`) reads the change request against the real event
-   (`eventForLLM` gives it title / start / end / duration / attendee emails) and returns
+   "couldn't find that event". Then the **first-pass** `interpretEdit` (`buildEditSystem`,
+   `EDIT_SCHEMA`, 2048) reads the change against the real event (`eventForLLM`) and returns
    only what changes:
    ```jsonc
    { "new_start_iso": string|null, "new_duration_min": number|null,
@@ -258,28 +275,35 @@ destructive); a clear change applies immediately, an ambiguous one asks first.
      "clarify": string|null }   // a question when the request is ambiguous/underspecified
    ```
    - `clarify` set **and** no concrete change (`hasEditChange` false) → open a session
-     (`intent:"edit"`, `stage:"await_clarification"`, `awaitFrom:"owner"`, 600 s) holding
-     the `eventId`, and send the question.
-   - a concrete change → **`applyEdit`**: build a minimal patch, carrying the current start
-     / duration for the correlated time fields (changing only the start keeps the length;
-     changing only the duration keeps the start). Attendees are merged from the current
-     list — `remove_emails` filtered (case-insensitive), `add_emails` appended (deduped) —
-     and only sent when they change. `events.patch({ sendUpdates:"all" })`; confirm from the
-     **returned** event (`editDone` with the new time, duration, attendees, `htmlLink`).
-   - no change and no `clarify` → `editNoChange` ("tell me the new time, duration, …").
-2. **`resumeEdit`** (every owner message while `await_clarification` is open): re-`getEvent`
-   (fresh state; vanished/cancelled → clear the session) and re-run `interpretEdit` against
-   the answer. Resolves to a concrete change → `applyEdit` + clear. Still ambiguous or plain
-   chatter (`hasEditChange` false) → **return silently** and keep waiting (same discipline
-   as create/delete continuations), bounded by the 10-min TTL. Interpret error → keep the
-   session so the owner can retry.
+     (`stage:"await_clarification"`, `awaitFrom:"owner"`, 600 s, holds only `eventId`) and
+     ask the question.
+   - a concrete change → `applyPatchToDraft(editDraftFromEvent(ev), patch)` → **`openEditConfirm`**
+     (session `stage:"await_confirmation"`, `awaitFrom:"owner"`, holds `{ eventId, draft }`;
+     `editConfirm` shows title / emails / when / duration). **Nothing written yet.**
+   - no change and no `clarify` → `editNoChange`.
+2. **`resumeEditClarify`** (`await_clarification`): re-`getEvent` (fresh; vanished/cancelled
+   → clear) and re-run `interpretEdit` on the answer. Resolves to a concrete change → build
+   the draft and roll into **`openEditConfirm`**. Still ambiguous / chatter → silent. This
+   stage exists only for an ambiguous *first* request.
+3. **`resumeEditConfirm`** (`await_confirmation`, every owner message): one review call
+   **`reviewEdit`** (`buildEditReviewSystem`, `EDIT_REVIEW_SCHEMA`, 2048) — the change fields
+   **plus** a `decision` — judged against the *proposed draft* (`draftAsEventJson`):
+   - `confirm` → re-`getEvent` (still `confirmed`?) then **`applyEditDraft`**: patch
+     `summary`/`description`/`start`/`end` (end = start + duration)/`attendees` from the
+     draft, `events.patch({ sendUpdates:"all" })`, `editDone` from the returned event, clear.
+   - `modify` → `hasEditChange` → `applyPatchToDraft` onto the draft + `openEditConfirm`
+     (re-show, **keep open**); ambiguous further change (`clarify`, no change) → ask + keep
+     open; nothing resolved → silent.
+   - `cancel` → clear + `editCancelled` ("I'll leave it as it was").
+   - `unrelated` / null (doubt/error) → silent (safe default).
 
 ### External APIs
 - **Anthropic (Claude), all structured-output calls:** `interpret` (create/delete/edit
   classification + create/delete extraction, 4096) · `inspectMissing` (focused
-  missing-field resolver, 2048) · `reviewCreate` (confirm/modify/cancel judgment +
-  re-draft, 4096) · `interpretEdit` (focused edit resolver, 2048) · `classifyConfirmation`
-  (delete yes/no, 1024). Model = `ctx.model`.
+  missing-field resolver, 2048) · `reviewCreate` (create confirm/modify/cancel + re-draft,
+  4096) · `interpretEdit` (first-pass edit extraction, 2048) · `reviewEdit` (edit
+  confirm/modify/cancel + re-draft, 2048) · `classifyConfirmation` (delete yes/no, 1024).
+  Model = `ctx.model`.
 - **Google Calendar (OAuth refresh token):** `events.list` (dedupe on create + match/sweep
   on delete), `events.get` (resolve a decoded link id; read current state on edit),
   `events.insert` (create), `events.patch` (edit, `sendUpdates:"all"`), `events.delete`
@@ -287,17 +311,19 @@ destructive); a clear change applies immediately, an ambiguous one asks first.
 - **WhatsApp:** all user-facing text via `ctx.send`.
 
 ### Stateful behavior, timeouts, completion
-- **CREATE, DELETE, and EDIT can all be stateful.** CREATE sessions: `await_info`
-  (gathering, `awaitFrom:"any"`) then `await_confirmation` (`awaitFrom:"owner"`); DELETE:
-  `await_confirmation` (`awaitFrom:"owner"`); EDIT: `await_clarification`
-  (`awaitFrom:"owner"`) — opened **only** when a change is ambiguous, otherwise edit is
-  a one-shot apply with no session. All TTL **600 s (10 min)**.
+- **CREATE, DELETE, and EDIT are all stateful and confirm-first.** CREATE sessions:
+  `await_info` (gathering, `awaitFrom:"any"`) then `await_confirmation` (`awaitFrom:"owner"`);
+  DELETE: `await_confirmation` (`awaitFrom:"owner"`); EDIT: `await_clarification`
+  (`awaitFrom:"owner"`, only when the first request is ambiguous) then `await_confirmation`
+  (`awaitFrom:"owner"`) which **stays open across refinements** — each further change folds
+  onto the draft and re-shows, until `yes`. All TTL **600 s (10 min)**, refreshed on each
+  re-show.
 - **Timeout:** no confirmation/answer within 10 min → the session expires; a later bare
   `yes`/answer is ignored (start over with `@brain`).
 - **Completes when:** CREATE → owner confirms and `events.insert` succeeds (message + link
-  sent). DELETE → owner confirms and `events.delete` succeeds (session cleared). EDIT →
-  the change is resolved and `events.patch` succeeds (message + link sent; any session
-  cleared).
+  sent). DELETE → owner confirms and `events.delete` succeeds. EDIT → owner confirms and
+  `events.patch` succeeds (message + link sent; session cleared). **No calendar write until
+  the owner confirms**, for all three.
 - **Failure modes:** every external call is wrapped; failures send a plain-language reply
   and clear the session where relevant. A model refusal or unparseable reply resolves to
   `null` → a safe no-op (nothing written). `classifyConfirmation` / `reviewCreate` failing

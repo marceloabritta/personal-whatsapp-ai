@@ -163,7 +163,7 @@ add, but the confirm step already gives the human that final check for free.
 
 ---
 
-## Phase B — Edit / reschedule via reply (IMPLEMENTED — deployed 2026-07-11, awaiting live test)
+## Phase B — Edit / reschedule via reply (IMPLEMENTED — confirm-first revision committed 2026-07-11, pending deploy + live test)
 
 - **Scope:** reply to an event's calendar link with a change ("move to 4pm",
   "make it 30 min", "add carlos@x.com", "remove ana@x.com", "rename to Kickoff"); apply it,
@@ -176,21 +176,28 @@ add, but the confirm step already gives the human that final check for free.
   (`new_start_iso`, `new_duration_min`, `new_title`, `new_summary`, `add_emails[]`,
   `remove_emails[]`, `clarify`). This mirrors the create resolver rather than stuffing a
   `changes` object into the broad extraction — same "focused gap-filler" pattern as C2/C3.
+- **Confirm-first + stays open (revised 2026-07-11 after first test).** The initial cut
+  applied an unambiguous edit immediately and opened no session — so a *second* change had
+  to re-tag `@brain`. Reworked to reuse create's confirm/modify machinery: the change is
+  folded into a **draft** of the event's target state, shown for confirmation, and written
+  only on `yes`. While the confirm session is open the owner keeps refining the same event
+  tagless ("actually 4:30", "also add bruno@x.com").
 - **`handleEdit`:** `resolveEventId(quoted.calendarLink)` → `getEvent` (must be
-  `confirmed`) → `interpretEdit`. A concrete change → **`applyEdit`** builds a minimal
-  patch (carrying current start/duration for the correlated time fields; merges attendees
-  with case-insensitive remove + dedup add) → `events.patch({ sendUpdates:"all" })` →
-  confirm from the returned event. Ambiguous (`clarify` set, no concrete change) → open an
-  `await_clarification` session (`awaitFrom:"owner"`, holds only the `eventId`).
-- **`resumeEdit`:** re-`getEvent` (fresh) + re-run `interpretEdit` on the owner's answer;
-  apply once it resolves, else stay silent (chatter/still-ambiguous) until answered or the
-  10-min TTL. **Not confirm-first** — an edit isn't destructive, so a clear change applies
-  immediately (unlike delete).
-- **Reuses:** `resolveEventId`, `getEvent`, the session/continuation pattern; adds
-  `patchEvent`.
-- **Done when:** reschedule / relength / add-remove attendee / rename all work;
-  ambiguous requests clarify instead of guessing. ⏳ **Pending Marcelo's live-test
-  confirmation** before this is checked off.
+  `confirmed`) → `interpretEdit`. Concrete change → `applyPatchToDraft(editDraftFromEvent
+  (ev), patch)` → **`openEditConfirm`** (session `await_confirmation`, `awaitFrom:"owner"`,
+  holds `{eventId, draft}`). Ambiguous (`clarify`, no change) → `await_clarification`
+  session (holds only `eventId`).
+- **`resumeEditClarify`** (ambiguous first request): re-`getEvent` + `interpretEdit` on the
+  answer; resolves → build draft → `openEditConfirm`; else silent.
+- **`resumeEditConfirm`** (the confirm loop, one `reviewEdit` call → `confirm | modify |
+  cancel | unrelated`): `confirm` → `applyEditDraft` (`events.patch`, `sendUpdates:"all"`) +
+  clear; `modify` → fold onto draft + re-show, **keep open**; `cancel` → clear; `unrelated`
+  → silent. Ambiguous modify → ask + keep open.
+- **Reuses:** `resolveEventId`, `getEvent`, the session/review pattern (mirrors
+  `reviewCreate`); adds `patchEvent`, `EDIT_REVIEW_SCHEMA`, `buildEditReviewSystem/User`.
+- **Done when:** reschedule / relength / add-remove attendee / rename all work; changes
+  chain tagless until confirmed; ambiguous requests clarify; nothing is written until the
+  owner confirms. ⏳ **Pending Marcelo's live-test confirmation** before this is checked off.
 
 ---
 

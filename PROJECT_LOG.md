@@ -351,6 +351,15 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — calendar edit made confirm-first + stays open (committed, PENDING DEPLOY).**
+  First-test fix: an unambiguous edit used to apply immediately and open no session, so a
+  *second* change had to re-tag `@brain`. Edit now reuses create's confirm/modify machinery
+  — the change is folded into a draft of the event's target state, shown for confirmation,
+  and written to Google only on `yes`; the confirm session stays open so further changes
+  ("actually 4:30", "also add bruno@x.com") land tagless. New: `EDIT_REVIEW_SCHEMA`,
+  `reviewEdit`, `openEditConfirm`, `applyEditDraft`, `resumeEditClarify` /
+  `resumeEditConfirm` (replacing the immediate-apply `resumeEdit`/`applyEdit`). Committed
+  `55891fe`; **not yet deployed** — awaiting a deploy + live test.
 - **2026-07-11 — calendar edit/reschedule, Phase B (DEPLOYED, awaiting live test).** Reply
   to an event's invite with a change and `@brain` — "move it to 4pm", "make it 30 min",
   "add carlos@x.com", "remove ana@x.com", "rename to Kickoff". `interpret` gains
