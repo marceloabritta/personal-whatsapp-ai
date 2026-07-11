@@ -69,7 +69,16 @@ function readReply(msg) {
     .filter((b) => b.type === "text")
     .map((b) => b.text)
     .join("");
-  return parseJsonReply(out);
+  const parsed = parseJsonReply(out);
+  // A null parse is almost always truncation (stop_reason "max_tokens") — the
+  // accumulated draft is re-emitted every turn and grows. Log the cause + size so a
+  // future failure is diagnosable instead of a silent null.
+  if (!parsed) {
+    console.error(
+      `feature_request: unparseable reply (stop_reason=${msg?.stop_reason}, chars=${out.length})`
+    );
+  }
+  return parsed;
 }
 // Read the raw text blocks (for the prose document — NOT JSON).
 function readText(msg) {
@@ -142,7 +151,10 @@ async function clarifyTurn(ctx, priorDraft) {
   const { anthropic, model, owner, order, transcript, nowStr, lang } = ctx;
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 1500,
+    // The full draft is re-emitted every turn and grows as the spec fills out, so this
+    // must comfortably fit a large draft + the reply — the FINALIZE turn is when the
+    // draft is largest. 1500 truncated mid-JSON on real conversations (→ null → no doc).
+    max_tokens: 4000,
     system: buildClarifySystem(owner, lang),
     output_config: jsonFormat(CLARIFY_SCHEMA),
     messages: [
@@ -217,7 +229,13 @@ async function resumeClarify(ctx, session) {
     console.error("feature_request/clarify error:", e?.message || e);
     return; // transient error: stay open, don't nag
   }
-  if (!out) return; // stay open on an unparseable turn
+  if (!out) {
+    // Unparseable turn (e.g. a truncated reply). Don't strand the owner in silence —
+    // the prior draft is still in the session, so tell them and keep the window open so
+    // "write it up" retries the finalize. (readReply already logged the cause.)
+    await send(number, reply(ctx.lang).thinkingError());
+    return;
+  }
 
   if (out.status === "cancel") {
     await sessions.clear(remoteJid);
@@ -294,7 +312,7 @@ async function generateDoc(ctx, draft) {
   const { anthropic, model } = ctx;
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 2048,
+    max_tokens: 4000, // a full feature spec can run long; leave headroom
     system: buildDocSystem(),
     messages: [
       {
