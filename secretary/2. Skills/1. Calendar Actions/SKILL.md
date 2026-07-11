@@ -146,14 +146,20 @@ the confirm step ("rename to …").
    `@secretary what's on my calendar tomorrow?` · `@secretary do I have anything Friday
    afternoon?` · `@secretary what's my next meeting?`.
 2. It replies immediately with the events in the window it understood — **nothing is ever
-   written, and there's no confirm step**:
-   > Here's Jul 12, 2026:
-   > - 9:00 AM — Standup (30 min)
-   > - 3:00 PM — Q3 budget review · ana@example.com (45 min)
-   > - All day — Gym
-   - **A single day** ("tomorrow", "Friday afternoon") → the date is in the header and each
-     line shows the time only. A window spanning **several days** ("this week") shows the
-     full date on each line.
+   written, and there's no confirm step**. Events are **grouped by day**: a date header, then
+   each event as a `time - title` line with any **external** attendees' emails on the line
+   below, a blank line between events and before each new day:
+   > Jul 13, 2026
+   > 9:00 AM - Standup
+   >
+   > 3:00 PM - Q3 budget review
+   > ana@example.com
+   >
+   > Jul 14, 2026
+   > All day - Gym
+   - Each event line shows the **time only** (the day is the header); all-day events show
+     "All day". Only **external** attendees are listed (the owner's own entry is dropped);
+     events with no guests show just the `time - title` line.
    - **"What's my next meeting?"** → it scans forward and shows just the next upcoming event
      (*"Your next event: …"*), or *"Nothing coming up … in the next two weeks."*
    - **No time given** ("what's on my calendar?") → it defaults to the **rest of today** and
@@ -356,11 +362,15 @@ The only action with **no session, no confirm, and no write** — the simplest o
 DST) via an `en-CA` `Intl.DateTimeFormat` to get the local Y-M-D, then a −03:00 ISO string.
 `toListItem(e)` flattens a Google event to the **locale-neutral** shape the renderers take
 (`{ allDay, startIso, dayMs, title, emails, durationMin }`) — all-day events (`e.start.date`,
-no `dateTime`) carry `dayMs` and render without a time. The renderers (`listEvents`,
-`listNext`, `listError` in `prompt.js`) pick **time-only** lines when the window is a single
-local day (header states the date) and **full date+time** when it spans days
-(`sameLocalDay` decides); a 50-item cap appends a localized "(Showing the first 50.)" note
-rather than truncating silently. Errors → `reply(lang).listError` (no crash, nothing changed).
+no `dateTime`) carry `dayMs` and render as "All day"; `emails` is **external attendees only**
+(dropping `self` — the owner — and room `resource` entries). The renderers (`listEvents`,
+`listNext`, `listError` in `prompt.js`) **group events by day** via `renderDays`: a date
+header, then each event as an `eventBlock` — a `time - title` line plus, only if the event has
+external attendees, their emails on the next line. Blocks join with a blank line, days join
+with a blank line, so there's a break between events in a day and before each new day. Time is
+hh:mm (or "All day"); the date lives in the group header, not per line. A 50-item cap appends a
+localized "(Showing the first 50.)" note rather than truncating silently; the empty state uses
+`sameLocalDay` to word single-day vs range. Errors → `reply(lang).listError` (no crash).
 
 ### External APIs
 - **Anthropic (Claude), all structured-output calls:** `interpret` (create/delete/edit

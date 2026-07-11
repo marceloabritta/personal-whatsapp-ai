@@ -445,26 +445,46 @@ function localizeDay(lang, ms) {
   });
 }
 
-// Do two instants fall on the same calendar day in the reply TZ? Decides whether the
-// window is "single-day" (time-only lines) or spans days (full date on each line).
+// Do two instants fall on the same calendar day in the reply TZ? Used only for the
+// empty-state wording (single day vs a spanning range).
 function sameLocalDay(aMs, bMs) {
   return localizeDay("en", aMs) === localizeDay("en", bMs);
 }
 
-// One listed event as a bullet line. `single` = the window is a single day → show time
-// only; otherwise show the full date+time. All-day events show a day label / date, no
-// time. `ev` is the flattened shape from skill.js's toListItem (locale-neutral data);
-// the labels here are per-language, so grammar stays out of a shared English builder.
-function eventLine(lang, ev, single) {
+// The instant used to place an event on a day (all-day events carry dayMs; timed ones
+// their start), so events can be grouped under a per-day header.
+function eventDayMs(ev) {
+  return ev.allDay ? ev.dayMs : new Date(ev.startIso).getTime();
+}
+
+// One event rendered as its block: a "time - title" line, then (only if the event has
+// external attendees) their emails on the next line. Time is hh:mm for timed events, an
+// "all day" label otherwise — the DATE is the group header, not repeated per line.
+function eventBlock(lang, ev) {
   const title = ev.title || (lang === "pt" ? "(sem título)" : "(no title)");
-  const emailsPart = ev.emails.length ? ` · ${ev.emails.join(", ")}` : "";
-  if (ev.allDay) {
-    const left = single ? (lang === "pt" ? "Dia todo" : "All day") : localizeDay(lang, ev.dayMs);
-    return `- ${left} — ${title}${emailsPart}`;
+  const time = ev.allDay ? (lang === "pt" ? "Dia todo" : "All day") : localizeTime(lang, ev.startIso);
+  const head = `${time} - ${title}`;
+  return ev.emails.length ? `${head}\n${ev.emails.join(", ")}` : head;
+}
+
+// Group start-sorted events into consecutive day buckets and render each as a header
+// (the date) followed by its event blocks. Blank line between blocks in a day AND before
+// each new day: blocks join with "\n\n", days join with "\n\n", header sits on the line
+// directly above its first block.
+function renderDays(lang, events) {
+  const days = [];
+  for (const ev of events) {
+    const key = localizeDay("en", eventDayMs(ev)); // locale-neutral grouping key
+    let g = days[days.length - 1];
+    if (!g || g.key !== key) {
+      g = { key, ms: eventDayMs(ev), items: [] };
+      days.push(g);
+    }
+    g.items.push(ev);
   }
-  const when = single ? localizeTime(lang, ev.startIso) : localizeDate(lang, ev.startIso);
-  const durPart = ev.durationMin ? ` (${ev.durationMin} min)` : "";
-  return `- ${when} — ${title}${emailsPart}${durPart}`;
+  return days
+    .map((g) => `${localizeDay(lang, g.ms)}\n${g.items.map((ev) => eventBlock(lang, ev)).join("\n\n")}`)
+    .join("\n\n");
 }
 
 const REPLY = {
@@ -539,28 +559,17 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
     editGoogleError: () =>
       "I understood the change but failed to update it in Google. Error in the log.",
     listEvents: ({ startMs, endMs, events, capped }) => {
-      const single = sameLocalDay(startMs, endMs);
       if (!events.length) {
-        return single
+        return sameLocalDay(startMs, endMs)
           ? `Nothing on your calendar for ${localizeDay("en", startMs)}.`
           : `Nothing on your calendar between ${localizeDay("en", startMs)} and ${localizeDay("en", endMs)}.`;
       }
-      const header = single
-        ? `Here's ${localizeDay("en", startMs)}:`
-        : `Here's ${localizeDay("en", startMs)} – ${localizeDay("en", endMs)}:`;
-      const lines = events.map((ev) => eventLine("en", ev, single)).join("\n");
       const capNote = capped ? "\n\n(Showing the first 50.)" : "";
-      return `${header}\n${lines}${capNote}`;
+      return `${renderDays("en", events)}${capNote}`;
     },
     listNext: ({ event }) => {
       if (!event) return "Nothing coming up on your calendar in the next two weeks.";
-      const title = event.title || "(no title)";
-      const emailsPart = event.emails.length ? ` · ${event.emails.join(", ")}` : "";
-      const when = event.allDay
-        ? localizeDay("en", event.dayMs)
-        : localizeDate("en", event.startIso);
-      const durPart = !event.allDay && event.durationMin ? ` (${event.durationMin} min)` : "";
-      return `Your next event:\n- ${when} — ${title}${emailsPart}${durPart}`;
+      return `Your next event:\n${renderDays("en", [event])}`;
     },
     listError: () => "I hit an error reading the calendar. Try again?",
   },
@@ -637,28 +646,17 @@ Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.`,
     editGoogleError: () =>
       "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
     listEvents: ({ startMs, endMs, events, capped }) => {
-      const single = sameLocalDay(startMs, endMs);
       if (!events.length) {
-        return single
+        return sameLocalDay(startMs, endMs)
           ? `Nada na sua agenda para ${localizeDay("pt", startMs)}.`
           : `Nada na sua agenda entre ${localizeDay("pt", startMs)} e ${localizeDay("pt", endMs)}.`;
       }
-      const header = single
-        ? `Sua agenda de ${localizeDay("pt", startMs)}:`
-        : `Sua agenda de ${localizeDay("pt", startMs)} a ${localizeDay("pt", endMs)}:`;
-      const lines = events.map((ev) => eventLine("pt", ev, single)).join("\n");
       const capNote = capped ? "\n\n(Mostrando os primeiros 50.)" : "";
-      return `${header}\n${lines}${capNote}`;
+      return `${renderDays("pt", events)}${capNote}`;
     },
     listNext: ({ event }) => {
       if (!event) return "Nada na sua agenda nas próximas duas semanas.";
-      const title = event.title || "(sem título)";
-      const emailsPart = event.emails.length ? ` · ${event.emails.join(", ")}` : "";
-      const when = event.allDay
-        ? localizeDay("pt", event.dayMs)
-        : localizeDate("pt", event.startIso);
-      const durPart = !event.allDay && event.durationMin ? ` (${event.durationMin} min)` : "";
-      return `Seu próximo evento:\n- ${when} — ${title}${emailsPart}${durPart}`;
+      return `Seu próximo evento:\n${renderDays("pt", [event])}`;
     },
     listError: () => "Tive um erro ao ler o calendário. Pode tentar de novo?",
   },

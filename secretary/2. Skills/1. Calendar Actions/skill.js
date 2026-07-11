@@ -1315,6 +1315,9 @@ function toListItem(e) {
     : null;
   const durationMin =
     startIso && endIso ? Math.round((new Date(endIso) - new Date(startIso)) / 60000) : null;
-  const emails = (e.attendees || []).map((a) => a.email).filter(Boolean);
+  // External attendees only: drop the owner's own entry (self) and room resources.
+  const emails = (e.attendees || [])
+    .filter((a) => a.email && !a.self && !a.resource)
+    .map((a) => a.email);
   return { allDay, startIso, dayMs, title: e.summary || "", emails, durationMin };
 }
