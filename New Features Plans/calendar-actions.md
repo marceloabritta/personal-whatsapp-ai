@@ -13,7 +13,9 @@ Done and live:
 - Delete uses a confirm-first session: the owner just types `yes`/`no`.
 - Message polish: `[AI Brain]:` header, `SECRETARY_TAG` single source, clean invite text.
 
-Remaining: **smart scheduling (Phase C)** and **edit/reschedule (Phase B)**.
+Implemented 2026-07-11 (not yet deployed): **Phase C** — conversation-inferred titles,
+confirm-first create with a modify path, and the stateful missing-email chase (C2+C3
+merged). Remaining: **edit/reschedule (Phase B)**.
 
 ---
 
@@ -23,46 +25,64 @@ The original goal: name the event by its topic, know how many people should atte
 and collect any missing emails — asking the owner *or the attendee themselves*.
 Built in three testable steps.
 
-### C1 — Topic-based event naming (no state)
-- **Scope:** name the event by its inferred subject instead of `Owner & Guest`.
-- **Files:** `2. Skills/1. Calendar Actions/prompt.js` (add a `topic` field + rule),
-  `skill.js` (`title = topic || Owner & names` fallback in `handleCreate`).
-- **Test:** "@brain schedule a Q3 budget review with ana@x.com tomorrow 3pm" → event
-  titled **Q3 budget review**; a topic-less order → falls back to `Owner & Ana`.
-- **Done when:** titled by topic when present; clean fallback otherwise.
+### C1 — Conversation-inferred naming + confirm-first create (IMPLEMENTED 2026-07-11, not yet deployed)
+Merged with the "confirm before writing" improvement below — the two ship together:
+inferring the title is safe precisely because the owner now confirms the draft.
+- **Title from the conversation (not just an explicit order).** The LLM infers a
+  concise `title` from what the meeting is *about*, using the whole chat — e.g. a
+  clearly-budget discussion → "Q3 budget review". `title=null` when no subject is
+  supported → code falls back to `Owner & names`. No hallucinated subjects.
+- **Create is now stateful & confirm-first.** `handleCreate` builds a *draft* and,
+  instead of writing to Google, opens a `create / await_confirmation` session
+  (`awaitFrom:"owner"`) and shows it:
+  `Confirm this event: / - title / - emails / - date & time / Reply "yes" … or tell me what to change`.
+- **Resume (`resumeCreate`)** runs one LLM call that classifies AND re-drafts:
+  `{decision: confirm | modify | cancel | unrelated, ...updated draft}`.
+  - confirm → `events.insert` + notify + clear;
+  - modify ("move to 4pm", "add bruno@x.com", "rename to Kickoff") → apply onto the
+    draft, re-show, keep the session; if a change leaves a hole (e.g. removed the
+    only email) it asks for it and stays open — a free mini-slot-fill;
+  - cancel → clear; unrelated → ignore silently (same discipline as delete).
+- **Files:** `prompt.js` (add `title` field + rule; add `buildCreateReviewSystem` /
+  `buildCreateReviewUser`), `skill.js` (`draftFromInfo` / `renderCreateConfirm` /
+  `openCreateConfirm` / `createFromDraft` / `resumeCreate` / `applyDraftUpdate` /
+  `reviewCreate`; `run()` routes the create continuation).
+- **Done when:** titled by inference when supported, clean fallback otherwise; create
+  NEVER writes to Google without an explicit owner confirmation; the draft can be
+  edited by plain reply before confirming.
 
-### C2 — Headcount + missing emails, ask the OWNER (`awaitFrom: "owner"`)
-- **Scope:** detect how many attendees the conversation implies and which emails are
-  missing; if any are missing, ask the owner for the *specific* person, and capture it
-  from the owner's normal reply (session continuation — no re-tag).
-- **Files:** `prompt.js` (add `expected_count`; per-participant `{name,email}`),
-  `skill.js` (`handleCreate` computes `missingEmails = participants without email`;
-  opens an `await_clarification` session holding the pending event draft; a resume
-  handler LLM-extracts the email(s) from the next owner message and fills the draft;
-  when complete, creates the event).
-- **Session shape:** `{ skill:"calendar_action", intent:"create", stage:"await_clarification",
-  awaitFrom:"owner", data:{ draft, missingFor:[names] } }`.
-- **Test:** order names two people, one email given → brain asks "what's Bruno's
-  email?"; owner types "bruno@x.com" (no tag) → event created with both. Unrelated
-  chatter in between is ignored.
-- **Done when:** asks by name; fills from a plain reply; ignores chatter; creates when complete.
+### C2 + C3 — Fully-stateful gathering with a focused resolver (IMPLEMENTED 2026-07-11, not yet deployed)
+**Generalized well past the original C2/C3.** Every create is now stateful and always
+converges on a session; there are **no re-tag dead-ends**. The email-only chase became a
+single mechanism that gathers *any* required field — date/time, attendees, and each
+attendee's email — asking whoever's in the chat (`awaitFrom:"any"`) until secure, then
+handing off to the C1 confirm.
 
-### C3 — Ask the CONTACT for their email (`awaitFrom: "contact"`)
-- **Scope:** the marquee stateful case. When scheduling in a 1:1 chat with the very
-  person who's missing an email, the brain can ask *them* and capture the email from
-  their normal message (not a reply, no tag). First real use of `awaitFrom:"contact"`.
-- **Files:** `skill.js` (`handleCreate`: when the missing attendee *is* the current
-  chat contact, open a session with `awaitFrom:"contact"` and message the chat asking
-  for their email; a resume handler — run for the contact's messages — LLM-extracts an
-  email and, when found, creates the event and confirms to the owner).
-- **Design notes:** the brain messages the shared 1:1 chat (visible to the contact via
-  the owner's account). Only extract a clearly-provided email; ignore everything else
-  silently. Bound with the session TTL. Consider a note back to the owner when asking.
-- **Test:** "@brain schedule with this person tomorrow 3pm" (no email in chat) → brain
-  asks the contact for their email → contact replies "it's ana@x.com" → event created,
-  owner notified. Contact chit-chat before the email is ignored.
-- **Done when:** contact's plain reply supplies the email and the event is created;
-  non-email messages are ignored.
+**Required to create** (everything else has a fallback and never blocks): a `start_iso`,
+≥1 attendee, and an email for EVERY attendee. `missingOf` / `isComplete` compute this.
+
+**The flow (`handleCreate` → `resolveDraft` → `advanceCreate`):**
+1. Broad `interpret()` builds the draft (with inferred title, 45m default).
+2. `resolveDraft`: if anything required is missing, a **focused second LLM pass**
+   (`inspectMissing` / `buildResolveSystem`) re-inspects the chat + latest message
+   *precisely* for those fields — higher resolution than the broad pass because it's
+   told exactly what to look for. No call when nothing is missing.
+3. `advanceCreate`: complete → `openCreateConfirm`; else `openInquiry` asks precisely
+   for what's still missing (`renderInquiry` — single missing email keeps the "Ana, I'm
+   missing your email…" phrasing; otherwise a composed "I still need …" line).
+4. **Resume (`resumeInfo`, stage `await_info`, `awaitFrom:"any"`):** each message re-runs
+   `inspectMissing`, `mergeDraft` folds in any resolved fields (fill emails by name; add
+   newly-named attendees; bare-email single-case assigns directly), then progressed →
+   ask for the rest / confirm; **nothing new resolved → stay silent** (chatter). Loops
+   until `isComplete`, bounded by the 10-min session TTL.
+- **Files:** `prompt.js` (`buildResolveSystem` / `buildResolveUser` replace the old
+  email-only builders), `skill.js` (`missingOf` / `isComplete` / `sameMissing` /
+  `missingDesc` / `resolveDraft` / `advanceCreate` / `renderInquiry` / `openInquiry` /
+  `mergeDraft` / `resumeInfo` / `inspectMissing`; `run()` routes the `await_info`
+  continuation).
+- **Done when:** any missing required field is chased statefully from either party;
+  the focused pass recovers fields the broad pass missed; ignores chatter; nothing is
+  created until every field is secure AND the owner confirms.
 
 ---
 
@@ -92,9 +112,12 @@ and add orchestration code — with no accuracy gain for a small 4–5 field ext
 Slot-filling across turns (C2/C3) is *not* the same thing: that re-runs the same single
 extraction as new info arrives, it doesn't split one message into many calls.
 
-### Improvement: confirm before writing to Google (create)
+### Improvement: confirm before writing to Google (create) — DONE, folded into C1
 Delete confirms first; create fires immediately on a single, unverified JSON extraction,
 so a mis-parsed time or wrong attendee only surfaces after the invite emails go out.
+**Shipped as part of C1 (2026-07-11)** — the draft/confirm/modify flow above is exactly
+this step, with an added *modify* path (edit the draft by plain reply, not just yes/no).
+Original scope notes kept below for reference.
 - **Scope:** after extraction succeeds and no slots are missing, show a summary
   (title / attendees / date-time / duration) and ask the owner to confirm before
   `events.insert`.
@@ -107,17 +130,18 @@ so a mis-parsed time or wrong attendee only surfaces after the invite emails go 
 - **Sequencing note:** fits naturally *after* C2 (both use the same session pattern);
   can also land standalone before C2 for immediate safety.
 
-### Gap: per-attendee email coverage (not just "≥1 email")
-Today create only requires **one** email among all participants. Invite Ana + Bruno with
-only Ana's email in the chat and it creates the event with just Ana — Bruno is silently
-dropped. C2 addresses this by computing `missingEmails` **per participant** and asking
-for each; until C2 lands, this is a known correctness gap worth calling out.
+### Gap: per-attendee email coverage (not just "≥1 email") — CLOSED by C2+C3
+Create used to require only **one** email among all participants, silently dropping the
+rest (Ana + Bruno with only Ana's email → event with just Ana). `advanceCreate` now
+chases every attendee missing an email before the confirm, so no one is dropped.
 
-### Optional: extract → self-check (a verifier, not a field-splitter)
-If single-call accuracy ever proves shaky, the right second call is a **verifier**
-("given this chat, is any extracted field ambiguous or likely wrong?"), not per-field
-decomposition. Lower priority than the confirm step above, which gives the human the
-final check for free.
+### Extract → focused second pass (DONE — the resolver)
+The "targeted second call" idea landed as `inspectMissing` (C2+C3 above): a focused pass
+that re-inspects the chat *only* for the fields the broad extraction left missing, before
+asking a human. It's a **gap-filler**, triggered only when something required is absent —
+not per-field decomposition (still avoided) and not a full-time verifier of already-present
+fields. A pure verifier ("is any *present* field likely wrong?") remains a possible future
+add, but the confirm step already gives the human that final check for free.
 
 ---
 
@@ -141,8 +165,26 @@ final check for free.
 ---
 
 ## Suggested order
-C1 (quick win, no state) → C2 (owner clarification) → C3 (contact answering, the
-headline feature) → Phase B (edit). Each step: implement → deploy → test → next.
+C1 + create-confirm ✅ → C2/C3 email-chase ✅ (both implemented 2026-07-11, **not yet
+deployed**) → **Phase B (edit)** is what's next. Each step: implement → deploy → test → next.
+
+## Prompt-quality pass (2026-07-11, not yet deployed)
+Reviewed the four JSON-producing prompts. Applied:
+- **Dropped dead fields** from the interpret schema (`prompt.js`): `confirm` (delete now
+  runs entirely through the session/`classifyConfirmation` path) and `missing`
+  (`advanceCreate` recomputes per-participant via `missingOf`) — both were extracted
+  and never read. Fewer tokens, less model distraction.
+- **`title` vs `summary`** disambiguated — title = short calendar heading, summary =
+  longer event-body agenda.
+- **Resolver contract** made structured (`buildResolveUser` takes
+  `needsTime`/`needsAttendees`/`needEmailFor` instead of prose phrases).
+- **Hardened JSON extraction** (`parseJsonReply` in `skill.js`, all 4 call sites):
+  strips ```json fences, whole-string parse, then a BALANCED `{...}` scan — replaces
+  the greedy `/\{[\s\S]*\}/` that silently returned null on any trailing brace / second
+  object. Verified against the old regex on adversarial inputs.
+- **Follow-up (needs SDK bump):** native structured outputs (`output_config.format` /
+  `messages.parse`) would guarantee schema-valid JSON and retire the parser, but require
+  bumping `@anthropic-ai/sdk` from the pinned `^0.30.1`; deferred until that's tested.
 
 ## Notes / smaller follow-ups
 - Remove the temporary `QUOTED>>>` diagnostic log in `server.js` once the calendar

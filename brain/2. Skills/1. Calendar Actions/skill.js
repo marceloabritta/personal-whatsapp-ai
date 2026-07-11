@@ -17,6 +17,10 @@ import {
   buildUserPrompt,
   buildConfirmSystem,
   buildConfirmUser,
+  buildCreateReviewSystem,
+  buildCreateReviewUser,
+  buildResolveSystem,
+  buildResolveUser,
 } from "./prompt.js";
 
 export const manifest = {
@@ -38,6 +42,46 @@ function calendarClient(env) {
 
 function calId(env) {
   return env.GOOGLE_CALENDAR_ID || "primary";
+}
+
+// Robustly pull a JSON object out of an LLM reply. Tolerates ```json fences and
+// stray prose, and — unlike a greedy /\{[\s\S]*\}/ match (first "{" to LAST "}",
+// which corrupts on any trailing brace) — extracts the FIRST balanced {...}.
+// Returns the parsed object, or null if nothing valid is found (never throws).
+// (If the SDK is bumped to one supporting output_config.format, structured
+// outputs would make this a straight JSON.parse — see PROJECT notes.)
+function parseJsonReply(out) {
+  if (!out) return null;
+  let s = String(out).trim();
+  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) s = fenced[1].trim();
+  try {
+    return JSON.parse(s); // happy path: reply is exactly the JSON object
+  } catch {
+    /* fall through to balanced-brace scan */
+  }
+  const start = s.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0,
+    inStr = false,
+    esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try {
+        return JSON.parse(s.slice(start, i + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 async function createEvent(env, { title, emails, start_iso, end_iso, summary }) {
@@ -236,8 +280,7 @@ async function interpret(ctx) {
     .map((b) => b.text)
     .join("");
   console.log("CALENDAR RAW:", out);
-  const m = out.match(/\{[\s\S]*\}/);
-  return m ? JSON.parse(m[0]) : null;
+  return parseJsonReply(out);
 }
 
 // ctx (from the orchestrator): { owner, tag, anthropic, model, order, transcript,
@@ -249,6 +292,12 @@ export async function run(ctx) {
   // Set by the orchestrator only when this message replies to the brain's prompt.
   if (session?.intent === "delete" && session.stage === "await_confirmation") {
     return resumeDelete(ctx, session);
+  }
+  if (session?.intent === "create" && session.stage === "await_info") {
+    return resumeInfo(ctx, session);
+  }
+  if (session?.intent === "create" && session.stage === "await_confirmation") {
+    return resumeCreate(ctx, session);
   }
 
   let info;
@@ -270,58 +319,379 @@ export async function run(ctx) {
 }
 
 // ---- CREATE ----------------------------------------------------------------
+// Create is fully STATEFUL and CONFIRM-FIRST. The flow always converges on a
+// session: interpret (broad) -> if anything required is missing, a FOCUSED second
+// LLM pass re-inspects the chat precisely for it -> still missing? open a gathering
+// session and ASK, listening to ANY participant (awaitFrom:"any") until secure ->
+// once complete, show the draft and wait for the owner's "yes" before writing to
+// Google. Fallbacks (duration 45m, title from topic/names) never count as missing.
 async function handleCreate(ctx, info) {
-  const { owner, number, env, send, tag, contact } = ctx;
+  const resolved = await resolveDraft(ctx, draftFromInfo(ctx, info));
+  await advanceCreate(ctx, resolved);
+}
 
-  // one participant -> one email. Each attendee may or may not have an email.
-  const participants = Array.isArray(info.participants) ? info.participants : [];
-  const names = participants.map((p) => p?.name).filter(Boolean);
-  const emails = participants.map((p) => p?.email).filter(Boolean);
+// Required to create: a date/time, at least one attendee, and an email for EVERY
+// attendee. Everything else has a fallback and never blocks.
+function missingOf(draft) {
+  return {
+    noTime: !draft.start_iso,
+    noAttendees: draft.participants.length === 0,
+    emailNames: draft.participants
+      .filter((p) => !p.email)
+      .map((p) => p.name)
+      .filter(Boolean),
+  };
+}
 
-  const missing = new Set(info.missing || []);
-  if (!info.start_iso) missing.add("start_iso");
-  if (!emails.length) missing.add("email");
-  if (missing.size) {
-    await send(
-      number,
-      `Almost there. Still missing: ${[...missing].join(
-        ", "
-      )}. Send it in the chat and call ${tag} again.`
-    );
+function isComplete(m) {
+  return !m.noTime && !m.noAttendees && m.emailNames.length === 0;
+}
+
+function sameMissing(a, b) {
+  return (
+    a.noTime === b.noTime &&
+    a.noAttendees === b.noAttendees &&
+    a.emailNames.length === b.emailNames.length &&
+    a.emailNames.every((n) => b.emailNames.includes(n))
+  );
+}
+
+// The FOCUSED second pass: given what's missing, re-inspect the chat + latest
+// message precisely for those fields and merge whatever it resolves. No LLM call
+// when nothing is missing. Used both after the broad extraction and on each
+// gathering message.
+async function resolveDraft(ctx, draft) {
+  const m = missingOf(draft);
+  if (isComplete(m)) return draft;
+  const patch = await inspectMissing(ctx, draft, m);
+  return mergeDraft(ctx, draft, patch);
+}
+
+// Decide the next step from a draft: complete -> confirm; otherwise open (or
+// refresh) the gathering session and ask precisely for what's still missing.
+async function advanceCreate(ctx, draft) {
+  const m = missingOf(draft);
+  if (isComplete(m)) {
+    await openCreateConfirm(ctx, draft);
+    return;
+  }
+  await openInquiry(ctx, draft, m);
+}
+
+// Normalize an interpret()/review() result into the draft we store, render, and
+// eventually insert. Applies the title fallback: inferred topic, else Owner & names.
+function draftFromInfo(ctx, info) {
+  const { owner, contact } = ctx;
+  const participants = (Array.isArray(info.participants) ? info.participants : [])
+    .map((p) => ({ name: p?.name || null, email: p?.email || null }))
+    .filter((p) => p.name || p.email);
+  const names = participants.map((p) => p.name).filter(Boolean);
+  const title =
+    String(info.title || "").trim() ||
+    `${owner} & ${names.join(" & ") || contact || "Guest"}`;
+  const duration_min = Number(info.duration_min) > 0 ? Number(info.duration_min) : 45;
+  return {
+    title,
+    participants,
+    start_iso: info.start_iso || null,
+    duration_min,
+    summary: info.summary || "",
+  };
+}
+
+function draftEmails(draft) {
+  return (draft.participants || []).map((p) => p?.email).filter(Boolean);
+}
+
+function renderCreateConfirm(draft) {
+  return `Confirm this event:
+- ${draft.title}
+- ${draftEmails(draft).join(", ")}
+- ${whenStr(draft.start_iso)} (${draft.duration_min} min)
+
+Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
+}
+
+// Open (or refresh) the confirmation session holding the draft and show it. The
+// owner's next plain message resumes via resumeCreate. 10-min window to answer.
+async function openCreateConfirm(ctx, draft) {
+  const { number, send, sessions, remoteJid } = ctx;
+  await sessions.set(
+    remoteJid,
+    {
+      skill: "calendar_action",
+      intent: "create",
+      stage: "await_confirmation",
+      awaitFrom: "owner", // only the owner approves their own event
+      data: { draft },
+    },
+    600
+  );
+  await send(number, renderCreateConfirm(draft));
+}
+
+// Actually write the confirmed draft to Google and report back.
+async function createFromDraft(ctx, draft) {
+  const { env, number, send } = ctx;
+  const emails = draftEmails(draft);
+  const end_iso = new Date(
+    new Date(draft.start_iso).getTime() + draft.duration_min * 60000
+  ).toISOString();
+  const ev = await createEvent(env, {
+    title: draft.title,
+    emails,
+    start_iso: draft.start_iso,
+    end_iso,
+    summary: draft.summary,
+  });
+  const header = ev.reused
+    ? "That event already exists — here it is (no duplicate created):"
+    : "Done! Invite created and sent:";
+  await send(
+    number,
+    `${header}\n\n- ${draft.title}\n- ${emails.join(", ")}\n- ${whenStr(
+      draft.start_iso
+    )} (${draft.duration_min} min)\n\nHere is a link for the event:\n${
+      ev.htmlLink || ""
+    }`
+  );
+}
+
+// Resume a pending create. Runs for EVERY owner message while the session is open:
+// classify + (if a change) re-draft in one call, then act. Silent on chatter.
+async function resumeCreate(ctx, session) {
+  const { number, send, sessions, remoteJid } = ctx;
+  const draft = session.data?.draft;
+  if (!draft) {
+    await sessions.clear(remoteJid);
     return;
   }
 
-  const title = `${owner} & ${names.join(" & ") || contact || "Guest"}`;
-  const dur = Number(info.duration_min) > 0 ? Number(info.duration_min) : 45; // default 45 min
-  const end_iso = new Date(
-    new Date(info.start_iso).getTime() + dur * 60000
-  ).toISOString();
+  const review = await reviewCreate(ctx, draft);
+  if (!review || review.decision === "unrelated") return; // not for us — ignore
 
+  if (review.decision === "cancel") {
+    await sessions.clear(remoteJid);
+    await send(number, `Okay, I won't create "${draft.title}".`);
+    return;
+  }
+
+  if (review.decision === "modify") {
+    // Re-route the revised draft: re-show the confirm, or chase a newly-missing
+    // email exactly like a fresh order (a change may drop an attendee's email).
+    return advanceCreate(ctx, applyDraftUpdate(ctx, draft, review));
+  }
+
+  // decision === "confirm"
   try {
-    const ev = await createEvent(env, {
-      title,
-      emails,
-      start_iso: info.start_iso,
-      end_iso,
-      summary: info.summary,
-    });
-    const header = ev.reused
-      ? "That event already exists — here it is (no duplicate created):"
-      : "Done! Invite created and sent:";
-    await send(
-      number,
-      `${header}\n\n- ${title}\n- ${emails.join(
-        ", "
-      )}\n- ${whenStr(info.start_iso)} (${dur} min)\n\nHere is a link for the event:\n${
-        ev.htmlLink || ""
-      }`
-    );
+    await createFromDraft(ctx, draft);
+    await sessions.clear(remoteJid);
   } catch (e) {
     console.error("Calendar error:", e?.response?.data || e?.message || e);
+    await sessions.clear(remoteJid);
     await send(
       number,
       "I understood the request but failed to create it in Google. Error in the log."
     );
+  }
+}
+
+// Merge a "modify" review onto the current draft: prefer the review's fields, fall
+// back to the previous draft for anything it didn't return, then re-normalize.
+function applyDraftUpdate(ctx, prev, review) {
+  const participants =
+    Array.isArray(review.participants) && review.participants.length
+      ? review.participants
+      : prev.participants;
+  return draftFromInfo(ctx, {
+    title: review.title ?? prev.title,
+    participants,
+    start_iso: review.start_iso ?? prev.start_iso,
+    duration_min: review.duration_min ?? prev.duration_min,
+    summary: review.summary ?? prev.summary,
+  });
+}
+
+// LLM: is the latest owner message a confirm / modify / cancel of the pending draft?
+// Returns the parsed review (with a normalized decision) or null on doubt/error —
+// null is treated by the caller as "ignore silently", the safe default.
+async function reviewCreate(ctx, draft) {
+  const { anthropic, model, owner, transcript, order, nowStr } = ctx;
+  try {
+    const msg = await anthropic.messages.create({
+      model,
+      max_tokens: 700,
+      system: buildCreateReviewSystem(owner),
+      messages: [
+        {
+          role: "user",
+          content: buildCreateReviewUser({
+            draftJson: JSON.stringify(draft),
+            transcript,
+            latest: order,
+            nowStr,
+          }),
+        },
+      ],
+    });
+    const out = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    console.log("CREATE REVIEW RAW:", out);
+    const parsed = parseJsonReply(out);
+    if (!parsed) return null;
+    if (!["confirm", "modify", "cancel", "unrelated"].includes(parsed.decision)) {
+      parsed.decision = "unrelated";
+    }
+    return parsed;
+  } catch (e) {
+    console.error("create review error:", e?.message || e);
+    return null; // on error, do nothing (safe)
+  }
+}
+
+// ---- CREATE: stateful gathering --------------------------------------------
+// Ask precisely for what's missing and keep the session open, listening to ANY
+// participant (awaitFrom:"any"), until every required field is secure. Each
+// incoming message re-runs the focused resolver; progress → ask for the rest,
+// complete → confirm, nothing new → stay silent (chatter).
+function joinList(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function renderInquiry(m) {
+  // Marquee case: only a single person's email is missing → address them by name.
+  if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
+    return `${m.emailNames[0]}, I'm missing your email. Can you send it so I can add you to the invite?`;
+  }
+  const asks = [];
+  if (m.noTime) asks.push("the date and time");
+  if (m.noAttendees) asks.push("who to invite");
+  if (m.emailNames.length === 1) asks.push(`${m.emailNames[0]}'s email`);
+  else if (m.emailNames.length > 1) asks.push(`emails for ${joinList(m.emailNames)}`);
+  return `Before I can set this up, I still need ${joinList(
+    asks
+  )}. Send it here and I'll continue.`;
+}
+
+async function openInquiry(ctx, draft, m) {
+  const { number, send, sessions, remoteJid } = ctx;
+  await sessions.set(
+    remoteJid,
+    {
+      skill: "calendar_action",
+      intent: "create",
+      stage: "await_info",
+      awaitFrom: "any", // the owner OR any attendee in the chat may answer
+      data: { draft },
+    },
+    600
+  );
+  await send(number, renderInquiry(m));
+}
+
+const normName = (s) => String(s || "").trim().toLowerCase();
+
+// Merge a resolver patch onto the draft: take start_iso if provided; fill emails
+// for known attendees by name and append any newly-identified attendees. Robust
+// single case: one attendee still missing an email + one email in the patch →
+// assign it directly even if the names don't line up. Re-normalized at the end.
+function mergeDraft(ctx, prev, patch) {
+  if (!patch) return prev;
+  const participants = prev.participants.map((p) => ({ ...p }));
+
+  if (Array.isArray(patch.participants)) {
+    const clean = patch.participants.filter((p) => p && (p.name || p.email));
+    const missing = participants.filter((p) => !p.email);
+    const patchEmails = clean.filter(
+      (p) => typeof p.email === "string" && p.email.includes("@")
+    );
+    // Bare-email fallback: one attendee still missing + one UN-named email → assign
+    // it directly. A named email goes through the by-name matcher below instead.
+    if (missing.length === 1 && patchEmails.length === 1 && !patchEmails[0].name) {
+      missing[0].email = patchEmails[0].email;
+    } else {
+      for (const pp of clean) {
+        const idx = participants.findIndex(
+          (p) => pp.name && normName(p.name) === normName(pp.name)
+        );
+        if (idx >= 0) {
+          if (!participants[idx].email && pp.email) participants[idx].email = pp.email;
+        } else if (pp.name || pp.email) {
+          participants.push({ name: pp.name || null, email: pp.email || null });
+        }
+      }
+    }
+  }
+
+  return draftFromInfo(ctx, {
+    title: prev.title,
+    participants,
+    start_iso: patch.start_iso ?? prev.start_iso,
+    duration_min: prev.duration_min,
+    summary: prev.summary,
+  });
+}
+
+// Resume a gathering session. Runs for EVERY owner/contact message while open:
+// re-inspect precisely for what's still missing, merge, then ask for the rest or
+// move to confirm. Silent when the message resolves nothing new (chatter).
+async function resumeInfo(ctx, session) {
+  const { sessions, remoteJid } = ctx;
+  const draft = session.data?.draft;
+  if (!draft) {
+    await sessions.clear(remoteJid);
+    return;
+  }
+
+  const before = missingOf(draft);
+  if (isComplete(before)) return advanceCreate(ctx, draft);
+
+  const patch = await inspectMissing(ctx, draft, before);
+  const updated = mergeDraft(ctx, draft, patch);
+  const after = missingOf(updated);
+
+  if (sameMissing(before, after)) return; // nothing new resolved — ignore silently
+  await advanceCreate(ctx, updated); // progressed → ask for the rest, or confirm
+}
+
+// LLM: the focused second pass. Told exactly what's missing, it resolves precisely
+// those fields from the conversation + latest message. Returns the patch, or null
+// on doubt/error (caller then keeps the draft unchanged → stays silent / re-asks).
+async function inspectMissing(ctx, draft, m) {
+  const { anthropic, model, owner, transcript, order, nowStr } = ctx;
+  try {
+    const msg = await anthropic.messages.create({
+      model,
+      max_tokens: 500,
+      system: buildResolveSystem(owner),
+      messages: [
+        {
+          role: "user",
+          content: buildResolveUser({
+            draftJson: JSON.stringify(draft),
+            needsTime: m.noTime,
+            needsAttendees: m.noAttendees,
+            needEmailFor: m.emailNames,
+            transcript,
+            latest: order,
+            nowStr,
+          }),
+        },
+      ],
+    });
+    const out = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    console.log("RESOLVE RAW:", out);
+    return parseJsonReply(out);
+  } catch (e) {
+    console.error("resolve error:", e?.message || e);
+    return null;
   }
 }
 
@@ -454,8 +824,7 @@ async function classifyConfirmation(ctx, { action }) {
       .map((b) => b.text)
       .join("");
     console.log("CONFIRM RAW:", out);
-    const m = out.match(/\{[\s\S]*\}/);
-    const decision = m ? JSON.parse(m[0])?.decision : null;
+    const decision = parseJsonReply(out)?.decision;
     return decision === "confirm" || decision === "decline"
       ? decision
       : "unrelated";
