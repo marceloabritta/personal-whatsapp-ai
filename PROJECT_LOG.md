@@ -381,7 +381,10 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   orchestrator/`server.js` change (uses `Date.now()`, not a ctx clock); the router routes it
   via the updated `manifest.description`. Plan archived to
   `Shipped Features/2026-07-11 - feature-calendar-read-query.md`.
-- **2026-07-11 — Tasks: batch + edit + stateful, on one resolver (BUILT, not yet deployed).**
+- **2026-07-11 — Tasks: batch + edit + stateful, on one resolver (SHIPPED, DEPLOYED).**
+  Deployed to production 2026-07-11 (git pull + `docker compose restart secretary`; boot clean,
+  `task_action (capabilities: list)` loaded). End-to-end planner behavior still to be exercised
+  live (multi-complete with a partial miss, ambiguous edit, untagged follow-up, chatter no-op).
   Reworked `task_action` from a single-item inbox into one that handles **any number of tasks
   per message** and **edits/deletes tasks already on file**, all through a single list-aware
   planner. `planTaskOps` (schema `PLAN_SCHEMA` in `prompt.js`) reads the conversation *and* the
