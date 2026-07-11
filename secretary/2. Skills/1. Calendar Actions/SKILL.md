@@ -267,11 +267,14 @@ session is open the owner can keep refining the same event tagless. **The draft*
 attendees: case-insensitive remove then dedup add).
 
 1. **`handleEdit`:** gather `emails` + `start_iso` from `info` and `eidEventId =
-   resolveEventId(quoted.calendarLink)` (may be null) — same signals delete uses. Need the
-   link id **or** both a start time and an email, else ask and stop. `matchEventTargets`
-   returns the confident, confirmed-only matches; none → "couldn't find that event"; else
-   patch the primary (`matches[0]`) — no separate `getEvent`/status recheck, the matcher
-   already returns the full event. Then the **first-pass** `interpretEdit` (`buildEditSystem`,
+   resolveEventId(quoted.calendarLink)` (may be null) — same signals delete uses. Here
+   `info.start_iso` is the event's **CURRENT** start (the `interpret` prompt reads it from the
+   replied-to invite/summary or the conversation — **not** the new time being requested; that
+   change is extracted later by `interpretEdit`), so the calendar search hits the real event.
+   Need the link id **or** both a start time and an email, else ask and stop.
+   `matchEventTargets` returns the confident, confirmed-only matches; none → "couldn't find
+   that event"; else patch the primary (`matches[0]`) — no separate `getEvent`/status recheck,
+   the matcher already returns the full event. Then the **first-pass** `interpretEdit` (`buildEditSystem`,
    `EDIT_SCHEMA`, 2048) reads the change against the real event (`eventForLLM`) and returns
    only what changes:
    ```jsonc

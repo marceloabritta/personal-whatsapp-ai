@@ -76,3 +76,16 @@ bubble or a tagless "who + when" request. Removed the now-redundant `getEvent`/s
 in edit (the matcher returns full confirmed events). Delete's behavior is byte-for-byte
 unchanged (one call-site rename). `resumeEditClarify` / `resumeEditConfirm` untouched. Net:
 one rename + ~15 swapped lines in `handleEdit`, zero new prompts/strings.
+
+**Follow-up fix — the extraction contract (2026-07-11).** The matcher change above wasn't
+enough on its own: the first live test (reply to a summary bubble with "muda pra 14:30")
+still returned "no match". Cause — the `interpret` prompt told the model to *leave
+`start_iso` null for edits* ("not used for edits"), and when it did emit one it was the
+**new** requested time (14:30), so the calendar search looked at the wrong slot and found
+nothing. Fixed the edit branch of `buildSystem` (`prompt.js`) to identify the **existing**
+event like delete does: `start_iso` = the event's **CURRENT** start (read from the
+replied-to invite/summary or the conversation — explicitly *not* the new time), plus
+`participants`/emails. The actual change is still extracted separately by `interpretEdit`.
+No new reply strings; the summary/confirm bubble stays exactly as it was — resolution now
+searches the calendar from the full context (link is just one more signal), rather than
+trusting the link alone.

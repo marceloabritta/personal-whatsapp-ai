@@ -159,10 +159,19 @@ For action="delete", also identify WHICH event to cancel so it can be matched on
 - start_iso: the event's date/time, taken from the quoted invite or the conversation, in ISO 8601 with -03:00.
 - Still fill "summary" with a short note of what is being cancelled.
 
-For action="edit", you only need to CLASSIFY it here — the specific change (new time,
-new duration, renamed title, added/removed attendee) is extracted in a following focused
-step from the real event. Fill the other fields with your best effort or leave them
-null/empty; they are not used for edits.`;
+For action="edit", the specific CHANGE (new time, new duration, renamed title,
+added/removed attendee) is extracted in a following focused step — do NOT put the new
+value here. What you MUST do here is identify WHICH existing event is being changed, so it
+can be MATCHED on the calendar (exactly like delete — the decoded link is only one signal;
+use the WHOLE context, especially the replied-to invite/summary message):
+- participants: the people the event is WITH — read them (and their emails) from the quoted
+  invite/summary message and the conversation. Include emails whenever they appear.
+- start_iso: the event's CURRENT date/time — the one shown in the replied-to invite/summary
+  or stated in the conversation — in ISO 8601 with -03:00. This is the EXISTING start used
+  to find the event, NOT the new time being requested. If the order is "move it to 4pm",
+  start_iso is the event's current start (e.g. the "3:00 PM" printed in the quoted summary),
+  never 4pm.
+- title/summary: best effort; not used to match.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----

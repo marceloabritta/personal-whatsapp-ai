@@ -931,14 +931,16 @@ async function applyEditDraft(ctx, eventId, draft) {
 async function handleEdit(ctx, info) {
   const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
 
-  // Resolve the event to change the SAME way delete does: match the details captured
-  // from the conversation (start time + attendee emails) PLUS any id decoded from a
-  // replied-to link. This works whether the owner replied to the invite (link), the
-  // summary/confirm bubble (start+email, no link), or a tagless request that names
-  // who+when.
+  // Resolve the event to change the SAME way delete does: MATCH the event's identity
+  // against the calendar, not just a decoded link. `info.start_iso` here is the event's
+  // CURRENT start (the locator the extraction reads from the replied-to invite/summary or
+  // the conversation — NOT the new time being requested; that change is extracted later by
+  // interpretEdit). This works whether the owner replied to the invite (link), the
+  // summary/confirm bubble (current start + email, no link), or a tagless request that
+  // names who + when.
   const participants = Array.isArray(info?.participants) ? info.participants : [];
   const emails = participants.map((p) => p?.email).filter(Boolean);
-  const startIso = info?.start_iso || null;
+  const startIso = info?.start_iso || null; // the event's CURRENT start, used to find it
   const eidEventId = resolveEventId(quoted?.calendarLink); // may be null
 
   // Same guard as delete: need the link, or start+email together.
