@@ -57,16 +57,16 @@ Google OAuth token re-minted + consent screen published, see §8) and **cancel/d
 `transcribe_audio` — reply-detection bug fixed (see §8); verify end-to-end when convenient.
 The stateful session layer (Redis) is live; see §6.
 
-> ⚠️ **ONE-TIME MIGRATION (folder flatten, 2026-07-10).** The repo dropped the
-> `brain/v2.0/` level — `brain/` is now the app root. The droplet's `/opt/brain`
-> symlink previously pointed at `brain/v2.0`; on the FIRST deploy after this change it
-> must be re-pointed (pull first so `brain/` has the flattened contents, then re-link):
+> ✅ **DONE 2026-07-10 — folder-flatten migration (kept for reference).** The repo
+> dropped the `brain/v2.0/` level — `brain/` is the app root. The droplet's `/opt/brain`
+> symlink was re-pointed from `brain/v2.0` to `brain/` and the brain restarted (a fresh
+> `npm install` ran because `node_modules` moved with the flatten). Steps that were run:
 > ```bash
 > ssh secretaria-droplet 'cd /opt/personal-whatsapp-ai && git pull --ff-only'
 > ssh secretaria-droplet 'ln -sfn /opt/personal-whatsapp-ai/brain /opt/brain'
 > ssh secretaria-droplet 'cd /opt/evolution && docker compose restart brain'
 > ```
-> After that one time, the normal runbook below applies.
+> The normal runbook below now applies to all further deploys.
 
 ### Deploy runbook (this is how to ship changes now)
 
@@ -330,7 +330,9 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
 - **2026-07-10 — folder flattened + docs registry.** `brain/v2.0/` collapsed to
   `brain/` (only one version now; `v1.0` lives in git history). This handover doc
   renamed to `PROJECT_LOG.md` and repurposed as the project registry. Feature plans
-  gathered under `New Features Plans/`.
+  gathered under `New Features Plans/`. Each production component now has a doc
+  (`ORCHESTRATOR.md`, `2. Skills/*/SKILL.md`). Deployed to production the same day —
+  `/opt/brain` symlink re-pointed to `brain/` (see §2 migration note).
 - **2026-07-10 — stateful conversation layer.** Per-chat sessions in Redis
   (`lib/sessions.js`): a flow starts on `@brain` and continues without the tag; the
   brain LLM-detects the awaited answer and ignores chatter. Delete migrated to a
