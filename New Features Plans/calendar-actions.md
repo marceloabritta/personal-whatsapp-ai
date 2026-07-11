@@ -23,17 +23,20 @@ Done and live in production:
   sessions, `reply(lang)`, and `localizeDate`.
 - Message polish: `[AI Brain]:` header, `SECRETARY_TAG` single source, clean invite text.
 
-- **Phase B** (edit/reschedule): implemented and **deployed 2026-07-11** — reply to an
-  invite to move / relength / rename / add-remove-attendee, with a clarify path for
-  ambiguous asks. **Awaiting live-test confirmation before being marked done.**
+- **Phase B** (edit/reschedule): ✅ **shipped 2026-07-11** — reply to an invite to move /
+  relength / rename / add-remove-attendee; confirm-first and stays open so changes chain
+  tagless until `yes`. Promoted out of this plan to
+  [`Shipped Features/2026-07-11 - calendar-edit-reschedule.md`](../Shipped%20Features/2026-07-11%20-%20calendar-edit-reschedule.md).
 
-Remaining after Phase B verifies: the smaller backlog (conflict/availability check on
-create, read/query events, recurring events) — none started.
+**Remaining (not started) — the backlog this plan now tracks:**
+- **Conflict / availability check** before the create-confirm (`events.list` the slot, warn
+  on overlap, maybe offer the next free slot).
+- **Read / query events** ("what's on my calendar tomorrow?") — a read-only `action:"list"`,
+  no confirm needed.
+- **Recurring events** ("every Monday 10am") — RRULE support in create.
 
-**Deploy status:** ✅ **all live in production.** The multilingual layer shipped
-2026-07-11 (`git pull` + restart), and since deploy pulls the whole history, everything
-committed before it — Phase C and structured outputs — is running too. The manifest
-already advertises "edit/reschedule," which oversells until Phase B lands.
+**Deploy status:** ✅ **all shipped work is live in production** (create, delete, edit,
+structured outputs, multilingual). Everything above under "Remaining" is unbuilt.
 
 ---
 
@@ -163,48 +166,18 @@ add, but the confirm step already gives the human that final check for free.
 
 ---
 
-## Phase B — Edit / reschedule via reply (IMPLEMENTED — confirm-first revision committed 2026-07-11, pending deploy + live test)
+## Phase B — Edit / reschedule via reply — ✅ SHIPPED 2026-07-11
 
-- **Scope:** reply to an event's calendar link with a change ("move to 4pm",
-  "make it 30 min", "add carlos@x.com", "remove ana@x.com", "rename to Kickoff"); apply it,
-  asking for clarification when ambiguous.
-- **As built** (differs slightly from the original sketch below): `interpret` gains
-  `action:"edit"` and only **classifies** it (the enum is now
-  `create | delete | edit | other`). The change itself is pulled by a **focused second
-  pass** — `interpretEdit` / `buildEditSystem` / `EDIT_SCHEMA` — that reads the request
-  against the event's *real current state* (`eventForLLM`) and returns a structured patch
-  (`new_start_iso`, `new_duration_min`, `new_title`, `new_summary`, `add_emails[]`,
-  `remove_emails[]`, `clarify`). This mirrors the create resolver rather than stuffing a
-  `changes` object into the broad extraction — same "focused gap-filler" pattern as C2/C3.
-- **Confirm-first + stays open (revised 2026-07-11 after first test).** The initial cut
-  applied an unambiguous edit immediately and opened no session — so a *second* change had
-  to re-tag `@brain`. Reworked to reuse create's confirm/modify machinery: the change is
-  folded into a **draft** of the event's target state, shown for confirmation, and written
-  only on `yes`. While the confirm session is open the owner keeps refining the same event
-  tagless ("actually 4:30", "also add bruno@x.com").
-- **`handleEdit`:** `resolveEventId(quoted.calendarLink)` → `getEvent` (must be
-  `confirmed`) → `interpretEdit`. Concrete change → `applyPatchToDraft(editDraftFromEvent
-  (ev), patch)` → **`openEditConfirm`** (session `await_confirmation`, `awaitFrom:"owner"`,
-  holds `{eventId, draft}`). Ambiguous (`clarify`, no change) → `await_clarification`
-  session (holds only `eventId`).
-- **`resumeEditClarify`** (ambiguous first request): re-`getEvent` + `interpretEdit` on the
-  answer; resolves → build draft → `openEditConfirm`; else silent.
-- **`resumeEditConfirm`** (the confirm loop, one `reviewEdit` call → `confirm | modify |
-  cancel | unrelated`): `confirm` → `applyEditDraft` (`events.patch`, `sendUpdates:"all"`) +
-  clear; `modify` → fold onto draft + re-show, **keep open**; `cancel` → clear; `unrelated`
-  → silent. Ambiguous modify → ask + keep open.
-- **Reuses:** `resolveEventId`, `getEvent`, the session/review pattern (mirrors
-  `reviewCreate`); adds `patchEvent`, `EDIT_REVIEW_SCHEMA`, `buildEditReviewSystem/User`.
-- **Done when:** reschedule / relength / add-remove attendee / rename all work; changes
-  chain tagless until confirmed; ambiguous requests clarify; nothing is written until the
-  owner confirms. ⏳ **Pending Marcelo's live-test confirmation** before this is checked off.
+Delivered and confirmed working in production. The full delivery record moved to
+[`Shipped Features/2026-07-11 - calendar-edit-reschedule.md`](../Shipped%20Features/2026-07-11%20-%20calendar-edit-reschedule.md);
+behavior reference is in the skill's `SKILL.md`.
 
 ---
 
 ## Suggested order
-C1 + create-confirm ✅ → C2/C3 email-chase ✅ → Phase B (edit) ✅ built + deployed
-(⏳ awaiting live test) → next: the smaller backlog (conflict-check on create, read/query
-events, recurring). Each step: implement → deploy → test → next.
+C1 + create-confirm ✅ → C2/C3 email-chase ✅ → Phase B (edit) ✅ shipped → **next: the
+backlog above** (conflict-check on create, read/query events, recurring). Each step:
+implement → deploy → test → next.
 
 ## Prompt-quality pass (IMPLEMENTED — in codebase)
 Reviewed the four JSON-producing prompts. Applied:

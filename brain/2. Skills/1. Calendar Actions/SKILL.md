@@ -254,7 +254,7 @@ emails) and `start_iso` for deletes too.
    `findConfirmedDuplicates`, each `events.delete` with `sendUpdates:"all"`; `410` counts as
    success) → clear + "Cancelled…".
 
-### Task: EDIT — `handleEdit` + `resumeEditClarify` + `resumeEditConfirm` (Phase B)
+### Task: EDIT — `handleEdit` + `resumeEditClarify` + `resumeEditConfirm`
 Change an existing event the owner **replied to**. **Confirm-first and stays open** (reuses
 create's confirm/modify machinery): the change is folded into a **draft** of the event's
 target state, shown for confirmation, and written to Google only on `yes`. While the confirm

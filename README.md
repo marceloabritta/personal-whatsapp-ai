@@ -50,7 +50,7 @@ You type "@brain ..." in a chat
 
 ## Skills (today)
 
-- **`calendar_action`** — reads the chat and either **creates** or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. (Edit/reschedule is planned, not yet built.)
+- **`calendar_action`** — reads the chat and **creates**, **edits/reschedules**, or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. On edit you reply to the invite with a change ("move it to 4pm", "add carlos@example.com", "rename to Kickoff") — it's confirm-first and stays open so you can keep refining before saving.
 - **`transcribe_audio`** — reply to a voice message and type `@brain transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
 - **`task_action`** — your to-do inbox. Add a todo (`@brain add "buy flight" to my todos`), hear your list, or check one off. A todo for **yourself** goes to your private **Google Tasks** list (created instantly, with a short window to correct it); a todo assigned to **someone else** becomes a 5-minute **Calendar** invite so they're notified by email. Google Tasks due dates are date-only.
 - **`feature_request`** — capture a new feature idea by talking it through. Start with `@brain I have a feature idea…`; the brain becomes stateful and **interviews you** until the feature is clear, then writes a **Markdown spec** (from the user's point of view) and sends it as a saveable `.md` document you can drop into your repo. The conversation follows your language; the document is always written in English.
@@ -112,8 +112,7 @@ The brain **detects the language you're writing in** (the router sets `ctx.lang`
 
 - More skills (reminders, lookups, etc.) — each a new folder under `2. Skills/`.
 - Reply privately when `@brain` is called in a group.
-- Smarter scheduling (name events by topic; detect & collect missing attendee emails, including asking the other person).
-- Edit/reschedule existing events by replying.
+- Calendar backlog: conflict/availability check on create, read/query events ("what's on my calendar tomorrow?"), and recurring events.
 
 ## Contributing
 

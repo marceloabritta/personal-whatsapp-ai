@@ -25,13 +25,19 @@ state, shared with Evolution's cache) + per-skill external APIs (Google Calendar
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
-Two skills exist today:
+Four skills exist today:
 - `calendar_action` — **creates**, **edits/reschedules**, and **cancels/deletes** Google
-  Calendar events. Cancel is confirm-first (the owner just types `yes`); edit applies a
-  reply-driven change (move/relength/rename/add-remove attendee) and clarifies when
-  ambiguous. See `New Features Plans/calendar-actions.md`.
+  Calendar events. Create and cancel are confirm-first (the owner types `yes`); edit is a
+  reply-driven change (move/relength/rename/add-remove attendee), confirm-first and stays
+  open until saved, clarifying when ambiguous. See
+  `New Features Plans/calendar-actions.md` for the remaining backlog.
 - `transcribe_audio` — reply to a voice message + `@brain transcribe`; downloads the
   audio from WhatsApp and transcribes it via AssemblyAI.
+- `task_action` — a to-do inbox: add / list / complete todos. A todo for the owner goes to
+  Google Tasks; one assigned to someone else becomes a 5-min Calendar invite (via
+  `calendar_action`'s `startCreate` capability).
+- `feature_request` — talk through a new feature idea; the brain interviews the owner, then
+  writes a Markdown spec and sends it as a `.md` document.
 
 ---
 
@@ -104,10 +110,9 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
    to confirm the AssemblyAI round-trip.
 4. **Security TODO (pre-existing).** Evolution's port `8080` is open to the internet,
    protected only by the API key. Lock it down with `ufw`.
-5. **Calendar feature roadmap (open).** See `New Features Plans/calendar-actions.md`: smart scheduling
-   (name events by topic; detect & collect missing attendee emails — asking the owner
-   *or the attendee themselves* via the stateful `awaitFrom:"contact"` path) and
-   edit/reschedule existing events by replying. Recommended next: Phase C (C1→C3).
+5. **Calendar feature backlog (open).** Smart scheduling (Phase C) and edit/reschedule
+   (Phase B) are ✅ **shipped**. Remaining, see `New Features Plans/calendar-actions.md`:
+   conflict/availability check on create, read/query events, and recurring events.
 6. **Product upgrades (backlog).** More skills (each a folder under `2. Skills/`),
    private reply when `@brain` is used in a group. (A "confirm before acting" step now
    exists for cancellations, built on the stateful session layer.)
@@ -124,7 +129,7 @@ ssh secretaria-droplet 'docker logs --tail 50 brain'   # expect "Brain v2.0 (orc
 ├── LICENSE                # MIT
 ├── .gitignore
 ├── New Features Plans/    # per-feature implementation plans
-│   ├── calendar-actions.md     #   smart scheduling + edit/reschedule (next up)
+│   ├── calendar-actions.md     #   calendar backlog (conflict-check, query, recurring)
 │   ├── message-summarizer.md
 │   ├── reminders-followups.md
 │   └── task-improvements.md    #   NEXT for tasks: batch create/complete + edit existing
@@ -351,16 +356,18 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
-- **2026-07-11 — calendar edit made confirm-first + stays open (committed, PENDING DEPLOY).**
-  First-test fix: an unambiguous edit used to apply immediately and open no session, so a
-  *second* change had to re-tag `@brain`. Edit now reuses create's confirm/modify machinery
-  — the change is folded into a draft of the event's target state, shown for confirmation,
-  and written to Google only on `yes`; the confirm session stays open so further changes
-  ("actually 4:30", "also add bruno@x.com") land tagless. New: `EDIT_REVIEW_SCHEMA`,
-  `reviewEdit`, `openEditConfirm`, `applyEditDraft`, `resumeEditClarify` /
-  `resumeEditConfirm` (replacing the immediate-apply `resumeEdit`/`applyEdit`). Committed
-  `55891fe`; **not yet deployed** — awaiting a deploy + live test.
-- **2026-07-11 — calendar edit/reschedule, Phase B (DEPLOYED, awaiting live test).** Reply
+- **2026-07-11 — calendar edit/reschedule SHIPPED (DEPLOYED + verified).** Phase B is done
+  and confirmed working in production. Final design is **confirm-first + stays open**: an
+  unambiguous edit no longer applies immediately (the first cut did, which meant a *second*
+  change had to re-tag `@brain`) — the change is folded into a draft of the event's target
+  state, shown for confirmation, and written to Google only on `yes`; the confirm session
+  stays open so further changes ("actually 4:30", "also add bruno@x.com") land tagless.
+  Reuses create's confirm/modify machinery (`EDIT_REVIEW_SCHEMA`, `reviewEdit`,
+  `openEditConfirm`, `applyEditDraft`, `resumeEditClarify` / `resumeEditConfirm`). Commits
+  `8036a4b` (initial) → `55891fe` (confirm-first rework), deployed `96850ce`. Plan promoted
+  to `Shipped Features/2026-07-11 - calendar-edit-reschedule.md`; behavior in the skill's
+  `SKILL.md`. (Supersedes the two 2026-07-11 edit entries below.)
+- **2026-07-11 — calendar edit/reschedule, Phase B (initial cut — superseded above).** Reply
   to an event's invite with a change and `@brain` — "move it to 4pm", "make it 30 min",
   "add carlos@x.com", "remove ana@x.com", "rename to Kickoff". `interpret` gains
   `action:"edit"` (classify only); a focused pass (`interpretEdit` / `buildEditSystem` /

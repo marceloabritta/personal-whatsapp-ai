@@ -92,8 +92,9 @@ A second call, with the calendar skill's own prompt, extracts:
   "summary": "Meeting with Alex, tomorrow 2pm."
 }
 ```
-`action` is `"create"` or `"delete"` — the skill can create a new event or cancel/delete an
-existing one (edit/reschedule is planned, not yet built).
+`action` is `"create"`, `"delete"`, or `"edit"` — the skill can create a new event,
+cancel/delete an existing one, or edit/reschedule one (reply to the invite with a change;
+confirm-first and stays open until you save).
 
 ### 5. skill → Google Calendar (create or cancel/delete event)
 
