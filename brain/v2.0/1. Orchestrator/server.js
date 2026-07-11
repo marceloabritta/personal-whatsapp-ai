@@ -126,15 +126,6 @@ app.post("/webhook", async (req, res) => {
     const number = remoteJid.split("@")[0]; // reply in the originating chat
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
     console.log("QUOTED>>>", JSON.stringify(quoted));
-    // TEMP diagnostic: raw reply context, to see if Evolution ships the quoted body.
-    console.log(
-      "QUOTED_RAW_CTX>>>",
-      JSON.stringify(
-        data?.contextInfo ||
-          data?.message?.extendedTextMessage?.contextInfo ||
-          null
-      )
-    );
 
     // Conversation context (Evolution history + in-memory buffer).
     const nowStr = new Date().toLocaleString("en-US", {
