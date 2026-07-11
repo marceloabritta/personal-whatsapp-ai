@@ -10,11 +10,14 @@
 >    *(Edit/reschedule is planned, not built yet.)*
 >
 > **How you call it:**
-> - Create: `@brain schedule a call with ana@example.com tomorrow 3pm`
+> - Create: just `@brain schedule this` — it reads the recent conversation for who's
+>   invited, the time, and their email. You don't have to spell it out (though you can:
+>   `@brain schedule a call with ana@example.com tomorrow 3pm`).
 > - Cancel: **reply to the invite message** (the one with the calendar link) with
 >   `@brain cancel this`, then just type **`yes`** to confirm (no tag needed).
 >
-> If something's missing (no time, no email), it tells you what it still needs.
+> If something's genuinely missing from the chat (no time, no email anywhere), it tells
+> you what it still needs.
 
 ---
 
@@ -41,7 +44,10 @@ Most-used here: `order` (the text), `quoted` (`{id,hasAudio,mediaType,text,calen
 1. **Continuation check:** if `session.intent === "delete"` and
    `session.stage === "await_confirmation"` → `resumeDelete(ctx, session)` and stop.
 2. Otherwise **`interpret(ctx)`** — one Claude call (`buildSystem`/`buildUserPrompt`,
-   `max_tokens: 700`). Extracts a JSON object from the reply:
+   `max_tokens: 700`). It extracts from the **conversation**, not just the order:
+   `order` + `transcript` + `contact` all go into the prompt, so a terse order like
+   "schedule this" works — participants, time, duration and emails are pulled from the
+   recent chat. Output is a JSON object:
    ```jsonc
    { "action": "create"|"delete"|"other", "confirm": bool,
      "participants": [{"name","email"|null}], "start_iso": string|null,
