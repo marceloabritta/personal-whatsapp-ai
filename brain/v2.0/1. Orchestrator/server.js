@@ -37,8 +37,7 @@ const INSTANCE = process.env.EVOLUTION_INSTANCE || "secretary";
 const TAG = (process.env.SECRETARY_TAG || "@brain").toLowerCase();
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 const OWNER_NAME = process.env.OWNER_NAME || "User";
-const HEADER = "[AI Secretary]:";
-const FOOTER = "(sent by AI)";
+const HEADER = "[AI Brain]:";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const evolution = createEvolution({
@@ -84,9 +83,9 @@ async function loadSkills() {
   return { skills, catalog };
 }
 
-// Sends text to WhatsApp with the secretary's standard header/footer.
+// Sends text to WhatsApp with the brain's standard header (header + blank line).
 async function send(number, text) {
-  const full = `${HEADER}\n${text}\n${FOOTER}`;
+  const full = `${HEADER}\n\n${text}`;
   return evolution.sendText(number, full);
 }
 
@@ -115,17 +114,23 @@ app.post("/webhook", async (req, res) => {
     if (text) remember(remoteJid, { t, fromMe, text, pushName: data.pushName });
 
     if (!fromMe) return; // only the owner's order
-    if (!text.toLowerCase().startsWith(TAG)) return; // only act on the trigger tag (SECRETARY_TAG)
+
+    const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
+    console.log("QUOTED>>>", JSON.stringify(quoted));
+
+    const isTagged = text.toLowerCase().startsWith(TAG);
+    // Act on the trigger tag, OR on a tagless reply to a message that carries a
+    // Google Calendar link — that's the cancel-confirmation flow, where the owner
+    // replies just "yes" to the brain's message (no tag needed).
+    if (!isTagged && !quoted?.calendarLink) return;
     if (id && seen.has(id)) return; // dedup
     if (id) {
       seen.add(id);
       if (seen.size > 500) seen.delete(seen.values().next().value);
     }
 
-    const order = text.slice(TAG.length).trim();
+    const order = isTagged ? text.slice(TAG.length).trim() : text.trim();
     const number = remoteJid.split("@")[0]; // reply in the originating chat
-    const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
-    console.log("QUOTED>>>", JSON.stringify(quoted));
 
     // Conversation context (Evolution history + in-memory buffer).
     const nowStr = new Date().toLocaleString("en-US", {
@@ -175,6 +180,7 @@ app.post("/webhook", async (req, res) => {
 
     // No recognized skill.
     if (!tasks.length || tasks.every((x) => !SKILLS[x])) {
+      if (!isTagged) return; // stay silent on tagless replies we can't act on
       const names = CATALOG.map((c) => c.id).join(", ");
       await send(
         number,

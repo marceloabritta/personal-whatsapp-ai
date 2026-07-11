@@ -222,20 +222,16 @@ async function handleDelete(ctx, info) {
   }
 
   const title = ev.summary || "(untitled)";
-  const who =
-    (ev.attendees || []).map((a) => a.email).filter(Boolean).join(", ") ||
-    "(no attendees)";
 
   // Confirm-first: on the initial request, echo the event and wait for a "yes".
-  // Include the calendar link so a reply to THIS message also resolves the event.
+  // The calendar link stays in the message so replying "yes" to THIS message
+  // re-resolves the event (no tag needed — the orchestrator lets that reply through).
   if (!info.confirm) {
     await send(
       number,
-      `This will cancel:\n- ${title}\n- ${whenStr(
+      `Confirm the cancelation of this event?\n- ${title}\n- ${whenStr(
         ev.start?.dateTime
-      )}\n- ${who}\nReply "yes ${tag}" (to this message or the invite) to confirm.\n${
-        ev.htmlLink || link
-      }`
+      )}\n\nReply to this message with "yes" to confirm.\n${ev.htmlLink || link}`
     );
     return;
   }

@@ -9,7 +9,7 @@ export function createEvolution({ url, apikey, instance }) {
   const base = `${url}`;
   const headers = { "Content-Type": "application/json", apikey };
 
-  // Sends RAW text (no header/footer). The [AI Secretary]/(sent by AI) framing
+  // Sends RAW text (no header). The [AI Brain]: header framing
   // is the orchestrator's job (server.js), not this client's.
   async function sendText(number, text) {
     const res = await fetch(`${base}/message/sendText/${instance}`, {
