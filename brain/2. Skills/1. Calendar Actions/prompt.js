@@ -6,10 +6,73 @@
 //  The output JSON must keep matching what skill.js expects.
 // ============================================================================
 
+// ---- JSON Schemas for structured outputs (output_config.format) --------------
+// Single source of truth for the SHAPE of each reply. skill.js passes these to
+// messages.create so the API returns ONLY schema-valid JSON — the prompts below
+// describe what each field MEANS, the schema enforces its type/enum/shape.
+// Structured-outputs rules: every object needs additionalProperties:false + a
+// full `required` list; optional fields use a nullable type union.
+const PARTICIPANT = {
+  type: "object",
+  additionalProperties: false,
+  required: ["name", "email"],
+  properties: {
+    name: { type: ["string", "null"] },
+    email: { type: ["string", "null"] },
+  },
+};
+
+export const CAL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["action", "title", "participants", "start_iso", "duration_min", "summary"],
+  properties: {
+    action: { type: "string", enum: ["create", "delete", "other"] },
+    title: { type: ["string", "null"] },
+    participants: { type: "array", items: PARTICIPANT },
+    start_iso: { type: ["string", "null"] },
+    duration_min: { type: ["number", "null"] },
+    summary: { type: "string" },
+  },
+};
+
+export const CONFIRM_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decision"],
+  properties: {
+    decision: { type: "string", enum: ["confirm", "decline", "unrelated"] },
+  },
+};
+
+export const REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decision", "title", "participants", "start_iso", "duration_min", "summary"],
+  properties: {
+    decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
+    title: { type: ["string", "null"] },
+    participants: { type: "array", items: PARTICIPANT },
+    start_iso: { type: ["string", "null"] },
+    duration_min: { type: ["number", "null"] },
+    summary: { type: "string" },
+  },
+};
+
+export const RESOLVE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["start_iso", "participants"],
+  properties: {
+    start_iso: { type: ["string", "null"] },
+    participants: {
+      anyOf: [{ type: "null" }, { type: "array", items: PARTICIPANT }],
+    },
+  },
+};
+
 export function buildSystem(OWNER_NAME) {
-  return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data.
-Reply ONLY with valid JSON, no text around it:
-{"action":"create"|"delete"|"other","title":string|null,"participants":[{"name":string,"email":string|null}],"start_iso":string|null,"duration_min":number|null,"summary":string}
+  return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data. (Your reply's shape is enforced separately — here, focus on getting the values right.)
 
 Choosing "action":
 - "create": ${OWNER_NAME} wants to schedule/create a NEW meeting or event.
@@ -42,7 +105,7 @@ export function buildConfirmSystem(action) {
   return `You decide whether the LATEST message is a response to a pending confirmation.
 The assistant asked to confirm: ${action}.
 Use the recent conversation only as context; judge ONLY the latest message.
-Reply with ONLY valid JSON, no text around it: {"decision":"confirm"|"decline"|"unrelated"}
+Decide one "decision" value — "confirm", "decline", or "unrelated":
 - "confirm": the latest message clearly agrees to proceed (e.g. yes, confirm, go ahead, sim, pode, isso).
 - "decline": the latest message clearly refuses (e.g. no, don't, keep it, não, deixa).
 - "unrelated": the latest message is normal conversation, NOT a reply to this confirmation. If unsure, choose "unrelated".`;
@@ -62,8 +125,7 @@ Latest message: ${latest}`;
 // (one call keeps the correlated fields consistent — same reasoning as create).
 export function buildCreateReviewSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. You already PROPOSED an event and asked ${OWNER_NAME} to confirm it. Read the current DRAFT, the recent conversation, and ${OWNER_NAME}'s LATEST message, then decide what that latest message means for the pending event.
-Reply ONLY with valid JSON, no text around it:
-{"decision":"confirm"|"modify"|"cancel"|"unrelated","title":string|null,"participants":[{"name":string,"email":string|null}],"start_iso":string|null,"duration_min":number|null,"summary":string}
+Choose the "decision" and, for a modify, return the updated draft fields (title, participants, start_iso, duration_min, summary):
 
 - "confirm": the latest message clearly approves the event as proposed (e.g. yes, confirm, go ahead, send it, sim, pode, isso).
 - "modify": the latest message asks to CHANGE something (time, date, title, duration, attendees, emails, agenda). Return the FULL updated draft with the change applied, carrying over EVERY unchanged field from the current draft exactly.
@@ -96,9 +158,7 @@ Latest message: ${latest}`;
 // it is told exactly what to look for. The latest message may come from the owner
 // OR from an attendee (awaitFrom:"any").
 export function buildResolveSystem(OWNER_NAME) {
-  return `You are ${OWNER_NAME}'s calendar assistant. An event is being prepared and some REQUIRED details are still missing. You are told exactly WHICH details are missing. Inspect the current draft, the recent conversation, and the LATEST message, and resolve PRECISELY those missing details — nothing else.
-Reply ONLY with valid JSON, no text around it:
-{"start_iso":string|null,"participants":[{"name":string,"email":string|null}]|null}
+  return `You are ${OWNER_NAME}'s calendar assistant. An event is being prepared and some REQUIRED details are still missing. You are told exactly WHICH details are missing. Inspect the current draft, the recent conversation, and the LATEST message, and resolve PRECISELY those missing details — nothing else. Return the resolved start_iso and/or the full participants list:
 
 - Resolve ONLY the items marked MISSING in "Still missing" below; leave everything else null.
 - start_iso: ISO 8601 with the -03:00 offset; resolve relative times ("tomorrow 3pm", "next Tuesday") using the current date/time given. null if genuinely not stated anywhere.

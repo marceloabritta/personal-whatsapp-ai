@@ -1,9 +1,9 @@
 # Stateful Conversation Architecture — Plan
 
 Architecture reference for the brain's stateful conversation layer.
-**Phase A is built and live** (per-chat Redis sessions + the delete confirm flow).
-For the remaining feature work (smart scheduling, edit/reschedule) see
-[calendar-actions.md](../New Features Plans/calendar-actions.md).
+**Phases A and C are built and live** (per-chat Redis sessions, the delete confirm flow,
+and the stateful confirm-first create with missing-info gathering). Only **Phase B
+(edit/reschedule)** remains — see [calendar-actions.md](calendar-actions.md).
 
 Goal: move the brain from **stateless single-shot** (every action needs `@brain`) to
 **stateful conversations** — so a follow-up (confirmation, clarification, or an edit)
@@ -12,7 +12,7 @@ continues **without re-tagging `@brain`**.
 ## Why
 
 Today the orchestrator only acts on messages that start with `@brain`
-([server.js](1.%20Orchestrator/server.js)), and each action re-derives everything from the
+([server.js](../brain/1.%20Orchestrator/server.js)), and each action re-derives everything from the
 transcript. That forces `@brain` on every turn and can't hold a multi-step
 interaction (confirm → do; ask → answer → do; "change it" → clarify → apply).
 
@@ -28,7 +28,7 @@ A session is a short-lived "pending action" keyed by `remoteJid`:
 {
   "skill": "calendar_action",     // which skill owns the follow-up
   "intent": "delete",             // delete | create | edit ...
-  "stage": "await_confirmation",  // await_confirmation | await_clarification
+  "stage": "await_confirmation",  // await_confirmation | await_info
   "awaitFrom": "owner",           // who may answer: owner | contact | any
   "data": { "eventId": "…", "title": "…", "when": "…" },  // skill-specific
   "expiresAt": 1720000900         // TTL, e.g. 15 min
@@ -46,9 +46,11 @@ A session is a short-lived "pending action" keyed by `remoteJid`:
   actions); the brain acts only when it detects a real answer.
   - `awaitFrom: "owner"` — messages from the owner (`fromMe`). e.g. the delete
     confirmation: the owner just types "yes"/"no" somewhere in the chat.
-  - `awaitFrom: "contact"` — messages from the other person (`!fromMe`). e.g. smart
-    scheduling: the attendee types their email in a normal message. (Phase C.)
-  - `awaitFrom: "any"` — either.
+  - `awaitFrom: "contact"` — messages from the other person (`!fromMe`).
+  - `awaitFrom: "any"` — either. **Built and used by create's info-gathering stage**
+    (`await_info`): a missing email can be answered by the owner OR by the attendee
+    themselves, so create waits on both (Phase C merged the owner-ask and contact-ask
+    into one `any` flow).
 - **The brain never reacts to its own messages** (they start with the `[AI Brain]:`
   header), so confirmations/prompts it sends don't re-trigger the flow.
 - The chatter-vs-answer judgment is a small LLM call per candidate message, given
@@ -80,7 +82,7 @@ Alternative considered — **in-memory only**: zero deps, but every deploy/resta
 drops pending sessions. Since we deploy often, Redis is worth it. (We can ship the
 in-memory store first and flip to Redis by config if you'd rather stage it.)
 
-## Orchestrator changes ([server.js](1.%20Orchestrator/server.js))
+## Orchestrator changes ([server.js](../brain/1.%20Orchestrator/server.js))
 
 New decision at the top of the webhook, after computing `remoteJid`:
 
@@ -136,12 +138,13 @@ Skills that don't use sessions behave exactly as today.
   in-memory fallback), orchestrator wiring, and the delete confirm flow on sessions:
   `@brain cancel` (reply to invite) → clean, link-free confirmation → type `yes`
   (no tag) → deleted. The confirmation is LLM-judged, so unrelated chatter is ignored.
-- **Phase C — smart scheduling** (topic naming, missing-email capture from the owner
-  or the contact). See [calendar-actions.md](../New Features Plans/calendar-actions.md) (C1–C3). *Recommended next.*
-- **Phase B — edit/reschedule via sessions.** See [calendar-actions.md](../New Features Plans/calendar-actions.md).
-
-(Phase C is listed before B because it's the original goal and the first real use of
-`awaitFrom: "contact"`.)
+- **Phase C — smart scheduling. ✅ DONE (2026-07-11).** Confirm-first create:
+  conversation-inferred titles; a focused second-pass resolver that re-inspects the chat
+  for any missing field before asking; stateful gathering of the date/time, attendees,
+  and every attendee's email via `await_info` (`awaitFrom:"any"` — owner or attendee);
+  then an `await_confirmation` draft the owner approves (`yes`) or edits by plain reply.
+  All four LLM calls use structured outputs. See [calendar-actions.md](calendar-actions.md) (C1–C3).
+- **Phase B — edit/reschedule via sessions. ← next.** See [calendar-actions.md](calendar-actions.md).
 
 ## Edge cases & decisions
 

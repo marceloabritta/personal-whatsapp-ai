@@ -21,7 +21,31 @@ import {
   buildCreateReviewUser,
   buildResolveSystem,
   buildResolveUser,
+  CAL_SCHEMA,
+  CONFIRM_SCHEMA,
+  REVIEW_SCHEMA,
+  RESOLVE_SCHEMA,
 } from "./prompt.js";
+
+// Structured outputs: pass a JSON Schema so the API returns ONLY schema-valid
+// JSON (no fences, no prose, no shape drift). Helper wraps the schema in the
+// output_config.format shape and reads the guaranteed-valid reply — falling back
+// to parseJsonReply if the model refused (empty/partial content) or is ever
+// swapped to one without structured-output support.
+function jsonFormat(schema) {
+  return { format: { type: "json_schema", schema } };
+}
+function readReply(msg) {
+  if (msg?.stop_reason === "refusal") {
+    console.error("calendar: model refused the request");
+    return null;
+  }
+  const out = (msg?.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+  return parseJsonReply(out);
+}
 
 export const manifest = {
   id: "calendar_action",
@@ -271,16 +295,14 @@ async function interpret(ctx) {
   });
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 700,
+    max_tokens: 4096,
     system,
+    output_config: jsonFormat(CAL_SCHEMA),
     messages: [{ role: "user", content: prompt }],
   });
-  const out = msg.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-  console.log("CALENDAR RAW:", out);
-  return parseJsonReply(out);
+  const info = readReply(msg);
+  console.log("CALENDAR RAW:", JSON.stringify(info));
+  return info;
 }
 
 // ctx (from the orchestrator): { owner, tag, anthropic, model, order, transcript,
@@ -520,8 +542,9 @@ async function reviewCreate(ctx, draft) {
   try {
     const msg = await anthropic.messages.create({
       model,
-      max_tokens: 700,
+      max_tokens: 4096,
       system: buildCreateReviewSystem(owner),
+      output_config: jsonFormat(REVIEW_SCHEMA),
       messages: [
         {
           role: "user",
@@ -534,12 +557,8 @@ async function reviewCreate(ctx, draft) {
         },
       ],
     });
-    const out = msg.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-    console.log("CREATE REVIEW RAW:", out);
-    const parsed = parseJsonReply(out);
+    const parsed = readReply(msg);
+    console.log("CREATE REVIEW RAW:", JSON.stringify(parsed));
     if (!parsed) return null;
     if (!["confirm", "modify", "cancel", "unrelated"].includes(parsed.decision)) {
       parsed.decision = "unrelated";
@@ -666,8 +685,9 @@ async function inspectMissing(ctx, draft, m) {
   try {
     const msg = await anthropic.messages.create({
       model,
-      max_tokens: 500,
+      max_tokens: 2048,
       system: buildResolveSystem(owner),
+      output_config: jsonFormat(RESOLVE_SCHEMA),
       messages: [
         {
           role: "user",
@@ -683,12 +703,9 @@ async function inspectMissing(ctx, draft, m) {
         },
       ],
     });
-    const out = msg.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-    console.log("RESOLVE RAW:", out);
-    return parseJsonReply(out);
+    const patch = readReply(msg);
+    console.log("RESOLVE RAW:", JSON.stringify(patch));
+    return patch;
   } catch (e) {
     console.error("resolve error:", e?.message || e);
     return null;
@@ -813,18 +830,15 @@ async function classifyConfirmation(ctx, { action }) {
   try {
     const msg = await anthropic.messages.create({
       model,
-      max_tokens: 50,
+      max_tokens: 1024,
       system: buildConfirmSystem(action),
+      output_config: jsonFormat(CONFIRM_SCHEMA),
       messages: [
         { role: "user", content: buildConfirmUser({ transcript, latest: order }) },
       ],
     });
-    const out = msg.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-    console.log("CONFIRM RAW:", out);
-    const decision = parseJsonReply(out)?.decision;
+    const decision = readReply(msg)?.decision;
+    console.log("CONFIRM RAW:", decision);
     return decision === "confirm" || decision === "decline"
       ? decision
       : "unrelated";
