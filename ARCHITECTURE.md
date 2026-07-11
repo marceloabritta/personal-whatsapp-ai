@@ -92,20 +92,26 @@ A second call, with the calendar skill's own prompt, extracts:
   "summary": "Meeting with Alex, tomorrow 2pm."
 }
 ```
-`action` is `"create"`, `"delete"`, or `"edit"` — the skill can create a new event,
-cancel/delete an existing one, or edit/reschedule one (reply to the invite **or** the
+`action` is `"create"`, `"delete"`, `"edit"`, or `"list"` — the skill can create a new
+event, cancel/delete an existing one, edit/reschedule one (reply to the invite **or** the
 summary/confirm bubble with a change — the target is matched like delete, by decoded link
-or start-time + attendee-email; confirm-first and stays open until you save).
+or start-time + attendee-email; confirm-first and stays open until you save), or **read/list**
+what's on the calendar. `list` is **read-only** (no session, no confirm, no write): the LLM
+also fills `list_mode` (`"window"` | `"next"`) and `range_start_iso`/`range_end_iso`, and the
+skill just formats and replies (e.g. "what's on tomorrow?", "what's my next meeting?").
 
-### 5. skill → Google Calendar (create or cancel/delete event)
+### 5. skill → Google Calendar (create, cancel/delete, edit, or read event)
 
 OAuth (Client ID + Secret + Refresh Token); the secretary exchanges the refresh token for
 an access token automatically.
 ```
 POST   https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all   (create)
 DELETE https://www.googleapis.com/calendar/v3/calendars/primary/events/{eventId}?sendUpdates=all   (cancel/delete)
+GET    https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=…&timeMax=…&singleEvents=true&orderBy=startTime   (list/read — no write)
 ```
-`sendUpdates=all` makes Google send the invite (or cancellation) email to the attendees from your account.
+`sendUpdates=all` makes Google send the invite (or cancellation) email to the attendees from
+your account. The `list` GET is read-only and sends no email; `singleEvents=true` expands
+recurring events into concrete instances inside the window.
 
 ### 5b. skill → Google Tasks (add / list / complete) — task_action
 

@@ -2,9 +2,9 @@
 
 > **For humans — quick read.**
 >
-> Creates, edits, and cancels Google Calendar events from WhatsApp.
+> Creates, edits, cancels, and reads Google Calendar events from WhatsApp.
 >
-> **It handles three tasks:**
+> **It handles four tasks:**
 > 1. **Create** an event and email the invite to the attendees — **confirm-first**:
 >    it shows you a draft and waits for your **`yes`** before writing anything.
 > 2. **Edit/reschedule** an event you replied to — move it, change its length, rename it,
@@ -12,6 +12,9 @@
 >    for your **`yes`**, and **stays open** so you can keep telling it changes ("actually
 >    4:30", "also add bruno@x.com") before saving. Nothing is written until you confirm.
 > 3. **Cancel/delete** an event you replied to — with a "type *yes* to confirm" step.
+> 4. **Read/list** what's on the calendar — a **read-only** query ("what's on tomorrow?",
+>    "anything Friday afternoon?", "what's my next meeting?"). No draft, no confirm,
+>    **nothing is ever written**; it just replies with the events.
 >
 > **How you call it:**
 > - Create: just `@secretary schedule this` — it reads the recent conversation for the
@@ -23,6 +26,9 @@
 >   answer without re-tagging.
 > - Cancel: **reply to the invite message** (the one with the calendar link) with
 >   `@secretary cancel this`, then just type **`yes`** to confirm (no tag needed).
+> - Read: just ask — `@secretary what's on my calendar tomorrow?`,
+>   `@secretary do I have anything Friday afternoon?`, `@secretary what's my next meeting?`.
+>   It replies right away; there's no confirm step because nothing is written.
 >
 > If something needed is missing (the time, who to invite, or an attendee's email), it
 > **asks and waits** — no re-tag — and the answer can come from you **or** the attendee.
@@ -134,6 +140,30 @@ the confirm step ("rename to …").
 4. If step 1 wasn't a reply to a message with a readable calendar link, or the event is
    already gone, you get a plain-language message explaining what to do.
 
+### Reading / listing what's on the calendar (read-only, instant)
+
+1. You just ask — no reply-to needed:
+   `@secretary what's on my calendar tomorrow?` · `@secretary do I have anything Friday
+   afternoon?` · `@secretary what's my next meeting?`.
+2. It replies immediately with the events in the window it understood — **nothing is ever
+   written, and there's no confirm step**:
+   > Here's Jul 12, 2026:
+   > - 9:00 AM — Standup (30 min)
+   > - 3:00 PM — Q3 budget review · ana@example.com (45 min)
+   > - All day — Gym
+   - **A single day** ("tomorrow", "Friday afternoon") → the date is in the header and each
+     line shows the time only. A window spanning **several days** ("this week") shows the
+     full date on each line.
+   - **"What's my next meeting?"** → it scans forward and shows just the next upcoming event
+     (*"Your next event: …"*), or *"Nothing coming up … in the next two weeks."*
+   - **No time given** ("what's on my calendar?") → it defaults to the **rest of today** and
+     the header names that day, so you know what it assumed.
+   - **Empty window** → *"Nothing on your calendar for Jul 12, 2026."*
+   - **Very large window** (e.g. "this month") → capped at the first 50, with a
+     *"(Showing the first 50.)"* note rather than silently truncating.
+3. If the calendar read fails, you get *"I hit an error reading the calendar. Try again?"* —
+   no crash, nothing changed.
+
 ---
 
 ## For AI / maintainers — detailed
@@ -184,15 +214,19 @@ Otherwise **`interpret(ctx)`** — one Claude call (`buildSystem`/`buildUserProm
 `CAL_SCHEMA`, `max_tokens: 4096`) that extracts from the **whole conversation**, not just
 the order (`order` + `transcript` + `contact`), so a terse "schedule this" works. Schema:
 ```jsonc
-{ "action": "create"|"delete"|"edit"|"other",
+{ "action": "create"|"delete"|"edit"|"list"|"other",
   "title": string|null,                              // inferred subject heading, or null
   "participants": [{ "name": string|null, "email": string|null }],
-  "start_iso": string|null, "duration_min": number|null, "summary": string }
+  "start_iso": string|null, "duration_min": number|null, "summary": string,
+  "list_mode": "window"|"next"|null,                 // action="list" only; null otherwise
+  "range_start_iso": string|null, "range_end_iso": string|null }  // the list window
 ```
 Dispatch on `action`: `delete` → `handleDelete`; `create` → `handleCreate`; `edit` →
-`handleEdit`; else "I didn't identify a calendar action." (For `edit`, `interpret` only
-**classifies** — the specific change is extracted later by a focused pass against the real
-event; the other `CAL_SCHEMA` fields are ignored.)
+`handleEdit`; `list` → `handleList`; else "I didn't identify a calendar action." (For
+`edit`, `interpret` only **classifies** — the specific change is extracted later by a focused
+pass against the real event; the other `CAL_SCHEMA` fields are ignored. The three
+`list_*`/`range_*` fields are `null` for every non-`list` action and ignored by those
+handlers.)
 
 ### Task: CREATE — fully stateful, confirm-first
 Required to create (everything else has a fallback and never blocks): a **date/time**,
@@ -306,6 +340,28 @@ attendees: case-insensitive remove then dedup add).
    - `cancel` → clear + `editCancelled` ("I'll leave it as it was").
    - `unrelated` / null (doubt/error) → silent (safe default).
 
+### Task: LIST — `handleList` (read-only, stateless)
+The only action with **no session, no confirm, and no write** — the simplest of the four.
+`interpret` sets `list_mode` and (for a bounded query) `range_start_iso`/`range_end_iso`;
+`handleList` resolves the window, fetches, and replies. Two modes:
+- **`list_mode:"next"`** → forward-scan `events.list` (now → now + 14 days, `orderBy:
+  "startTime"`, `maxResults:10`), take the first confirmed event → `reply(lang).listNext`
+  (or a "nothing coming up" line when empty).
+- **`list_mode:"window"`** (default) → `startMs` = `range_start_iso` or **now**; `endMs` =
+  `range_end_iso` or **`endOfLocalDay(startMs)`** (a bad/backwards range also falls back to
+  end-of-day). `events.list` over `[startMs, endMs]` (`singleEvents:true` expands recurring
+  instances, `orderBy:"startTime"`, `maxResults:50`, confirmed-only) → `reply(lang).listEvents`.
+
+`endOfLocalDay(ms)` computes 23:59:59.999 in `CAL_TZ` (America/Sao_Paulo, fixed −03:00 — no
+DST) via an `en-CA` `Intl.DateTimeFormat` to get the local Y-M-D, then a −03:00 ISO string.
+`toListItem(e)` flattens a Google event to the **locale-neutral** shape the renderers take
+(`{ allDay, startIso, dayMs, title, emails, durationMin }`) — all-day events (`e.start.date`,
+no `dateTime`) carry `dayMs` and render without a time. The renderers (`listEvents`,
+`listNext`, `listError` in `prompt.js`) pick **time-only** lines when the window is a single
+local day (header states the date) and **full date+time** when it spans days
+(`sameLocalDay` decides); a 50-item cap appends a localized "(Showing the first 50.)" note
+rather than truncating silently. Errors → `reply(lang).listError` (no crash, nothing changed).
+
 ### External APIs
 - **Anthropic (Claude), all structured-output calls:** `interpret` (create/delete/edit
   classification + create/delete extraction, 4096) · `inspectMissing` (focused
@@ -314,12 +370,14 @@ attendees: case-insensitive remove then dedup add).
   confirm/modify/cancel + re-draft, 2048) · `classifyConfirmation` (delete yes/no, 1024).
   Model = `ctx.model`.
 - **Google Calendar (OAuth refresh token):** `events.list` (dedupe on create + match/sweep
-  on delete), `events.get` (resolve a decoded link id; read current state on edit),
+  on delete + **read the window on list**), `events.get` (resolve a decoded link id; read current state on edit),
   `events.insert` (create), `events.patch` (edit, `sendUpdates:"all"`), `events.delete`
   (cancel). `sendUpdates:"all"` sends invite / change / cancellation emails.
 - **WhatsApp:** all user-facing text via `ctx.send`.
 
 ### Stateful behavior, timeouts, completion
+- **LIST is stateless** — no session, no confirm, no write; it replies in one shot and is done.
+  The rest below applies only to CREATE / DELETE / EDIT.
 - **CREATE, DELETE, and EDIT are all stateful and confirm-first.** CREATE sessions:
   `await_info` (gathering, `awaitFrom:"any"`) then `await_confirmation` (`awaitFrom:"owner"`);
   DELETE: `await_confirmation` (`awaitFrom:"owner"`); EDIT: `await_clarification`

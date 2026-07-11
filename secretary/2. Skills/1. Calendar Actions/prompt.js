@@ -25,14 +25,29 @@ const PARTICIPANT = {
 export const CAL_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["action", "title", "participants", "start_iso", "duration_min", "summary"],
+  required: [
+    "action",
+    "title",
+    "participants",
+    "start_iso",
+    "duration_min",
+    "summary",
+    "list_mode",
+    "range_start_iso",
+    "range_end_iso",
+  ],
   properties: {
-    action: { type: "string", enum: ["create", "delete", "edit", "other"] },
+    action: { type: "string", enum: ["create", "delete", "edit", "list", "other"] },
     title: { type: ["string", "null"] },
     participants: { type: "array", items: PARTICIPANT },
     start_iso: { type: ["string", "null"] },
     duration_min: { type: ["number", "null"] },
     summary: { type: "string" },
+    // action="list" only (null for every other action): the read-only query window.
+    // list_mode "next" = forward-scan for the soonest event; "window" = a bounded span.
+    list_mode: { type: ["string", "null"], enum: ["window", "next", null] },
+    range_start_iso: { type: ["string", "null"] },
+    range_end_iso: { type: ["string", "null"] },
   },
 };
 
@@ -143,6 +158,10 @@ Choosing "action":
   Google Calendar link, but the order asks to move/change/reschedule/rename/add/remove
   rather than call the whole event off. Choose "edit" (NOT "delete") whenever the event
   survives with a modification; choose "delete" only when the event is cancelled entirely.
+- "list": ${OWNER_NAME} is ASKING what's on the calendar — a READ-ONLY query about
+  existing events (e.g. "what's on my calendar tomorrow?", "do I have anything Friday
+  afternoon?", "what's my next meeting?"). Nothing is created, changed, or cancelled.
+  Choose "list" for any question that just READS the schedule.
 - "other": none of the above.
 
 For action="create", fill these (for action="delete", ALSO fill participants and start_iso — see below):
@@ -171,7 +190,21 @@ use the WHOLE context, especially the replied-to invite/summary message):
   to find the event, NOT the new time being requested. If the order is "move it to 4pm",
   start_iso is the event's current start (e.g. the "3:00 PM" printed in the quoted summary),
   never 4pm.
-- title/summary: best effort; not used to match.`;
+- title/summary: best effort; not used to match.
+
+For action="list", resolve the time WINDOW the question implies and set list_mode:
+- list_mode: "next" when ${OWNER_NAME} asks for the NEXT / soonest upcoming event without
+  naming a day ("what's my next meeting?", "when's my next call?"). Use "window" for
+  everything else (a named day, part of a day, or a range).
+- range_start_iso / range_end_iso: the window the question implies, ISO 8601 with the
+  -03:00 offset, converted from relative phrases using the current date/time. "tomorrow"
+  → that whole day (00:00 to 23:59); "Friday afternoon" → that Friday 12:00–18:00; "this
+  week" → the week's span. If NO time is expressed ("what's on my calendar?"), leave BOTH
+  null with list_mode="window" (the code then defaults to the rest of today). For
+  list_mode="next", leave BOTH null (the code scans forward from now).
+
+For EVERY action other than "list", set list_mode=null, range_start_iso=null, and
+range_end_iso=null.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----
@@ -384,6 +417,52 @@ function joinListPt(items) {
   return `${items.slice(0, -1).join(", ")} e ${items[items.length - 1]}`;
 }
 
+// ---- LIST (read-only) render helpers ----------------------------------------
+// Time-only (hh:mm AM/PM) in the reply TZ — used for event lines inside a single-day
+// window, where the header already states the date.
+function localizeTime(lang, dateTime) {
+  if (!dateTime) return "";
+  return new Date(dateTime).toLocaleTimeString(lang === "pt" ? "pt-BR" : "en-US", {
+    timeZone: REPLY_TZ,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+// Date-only (no time) in the reply TZ — window headers, empty-state, and all-day /
+// multi-day event lines.
+function localizeDay(lang, ms) {
+  return new Date(ms).toLocaleDateString(lang === "pt" ? "pt-BR" : "en-US", {
+    timeZone: REPLY_TZ,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+// Do two instants fall on the same calendar day in the reply TZ? Decides whether the
+// window is "single-day" (time-only lines) or spans days (full date on each line).
+function sameLocalDay(aMs, bMs) {
+  return localizeDay("en", aMs) === localizeDay("en", bMs);
+}
+
+// One listed event as a bullet line. `single` = the window is a single day → show time
+// only; otherwise show the full date+time. All-day events show a day label / date, no
+// time. `ev` is the flattened shape from skill.js's toListItem (locale-neutral data);
+// the labels here are per-language, so grammar stays out of a shared English builder.
+function eventLine(lang, ev, single) {
+  const title = ev.title || (lang === "pt" ? "(sem título)" : "(no title)");
+  const emailsPart = ev.emails.length ? ` · ${ev.emails.join(", ")}` : "";
+  if (ev.allDay) {
+    const left = single ? (lang === "pt" ? "Dia todo" : "All day") : localizeDay(lang, ev.dayMs);
+    return `- ${left} — ${title}${emailsPart}`;
+  }
+  const when = single ? localizeTime(lang, ev.startIso) : localizeDate(lang, ev.startIso);
+  const durPart = ev.durationMin ? ` (${ev.durationMin} min)` : "";
+  return `- ${when} — ${title}${emailsPart}${durPart}`;
+}
+
 const REPLY = {
   en: {
     thinkingError: () => "I hit an error while thinking. Try again?",
@@ -455,6 +534,31 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
       `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
     editGoogleError: () =>
       "I understood the change but failed to update it in Google. Error in the log.",
+    listEvents: ({ startMs, endMs, events, capped }) => {
+      const single = sameLocalDay(startMs, endMs);
+      if (!events.length) {
+        return single
+          ? `Nothing on your calendar for ${localizeDay("en", startMs)}.`
+          : `Nothing on your calendar between ${localizeDay("en", startMs)} and ${localizeDay("en", endMs)}.`;
+      }
+      const header = single
+        ? `Here's ${localizeDay("en", startMs)}:`
+        : `Here's ${localizeDay("en", startMs)} – ${localizeDay("en", endMs)}:`;
+      const lines = events.map((ev) => eventLine("en", ev, single)).join("\n");
+      const capNote = capped ? "\n\n(Showing the first 50.)" : "";
+      return `${header}\n${lines}${capNote}`;
+    },
+    listNext: ({ event }) => {
+      if (!event) return "Nothing coming up on your calendar in the next two weeks.";
+      const title = event.title || "(no title)";
+      const emailsPart = event.emails.length ? ` · ${event.emails.join(", ")}` : "";
+      const when = event.allDay
+        ? localizeDay("en", event.dayMs)
+        : localizeDate("en", event.startIso);
+      const durPart = !event.allDay && event.durationMin ? ` (${event.durationMin} min)` : "";
+      return `Your next event:\n- ${when} — ${title}${emailsPart}${durPart}`;
+    },
+    listError: () => "I hit an error reading the calendar. Try again?",
   },
   pt: {
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
@@ -528,6 +632,31 @@ Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.`,
       `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
     editGoogleError: () =>
       "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
+    listEvents: ({ startMs, endMs, events, capped }) => {
+      const single = sameLocalDay(startMs, endMs);
+      if (!events.length) {
+        return single
+          ? `Nada na sua agenda para ${localizeDay("pt", startMs)}.`
+          : `Nada na sua agenda entre ${localizeDay("pt", startMs)} e ${localizeDay("pt", endMs)}.`;
+      }
+      const header = single
+        ? `Sua agenda de ${localizeDay("pt", startMs)}:`
+        : `Sua agenda de ${localizeDay("pt", startMs)} a ${localizeDay("pt", endMs)}:`;
+      const lines = events.map((ev) => eventLine("pt", ev, single)).join("\n");
+      const capNote = capped ? "\n\n(Mostrando os primeiros 50.)" : "";
+      return `${header}\n${lines}${capNote}`;
+    },
+    listNext: ({ event }) => {
+      if (!event) return "Nada na sua agenda nas próximas duas semanas.";
+      const title = event.title || "(sem título)";
+      const emailsPart = event.emails.length ? ` · ${event.emails.join(", ")}` : "";
+      const when = event.allDay
+        ? localizeDay("pt", event.dayMs)
+        : localizeDate("pt", event.startIso);
+      const durPart = !event.allDay && event.durationMin ? ` (${event.durationMin} min)` : "";
+      return `Seu próximo evento:\n- ${when} — ${title}${emailsPart}${durPart}`;
+    },
+    listError: () => "Tive um erro ao ler o calendário. Pode tentar de novo?",
   },
 };
 

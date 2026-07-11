@@ -26,11 +26,11 @@ AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
 Four skills exist today:
-- `calendar_action` — **creates**, **edits/reschedules**, and **cancels/deletes** Google
-  Calendar events. Create and cancel are confirm-first (the owner types `yes`); edit is a
-  reply-driven change (move/relength/rename/add-remove attendee), confirm-first and stays
-  open until saved, clarifying when ambiguous. See
-  `New Features Plans/calendar-actions.md` for the remaining backlog.
+- `calendar_action` — **creates**, **edits/reschedules**, **cancels/deletes**, and
+  **reads/lists** Google Calendar events. Create and cancel are confirm-first (the owner
+  types `yes`); edit is a reply-driven change (move/relength/rename/add-remove attendee),
+  confirm-first and stays open until saved, clarifying when ambiguous; **list is read-only**
+  (no session, no confirm, no write — "what's on tomorrow?", "what's my next meeting?").
 - `transcribe_audio` — reply to a voice message + `@secretary transcribe`; downloads the
   audio from WhatsApp and transcribes it via AssemblyAI.
 - `task_action` — a to-do inbox: add / list / complete todos. A todo for the owner goes to
@@ -365,6 +365,20 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — Calendar read/list action SHIPPED (DEPLOYED).** Added a fourth, **read-only**
+  action to `calendar_action`: the owner can ask what's scheduled ("what's on my calendar
+  tomorrow?", "do I have anything Friday afternoon?", "what's my next meeting?") and get an
+  immediate, time-ordered, localized (en/pt) reply. Unlike create/edit/delete it is
+  **stateless** — no session, no confirm, no write. `CAL_SCHEMA` gained `"list"` plus
+  `list_mode` (`"window"` | `"next"`) and `range_start_iso`/`range_end_iso` (all `null` for the
+  other actions); `handleList` resolves the window (`list_mode:"next"` → forward-scan to the
+  first upcoming event; `"window"` → the LLM's range, defaulting to the rest of today via
+  `endOfLocalDay`), fetches with `events.list` (`singleEvents:true`, `orderBy:startTime`,
+  confirmed-only, capped at 50) and renders per-day time-only or multi-day full-date lines,
+  handling all-day events and an empty state. **Entirely inside the skill folder** — no
+  orchestrator/`server.js` change (uses `Date.now()`, not a ctx clock); the router routes it
+  via the updated `manifest.description`. Plan archived to
+  `Shipped Features/2026-07-11 - feature-calendar-read-query.md`.
 - **2026-07-11 — AI Brain → AI Secretary rename SHIPPED (DEPLOYED).** Shipped in two layers.
   **Layer 1 (deployed first)** introduced `secretary/1. Orchestrator/lib/identity.js` as the
   single source of truth for trigger tags + the reply header: `SECRETARY_TAG` is now

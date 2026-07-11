@@ -69,7 +69,7 @@ export const capabilities = {
 export const manifest = {
   id: "calendar_action",
   description:
-    "create, edit/reschedule, or delete/cancel a meeting or event in Google Calendar and notify the participants",
+    "create, edit/reschedule, or delete/cancel a meeting or event in Google Calendar and notify the participants; also read/list what's on the calendar (answer questions like what's on tomorrow, anything Friday afternoon, or what's my next meeting)",
 };
 
 const CAL_TZ = "America/Sao_Paulo";
@@ -357,6 +357,7 @@ export async function run(ctx) {
   if (info?.action === "delete") return handleDelete(ctx, info);
   if (info?.action === "create") return handleCreate(ctx, info);
   if (info?.action === "edit") return handleEdit(ctx, info);
+  if (info?.action === "list") return handleList(ctx, info);
 
   await send(number, reply(ctx.lang).noAction({ summary: info?.summary }));
 }
@@ -1218,4 +1219,102 @@ async function classifyConfirmation(ctx, { action }) {
     console.error("confirm classify error:", e?.message || e);
     return "unrelated"; // on error, do nothing (safe)
   }
+}
+
+// ---- LIST (read-only) ------------------------------------------------------
+// Answer a read-only question about the schedule. The simplest action: no session,
+// no confirm, no write — resolve the window (or a forward scan for "next"), fetch,
+// and reply. The window comes from interpret() (list_mode + range_start_iso/
+// range_end_iso); an unresolved window defaults to the rest of today.
+async function handleList(ctx, info) {
+  const { env, number, send, lang } = ctx;
+  const now = Date.now();
+  const cal = calendarClient(env);
+
+  // "next meeting" → scan forward and show the first upcoming event.
+  if (info?.list_mode === "next") {
+    let items;
+    try {
+      const r = await cal.events.list({
+        calendarId: calId(env),
+        timeMin: new Date(now).toISOString(),
+        timeMax: new Date(now + 14 * 86400000).toISOString(),
+        singleEvents: true,
+        orderBy: "startTime",
+        showDeleted: false,
+        maxResults: 10,
+      });
+      items = (r.data.items || []).filter((e) => e.status === "confirmed");
+    } catch (e) {
+      console.error("Calendar list(next) error:", e?.response?.data || e?.message || e);
+      return send(number, reply(lang).listError());
+    }
+    const next = items.find((e) => e.start?.dateTime || e.start?.date);
+    return send(number, reply(lang).listNext({ event: next ? toListItem(next) : null }));
+  }
+
+  // window mode: an explicit range if the LLM resolved one, else now → end of today.
+  const parsedStart = info?.range_start_iso ? new Date(info.range_start_iso).getTime() : NaN;
+  const startMs = Number.isFinite(parsedStart) ? parsedStart : now;
+  const parsedEnd = info?.range_end_iso ? new Date(info.range_end_iso).getTime() : NaN;
+  let endMs = Number.isFinite(parsedEnd) ? parsedEnd : endOfLocalDay(startMs);
+  if (endMs <= startMs) endMs = endOfLocalDay(startMs); // guard an empty/backwards range
+
+  let items;
+  try {
+    const r = await cal.events.list({
+      calendarId: calId(env),
+      timeMin: new Date(startMs).toISOString(),
+      timeMax: new Date(endMs).toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+      showDeleted: false,
+      maxResults: 50,
+    });
+    items = (r.data.items || []).filter((e) => e.status === "confirmed");
+  } catch (e) {
+    console.error("Calendar list error:", e?.response?.data || e?.message || e);
+    return send(number, reply(lang).listError());
+  }
+
+  await send(
+    number,
+    reply(lang).listEvents({
+      startMs,
+      endMs,
+      events: items.map(toListItem),
+      capped: items.length >= 50,
+    })
+  );
+}
+
+// End-of-day (23:59:59.999) for the calendar TZ, in ms. São Paulo is a fixed -03:00
+// offset (Brazil has no DST), matching the -03:00 used throughout this skill.
+function endOfLocalDay(ms) {
+  const [y, m, d] = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CAL_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })
+    .format(new Date(ms))
+    .split("-");
+  return new Date(`${y}-${m}-${d}T23:59:59.999-03:00`).getTime();
+}
+
+// Flatten a Google event into the locale-neutral shape the reply renderers need.
+// All-day events carry a date (no dateTime); timed events carry start/end instants.
+function toListItem(e) {
+  const startIso = e.start?.dateTime || null;
+  const endIso = e.end?.dateTime || null;
+  const allDay = !startIso && !!e.start?.date;
+  const dayMs = allDay
+    ? new Date(`${e.start.date}T00:00:00-03:00`).getTime()
+    : startIso
+    ? new Date(startIso).getTime()
+    : null;
+  const durationMin =
+    startIso && endIso ? Math.round((new Date(endIso) - new Date(startIso)) / 60000) : null;
+  const emails = (e.attendees || []).map((a) => a.email).filter(Boolean);
+  return { allDay, startIso, dayMs, title: e.summary || "", emails, durationMin };
 }
