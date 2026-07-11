@@ -26,9 +26,10 @@ AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
 Two skills exist today:
-- `calendar_action` — **creates** and **cancels/deletes** Google Calendar events
-  (edit/reschedule planned; see `New Features Plans/calendar-actions.md`). Cancel is confirm-first: the
-  owner just types `yes`.
+- `calendar_action` — **creates**, **edits/reschedules**, and **cancels/deletes** Google
+  Calendar events. Cancel is confirm-first (the owner just types `yes`); edit applies a
+  reply-driven change (move/relength/rename/add-remove attendee) and clarifies when
+  ambiguous. See `New Features Plans/calendar-actions.md`.
 - `transcribe_audio` — reply to a voice message + `@brain transcribe`; downloads the
   audio from WhatsApp and transcribes it via AssemblyAI.
 
@@ -350,6 +351,18 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — calendar edit/reschedule, Phase B (DEPLOYED, awaiting live test).** Reply
+  to an event's invite with a change and `@brain` — "move it to 4pm", "make it 30 min",
+  "add carlos@x.com", "remove ana@x.com", "rename to Kickoff". `interpret` gains
+  `action:"edit"` (classify only); a focused pass (`interpretEdit` / `buildEditSystem` /
+  `EDIT_SCHEMA`) reads the request against the event's real state and returns a structured
+  patch or a `clarify` question. `applyEdit` builds a minimal `events.patch({sendUpdates:
+  "all"})`, carrying current start/duration for correlated time fields and merging
+  attendees; ambiguous asks open an `await_clarification` session (`awaitFrom:"owner"`)
+  resumed by `resumeEdit`. Not confirm-first (edit isn't destructive). Shipped to
+  production the same day (`git pull` + restart). **Not yet marked done** — pending a live
+  test. Docs: `2. Skills/1. Calendar Actions/SKILL.md`,
+  `New Features Plans/calendar-actions.md`.
 - **2026-07-11 — feature-request skill (DEPLOYED).** New `feature_request`
   skill (`2. Skills/4. Feature Requests/`): the owner messages himself a feature idea
   (`@brain I have a feature idea…`); the brain becomes **stateful and interviews him** —

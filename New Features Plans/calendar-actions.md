@@ -7,7 +7,7 @@ skill contract) and [ARCHITECTURE.md](../ARCHITECTURE.md) (the end-to-end flow).
 
 ## Status snapshot (as of 2026-07-11)
 
-Done and in the codebase:
+Done and live in production:
 - `calendar_action` skill: **create** and **cancel/delete** events.
 - **Stateful conversation layer** (Redis sessions): a flow starts on `@brain`, then
   continues without the tag; the brain uses the LLM to detect the awaited answer and
@@ -23,13 +23,17 @@ Done and in the codebase:
   sessions, `reply(lang)`, and `localizeDate`.
 - Message polish: `[AI Brain]:` header, `SECRETARY_TAG` single source, clean invite text.
 
-Remaining: **edit/reschedule (Phase B)** — not yet built (no `handleEdit`; the
-`CAL_SCHEMA` action enum is `create | delete | other`, no `edit`).
+- **Phase B** (edit/reschedule): implemented and **deployed 2026-07-11** — reply to an
+  invite to move / relength / rename / add-remove-attendee, with a clarify path for
+  ambiguous asks. **Awaiting live-test confirmation before being marked done.**
 
-**Deploy status:** Phase C, structured outputs, and the multilingual layer are all
-committed; whether they're running on the droplet still needs a production check
-(`git log` on the droplet + a restart if it's behind). The manifest already advertises
-"edit/reschedule," which oversells until Phase B lands.
+Remaining after Phase B verifies: the smaller backlog (conflict/availability check on
+create, read/query events, recurring events) — none started.
+
+**Deploy status:** ✅ **all live in production.** The multilingual layer shipped
+2026-07-11 (`git pull` + restart), and since deploy pulls the whole history, everything
+committed before it — Phase C and structured outputs — is running too. The manifest
+already advertises "edit/reschedule," which oversells until Phase B lands.
 
 ---
 
@@ -159,28 +163,41 @@ add, but the confirm step already gives the human that final check for free.
 
 ---
 
-## Phase B — Edit / reschedule via reply
+## Phase B — Edit / reschedule via reply (IMPLEMENTED — deployed 2026-07-11, awaiting live test)
 
 - **Scope:** reply to an event's calendar link with a change ("move to 4pm",
-  "make it 30 min", "add carlos@x.com", "rename to Kickoff"); apply it, asking for
-  clarification when ambiguous.
-- **Files:** `prompt.js` (interpret returns `action:"edit"` + a `changes` object and a
-  `clarify` field), `skill.js` (`handleEdit`: resolve the event id from the quoted
-  link via the existing `resolveEventId`; `events.get` current state; build a patch;
-  `events.patch({ sendUpdates:"all" })`; if `clarify` is set, open an
-  `await_clarification` session — `awaitFrom:"owner"` — and resume with the answer).
-- **Reuses:** `resolveEventId`, `getEvent`, the session/clarification pattern from C2.
-- **Test:** reply to an invite with "@brain move it to 4pm" → patched + attendees
-  notified; "add carlos@x.com" → added; ambiguous "move it earlier" → asks for the
-  time, then applies the plain reply.
+  "make it 30 min", "add carlos@x.com", "remove ana@x.com", "rename to Kickoff"); apply it,
+  asking for clarification when ambiguous.
+- **As built** (differs slightly from the original sketch below): `interpret` gains
+  `action:"edit"` and only **classifies** it (the enum is now
+  `create | delete | edit | other`). The change itself is pulled by a **focused second
+  pass** — `interpretEdit` / `buildEditSystem` / `EDIT_SCHEMA` — that reads the request
+  against the event's *real current state* (`eventForLLM`) and returns a structured patch
+  (`new_start_iso`, `new_duration_min`, `new_title`, `new_summary`, `add_emails[]`,
+  `remove_emails[]`, `clarify`). This mirrors the create resolver rather than stuffing a
+  `changes` object into the broad extraction — same "focused gap-filler" pattern as C2/C3.
+- **`handleEdit`:** `resolveEventId(quoted.calendarLink)` → `getEvent` (must be
+  `confirmed`) → `interpretEdit`. A concrete change → **`applyEdit`** builds a minimal
+  patch (carrying current start/duration for the correlated time fields; merges attendees
+  with case-insensitive remove + dedup add) → `events.patch({ sendUpdates:"all" })` →
+  confirm from the returned event. Ambiguous (`clarify` set, no concrete change) → open an
+  `await_clarification` session (`awaitFrom:"owner"`, holds only the `eventId`).
+- **`resumeEdit`:** re-`getEvent` (fresh) + re-run `interpretEdit` on the owner's answer;
+  apply once it resolves, else stay silent (chatter/still-ambiguous) until answered or the
+  10-min TTL. **Not confirm-first** — an edit isn't destructive, so a clear change applies
+  immediately (unlike delete).
+- **Reuses:** `resolveEventId`, `getEvent`, the session/continuation pattern; adds
+  `patchEvent`.
 - **Done when:** reschedule / relength / add-remove attendee / rename all work;
-  ambiguous requests clarify instead of guessing.
+  ambiguous requests clarify instead of guessing. ⏳ **Pending Marcelo's live-test
+  confirmation** before this is checked off.
 
 ---
 
 ## Suggested order
-C1 + create-confirm ✅ → C2/C3 email-chase ✅ (both in the codebase) → **Phase B (edit)**
-is what's next. Each step: implement → deploy → test → next.
+C1 + create-confirm ✅ → C2/C3 email-chase ✅ → Phase B (edit) ✅ built + deployed
+(⏳ awaiting live test) → next: the smaller backlog (conflict-check on create, read/query
+events, recurring). Each step: implement → deploy → test → next.
 
 ## Prompt-quality pass (IMPLEMENTED — in codebase)
 Reviewed the four JSON-producing prompts. Applied:
