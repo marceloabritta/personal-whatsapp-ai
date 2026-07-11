@@ -25,14 +25,19 @@ Choosing "action":
   "confirm", "go ahead", "do it", "yes cancel it").
 - false otherwise (e.g. the first "cancel this meeting" request).
 
-For action="create", also fill these (leave them empty/null for delete/other):
+For action="create", fill these (for action="delete", ALSO fill participants and start_iso — see below):
 - participants = ALL the people who will be in the meeting, BESIDES ${OWNER_NAME}. Use the context: if ${OWNER_NAME} talks to X about scheduling a meeting with Y, decide from context who will actually attend (it may be only Y, or X and Y). Include each person's name.
 - For each participant, include the email if it appears in the conversation; otherwise email=null.
 - You will receive the name of the contact ${OWNER_NAME} is currently talking to; use it when it makes sense.
 - start_iso in ISO 8601 with the -03:00 offset; convert relative dates using the current date/time provided.
 - duration_min = minutes if stated; otherwise null.
 - "missing": include "start_iso" if there is no date/time; include "email" if NO participant has an email. Only these two values.
-- "summary": a short description/agenda of the meeting.`;
+- "summary": a short description/agenda of the meeting.
+
+For action="delete", also identify WHICH event to cancel so it can be matched on the calendar (the decoded link is only one signal):
+- participants: the people the event is WITH — read them (and their emails) from the quoted invite message and the conversation. Include emails whenever they appear (the invite text usually lists them).
+- start_iso: the event's date/time, taken from the quoted invite or the conversation, in ISO 8601 with -03:00.
+- Leave "missing" empty for delete (do not block a cancel on missing fields); still fill "summary" with a short note of what is being cancelled.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----

@@ -42,6 +42,11 @@ function calId(env) {
 
 async function createEvent(env, { title, emails, start_iso, end_iso, summary }) {
   const cal = calendarClient(env);
+  // Idempotency: repeated "schedule this" (e.g. while testing) used to stack up
+  // identical events, which then made "cancel this" leave siblings behind. If an
+  // identical confirmed event already exists, reuse it instead of duplicating.
+  const existing = await findConfirmedDuplicates(env, { title, startIso: start_iso });
+  if (existing.length) return { ...existing[0], reused: true };
   const r = await cal.events.insert({
     calendarId: calId(env),
     sendUpdates: "all", // fires the invite email to the participants
@@ -62,13 +67,122 @@ async function getEvent(env, eventId) {
   return r.data;
 }
 
-async function deleteEvent(env, eventId) {
+// Find CONFIRMED events that are the same meeting: identical title and the exact
+// same start instant. Used to (a) dedupe on create and (b) sweep every copy on
+// delete, so cancelling a meeting doesn't leave duplicate rows behind.
+async function findConfirmedDuplicates(env, { title, startIso, excludeId }) {
+  if (!startIso) return [];
   const cal = calendarClient(env);
-  await cal.events.delete({
+  const start = new Date(startIso).getTime();
+  // Narrow window around the start instant to bound the query.
+  const timeMin = new Date(start - 60000).toISOString();
+  const timeMax = new Date(start + 60000).toISOString();
+  const r = await cal.events.list({
     calendarId: calId(env),
-    eventId,
-    sendUpdates: "all", // notify attendees of the cancellation
+    timeMin,
+    timeMax,
+    singleEvents: true,
+    showDeleted: false,
+    maxResults: 50,
   });
+  return (r.data.items || []).filter(
+    (e) =>
+      e.status === "confirmed" &&
+      e.summary === title &&
+      e.start?.dateTime &&
+      new Date(e.start.dateTime).getTime() === start &&
+      e.id !== excludeId
+  );
+}
+
+// Identify which real calendar event(s) a cancel request targets, by MATCHING the
+// details captured from the conversation against the calendar — not by trusting a
+// decoded link alone. Signals, per candidate:
+//   +100  the event id decoded from the replied-to link (strong, explicit)
+//   + 40  same start instant as the captured date/time
+//   + 30  an attendee email overlaps a captured participant email
+// A candidate is a confident match at score >= 70, i.e. the decoded id, OR
+// start+email together. A bare same-start coincidence (40) is NOT enough to act on
+// — it could be a different meeting in the same slot. Returns confident matches
+// (deduped by id), each with its event data.
+async function matchDeletionTargets(env, { eidEventId, startIso, emails }) {
+  const cal = calendarClient(env);
+  const emailSet = new Set((emails || []).map((e) => String(e).toLowerCase()));
+  const startMs = startIso ? new Date(startIso).getTime() : null;
+  const candidates = new Map(); // id -> event
+
+  // The link the owner replied to (may be absent or a non-decodable short link).
+  if (eidEventId) {
+    try {
+      const ev = await getEvent(env, eidEventId);
+      if (ev && ev.status === "confirmed") candidates.set(ev.id, ev);
+    } catch {
+      /* stale/undecodable — rely on the captured details below */
+    }
+  }
+
+  // Everything sitting at the captured start instant.
+  if (startMs != null) {
+    const r = await cal.events.list({
+      calendarId: calId(env),
+      timeMin: new Date(startMs - 60000).toISOString(),
+      timeMax: new Date(startMs + 60000).toISOString(),
+      singleEvents: true,
+      showDeleted: false,
+      maxResults: 50,
+    });
+    for (const e of r.data.items || []) {
+      if (e.status === "confirmed" && e.start?.dateTime) candidates.set(e.id, e);
+    }
+  }
+
+  const confident = [];
+  for (const e of candidates.values()) {
+    let score = 0;
+    if (eidEventId && e.id === eidEventId) score += 100;
+    if (startMs != null && e.start?.dateTime && new Date(e.start.dateTime).getTime() === startMs)
+      score += 40;
+    const attendees = (e.attendees || []).map((a) => String(a.email || "").toLowerCase());
+    if (emailSet.size && attendees.some((a) => emailSet.has(a))) score += 30;
+    if (score >= 70) confident.push(e);
+  }
+  return confident;
+}
+
+// Cancel the matched event(s) AND, at delete time, re-inspect the calendar for
+// any confirmed duplicate of the same meeting (same title + start) and remove
+// those too. Returns how many distinct events were removed. A 410 (already
+// deleted) on any single id is treated as success — the goal is "no copy survives".
+async function cancelMeeting(env, { eventIds = [], title, startIso }) {
+  const cal = calendarClient(env);
+  const ids = new Set(eventIds.filter(Boolean));
+  try {
+    const dupes = await findConfirmedDuplicates(env, { title, startIso });
+    for (const d of dupes) ids.add(d.id);
+  } catch (e) {
+    // If the duplicate lookup fails, still delete the matched targets below.
+    console.error("Calendar dup lookup error:", e?.response?.data || e?.message || e);
+  }
+
+  let deleted = 0;
+  for (const id of ids) {
+    try {
+      await cal.events.delete({
+        calendarId: calId(env),
+        eventId: id,
+        sendUpdates: "all", // notify attendees of the cancellation
+      });
+      deleted++;
+    } catch (e) {
+      const code = e?.code || e?.response?.status;
+      if (code === 410) {
+        deleted++; // already gone — that's the outcome we wanted
+        continue;
+      }
+      throw e;
+    }
+  }
+  return deleted;
 }
 
 // A Google Calendar link carries an `eid` = base64url("<eventId> <calendarId>").
@@ -191,9 +305,12 @@ async function handleCreate(ctx, info) {
       end_iso,
       summary: info.summary,
     });
+    const header = ev.reused
+      ? "That event already exists — here it is (no duplicate created):"
+      : "Done! Invite created and sent:";
     await send(
       number,
-      `Done! Invite created and sent:\n\n- ${title}\n- ${emails.join(
+      `${header}\n\n- ${title}\n- ${emails.join(
         ", "
       )}\n- ${whenStr(info.start_iso)} (${dur} min)\n\nHere is a link for the event:\n${
         ev.htmlLink || ""
@@ -208,49 +325,58 @@ async function handleCreate(ctx, info) {
   }
 }
 
-// ---- DELETE (reply to a calendar link) -------------------------------------
-// Initial request: resolve the event from the replied-to link, then open a
-// confirmation SESSION and ask. The "yes" arrives as a continuation (a reply to
-// this message) and is handled by resumeDelete — no @brain tag needed.
+// ---- DELETE ----------------------------------------------------------------
+// Don't trust the link alone: gather what the conversation says about the event
+// (start time, participant emails) PLUS the id decoded from any replied-to link,
+// then MATCH that against the real calendar. Only open the confirmation SESSION
+// when a confident match is found. The "yes" arrives as a continuation (handled
+// by resumeDelete) — no @brain tag needed.
 async function handleDelete(ctx, info) {
   const { number, env, send, tag, quoted, sessions, remoteJid } = ctx;
 
-  const link = quoted?.calendarLink;
-  if (!link) {
+  // Identity captured from the request/conversation, plus the link as one signal.
+  const participants = Array.isArray(info?.participants) ? info.participants : [];
+  const emails = participants.map((p) => p?.email).filter(Boolean);
+  const startIso = info?.start_iso || null;
+  const eidEventId = resolveEventId(quoted?.calendarLink); // may be null
+
+  // Need at least one usable signal beyond a bare start time to be sure.
+  if (!eidEventId && !(startIso && emails.length)) {
     await send(
       number,
-      `To cancel an event, reply to the message that has its Google Calendar link and call ${tag} again.`
+      `To cancel an event, reply to its invite message, or tell me which meeting (who and when) and call ${tag} again.`
     );
     return;
   }
 
-  const eventId = resolveEventId(link);
-  if (!eventId) {
-    await send(
-      number,
-      "I couldn't read the calendar link on that message. Reply to the message that has the Google Calendar link."
-    );
-    return;
-  }
-
-  let ev;
+  let matches;
   try {
-    ev = await getEvent(env, eventId);
+    matches = await matchDeletionTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
-    console.error("Calendar get error:", e?.response?.data || e?.message || e);
+    console.error("Calendar match error:", e?.response?.data || e?.message || e);
+    await send(number, "I hit an error checking the calendar. Try again?");
+    return;
+  }
+
+  if (!matches.length) {
     await send(
       number,
-      "I couldn't find that event — it may already be cancelled or gone."
+      "I couldn't find a matching event — it may already be cancelled, or I'm not sure which one you mean. Reply to its invite message and try again."
     );
     return;
   }
 
-  const title = ev.summary || "(untitled)";
-  const when = whenStr(ev.start?.dateTime);
+  // Confident matches of the same meeting (dupes included). Describe them from the
+  // first match; the confirm-time sweep re-checks the calendar and removes any copy.
+  const primary = matches[0];
+  const title = primary.summary || "(untitled)";
+  const start = primary.start?.dateTime || startIso || null;
+  const when = whenStr(primary.start?.dateTime || startIso);
+  const ids = matches.map((e) => e.id);
+  const countNote = ids.length > 1 ? `\n- (${ids.length} matching copies)` : "";
 
-  // Confirm-first: remember the event and ask. No link needed in the message —
-  // the session holds the eventId. The owner can just type "yes"/"no" (no reply,
-  // no tag); the brain watches for it and ignores unrelated chatter.
+  // Confirm-first: remember the matched ids + identity and ask. The owner can just
+  // type "yes"/"no" (no reply, no tag); the brain watches and ignores chatter.
   await sessions.set(
     remoteJid,
     {
@@ -258,13 +384,13 @@ async function handleDelete(ctx, info) {
       intent: "delete",
       stage: "await_confirmation",
       awaitFrom: "owner", // only the owner confirms their own cancellation
-      data: { eventId, title, when },
+      data: { ids, title, when, start },
     },
     600 // 10 min window to confirm
   );
   await send(
     number,
-    `Confirm the cancelation of this event?\n- ${title}\n- ${when}\n\nReply "yes" to confirm, or "no" to keep it.`
+    `Confirm the cancelation of this event?\n- ${title}\n- ${when}${countNote}\n\nReply "yes" to confirm, or "no" to keep it.`
   );
 }
 
@@ -273,7 +399,7 @@ async function handleDelete(ctx, info) {
 // stay SILENT on normal chatter (no nagging, no accidental deletes).
 async function resumeDelete(ctx, session) {
   const { number, env, send, sessions, remoteJid } = ctx;
-  const { eventId, title, when } = session.data || {};
+  const { ids, title, when, start } = session.data || {};
 
   const decision = await classifyConfirmation(ctx, {
     action: `cancel the event "${title}"${when ? ` at ${when}` : ""}`,
@@ -289,9 +415,17 @@ async function resumeDelete(ctx, session) {
 
   // decision === "confirm"
   try {
-    await deleteEvent(env, eventId);
+    const n = await cancelMeeting(env, {
+      eventIds: ids || [],
+      title,
+      startIso: start,
+    });
     await sessions.clear(remoteJid);
-    await send(number, `Cancelled "${title}" and notified the attendees.`);
+    const dupNote = n > 1 ? ` (removed ${n} copies)` : "";
+    await send(
+      number,
+      `Cancelled "${title}"${dupNote} and notified the attendees.`
+    );
   } catch (e) {
     console.error("Calendar delete error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);

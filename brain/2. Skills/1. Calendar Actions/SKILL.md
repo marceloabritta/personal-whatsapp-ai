@@ -117,24 +117,36 @@ Most-used here: `order` (the text), `quoted` (`{id,hasAudio,mediaType,text,calen
   the owner must re-send with `@brain`. Making this stateful is Phase C on the roadmap.)*
 - Else build `title = "<owner> & <names|contact|Guest>"`, `dur = duration_min || 45`,
   `end_iso = start + dur`.
-- **`createEvent(env, …)`** → **Google Calendar `events.insert`** with
-  `sendUpdates:"all"` (Google emails the invite). On success → confirmation message
-  incl. `htmlLink`. On failure → caught, error reply.
+- **`createEvent(env, …)`** is **idempotent**: it first calls
+  `findConfirmedDuplicates` (title + exact start instant). If an identical confirmed
+  event already exists it **reuses it** (returns it with `reused:true`, no insert) so
+  repeated "schedule this" can't stack up duplicates. Otherwise → **Google Calendar
+  `events.insert`** with `sendUpdates:"all"` (Google emails the invite). On success →
+  confirmation message incl. `htmlLink` (reworded when reused). On failure → caught, error reply.
 
 ### Task: DELETE — `handleDelete(ctx, info)` + `resumeDelete(ctx, session)`
-Two steps, split by the session:
+Two steps, split by the session. **The target is found by MATCHING the event's
+captured identity against the calendar — not by trusting a decoded link alone.**
+`interpret` fills `participants` (with emails) and `start_iso` for deletes too, read
+from the quoted invite + conversation.
 
 **Step 1 — `handleDelete` (the `@brain cancel` request):**
-1. Need `quoted.calendarLink` (the invite link on the replied-to message). If absent →
-   ask the owner to reply to the message with the link, and stop.
-2. **`resolveEventId(link)`** — decode the link's `eid` (`base64url("<eventId> <calId>")`)
-   → `eventId`. If undecodable → error reply, stop.
-3. **`getEvent(env, eventId)`** → **Google Calendar `events.get`** (validates it exists;
-   fetches title/time). On error → "couldn't find that event", stop.
+1. Gather identity signals: `emails` + `start_iso` from `info`, and `eidEventId =
+   resolveEventId(quoted.calendarLink)` (the link's `eid`, which may be **null** — e.g.
+   `calendar.app.google` short links carry no event id). If there's no link id **and**
+   not both a start time and an email → ask the owner to reply to the invite / say who &
+   when, and stop.
+2. **`matchDeletionTargets(env, {eidEventId, start_iso, emails})`** → lists candidates
+   (the decoded id via `events.get`, plus every confirmed event at the start instant via
+   `events.list`) and **scores** each: `+100` decoded-id, `+40` same start, `+30`
+   attendee-email overlap. Confident match = **score ≥ 70** (the id alone, or start+email
+   together). A bare same-start coincidence (40) is **not** enough. Returns all confident
+   matches (duplicates included).
+3. No confident match → "couldn't find a matching event", stop.
 4. **Becomes stateful:** `sessions.set(remoteJid, { skill:"calendar_action",
    intent:"delete", stage:"await_confirmation", awaitFrom:"owner",
-   data:{eventId,title,when} }, 600)` — **10-minute TTL**. Sends the confirm question and
-   returns (waits). No calendar write yet.
+   data:{ids,title,when,start} }, 600)` — **10-minute TTL**, `ids` = the matched event
+   ids. Sends the confirm question (notes the copy count) and returns. No calendar write yet.
 
 **Step 2 — `resumeDelete` (runs for every owner message while the session is open):**
 1. **`classifyConfirmation(ctx, {action})`** — one Claude call (`buildConfirmSystem`/
@@ -143,16 +155,18 @@ Two steps, split by the session:
    on any doubt or error.
 2. `unrelated` → **return silently** (session kept; normal chatter is ignored — no nag,
    no accidental delete). `decline` → clear session + "I'll keep it". `confirm` →
-   **`deleteEvent`** → **Google Calendar `events.delete`** with `sendUpdates:"all"`
-   (attendees get the cancellation) → clear session + "Cancelled…". Errors → clear
-   session + error reply.
+   **`cancelMeeting(env, {eventIds, title, startIso})`** → deletes each matched id **and**
+   re-inspects the calendar (`findConfirmedDuplicates`) to sweep any remaining copy of the
+   same meeting, each via **`events.delete`** with `sendUpdates:"all"`. A `410` (already
+   gone) counts as success. → clear session + "Cancelled…" (notes copies removed). Errors →
+   clear session + error reply.
 
 ### External APIs
 - **Anthropic (Claude):** `interpret` (create/delete extraction, 700 tok) and
   `classifyConfirmation` (yes/no judgment, 50 tok). Model = `ctx.model`.
-- **Google Calendar (OAuth refresh token):** `events.insert` (create),
-  `events.get` (validate before delete), `events.delete` (cancel). `sendUpdates:"all"`
-  makes Google send invite/cancellation emails.
+- **Google Calendar (OAuth refresh token):** `events.list` (dedupe on create + match/
+  sweep on delete), `events.get` (resolve a decoded link id), `events.insert` (create),
+  `events.delete` (cancel). `sendUpdates:"all"` makes Google send invite/cancellation emails.
 - **WhatsApp:** all user-facing text via `ctx.send`.
 
 ### Stateful behavior, timeouts, completion
