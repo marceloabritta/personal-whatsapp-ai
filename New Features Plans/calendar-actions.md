@@ -1,7 +1,9 @@
 # Calendar Actions — Smart Scheduling & Edit (Implementation Plan)
 
 Forward-looking plan for the calendar features still to build. The stateful
-mechanism these rely on is described in [STATEFUL_ARCHITECTURE_PLAN.md](STATEFUL_ARCHITECTURE_PLAN.md).
+mechanism these rely on is built and live; it's documented in
+[ORCHESTRATOR.md](../brain/1.%20Orchestrator/ORCHESTRATOR.md) (the gate, session shape, and
+skill contract) and [ARCHITECTURE.md](../ARCHITECTURE.md) (the end-to-end flow).
 
 ## Status snapshot (as of 2026-07-10)
 
