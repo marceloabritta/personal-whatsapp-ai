@@ -168,7 +168,7 @@ Goal: the codebase names the product uniformly as **the Secretary**, composed of
 ## Naming decisions (confirm before running)
 - **App folder:** `brain/` → **`secretary/`**. (Sub-folders `1. Orchestrator/` and `2. Skills/` already carry the right names — leave them.)
 - **Prose noun:** "the brain" → **"the secretary"**; "the brain's" → "the secretary's".
-- **Container / compose service:** `brain` → **`secretary`**. Note `EVOLUTION_INSTANCE` is *already* `secretary` — that's the WhatsApp instance, a different thing; don't collapse the two.
+- **Container / compose service:** `brain` → **`secretary`**. Note `EVOLUTION_INSTANCE` is `secretaria` — that's the WhatsApp instance, a different thing; don't collapse the two.
 - **Redis session prefix:** `brain:session:` → **`secretary:session:`** (see operational note).
 
 ## The three functional (behavior-affecting) changes — do these carefully

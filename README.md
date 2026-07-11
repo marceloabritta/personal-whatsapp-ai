@@ -85,12 +85,12 @@ Adding a skill is a drop-in: create a folder under `secretary/2. Skills/` with a
 
 1. **Bring up the stack.** Copy `evolution/` to `/opt/evolution` on the server, create `.env` from `.env.example`, and generate the two secrets with `openssl rand -hex 16` (`AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`). Then `docker compose up -d`.
 2. **Deploy the secretary.** Put the **contents of `secretary/`** in `/opt/secretary` (so `/opt/secretary/package.json`, `/opt/secretary/1. Orchestrator/`, `/opt/secretary/2. Skills/` exist). Create `/opt/secretary/.env` from `secretary/.env.example` and fill in your keys. The `secretary` service in the compose file runs `npm install && npm start`.
-3. **Link WhatsApp.** In the Evolution manager (`http://YOUR_IP:8080`), create an instance named `secretary` and scan the QR code with WhatsApp → Linked devices.
+3. **Link WhatsApp.** In the Evolution manager (`http://YOUR_IP:8080`), create an instance named `secretaria` (must match `EVOLUTION_INSTANCE`) and scan the QR code with WhatsApp → Linked devices.
 4. **Point the webhook** at the secretary for `MESSAGES_UPSERT` events:
 
    ```bash
    API_KEY=$(grep AUTHENTICATION_API_KEY /opt/evolution/.env | cut -d= -f2)
-   curl -sS -X POST http://localhost:8080/webhook/set/secretary \
+   curl -sS -X POST http://localhost:8080/webhook/set/secretaria \
      -H "Content-Type: application/json" -H "apikey: $API_KEY" \
      -d '{"webhook":{"enabled":true,"url":"http://secretary:3000/webhook","byEvents":false,"base64":false,"events":["MESSAGES_UPSERT"]}}'
    ```

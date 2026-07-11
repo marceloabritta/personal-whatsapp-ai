@@ -59,7 +59,7 @@ services:
     environment:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
-      EVOLUTION_INSTANCE: secretary
+      EVOLUTION_INSTANCE: secretaria
       # Trigger tags (comma-separated, lowercase). This is the single source of
       # truth for what starts the secretary. @brain is intentionally retired.
       SECRETARY_TAG: "@secretaria,@secretary"

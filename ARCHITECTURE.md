@@ -25,7 +25,7 @@ webhook  ->  filter (start on fromMe + @secretary, or continue an active session
 
 ### 1. Evolution → secretary (incoming webhook)
 
-Configured once via `POST /webhook/set/secretary`. On every message Evolution sends:
+Configured once via `POST /webhook/set/secretaria` (the instance name). On every message Evolution sends:
 
 ```
 POST http://secretary:3000/webhook
@@ -34,7 +34,7 @@ Body (`MESSAGES_UPSERT`), example:
 ```json
 {
   "event": "messages.upsert",
-  "instance": "secretary",
+  "instance": "secretaria",
   "data": {
     "key": { "remoteJid": "5531999...@s.whatsapp.net", "fromMe": true, "id": "3EB0..." },
     "pushName": "User",

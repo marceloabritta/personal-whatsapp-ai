@@ -283,9 +283,12 @@ change use `up -d --force-recreate`.
 Future updates once this is set up: `cd /opt/personal-whatsapp-ai && git pull` then
 `cd /opt/evolution && docker compose restart secretary`.
 
-If you keep the old instance/trigger, you skip re-linking WhatsApp and re-setting the
-webhook. If you adopt the new `secretary` instance, you must re-scan the QR and re-run
-the `/webhook/set/secretary` call (see README §Setup step 4).
+The linked WhatsApp **instance is `secretaria`** (`EVOLUTION_INSTANCE=secretaria`) and was
+deliberately kept through the de-brand — renaming an Evolution instance means re-scanning the
+QR and re-registering the webhook, so it wasn't worth it just for a name. Note the instance
+(`secretaria`) is intentionally distinct from the container/service name (`secretary`); don't
+conflate them. The webhook URL still uses the *container* hostname `http://secretary:3000/webhook`
+(re-registered on the `secretaria` instance during the container rename — see §10).
 
 ---
 
