@@ -25,7 +25,7 @@ state, shared with Evolution's cache) + per-skill external APIs (Google Calendar
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
-Four skills exist today:
+Five skills exist today:
 - `calendar_action` — **creates**, **edits/reschedules**, **cancels/deletes**, and
   **reads/lists** Google Calendar events. Create and cancel are confirm-first (the owner
   types `yes`); edit is a reply-driven change (move/relength/rename/add-remove attendee),
@@ -40,6 +40,12 @@ Four skills exist today:
   `startCreate` capability). See `New Features Plans/task-improvements.md`.
 - `feature_request` — talk through a new feature idea; the secretary interviews the owner, then
   writes a Markdown spec and sends it as a `.md` document.
+- `feedback` — **tell the secretary it made a mistake and it files itself a bug report.** Reply
+  to the wrong message with `@secretary you made a mistake here`; the complaint, the offending
+  message and the logs become a report in `secretary/improvements/`, which
+  `scripts/self-learning-pull.sh` + `/triage-failures` turn into an implementation plan. The
+  only way a **false positive** or a confidently-wrong answer ever gets caught — the code has
+  no idea it failed. Part of **self-learning** (see `ARCHITECTURE.md`).
 
 ---
 
