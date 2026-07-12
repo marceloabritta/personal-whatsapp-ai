@@ -272,8 +272,16 @@ server-side to text message types.
   like it wasn't listening. It should ask only for what is actually missing: *"Tenho amanhã —
   que horas?"*. Real, worth fixing, and **strictly separate from this bug.** File it on its own
   once the history fix is live and the behaviour can be re-observed on a correct transcript.
-- **Raising the 30-message window.** With durable history restored, 30 may prove tight for a
-  long scheduling thread. Measure before changing.
+- **Raising the 30-message window — now measured, and it IS the binding constraint.**
+  Post-deploy, the Savio chat has **35** text messages available and the failing order
+  (`@secretaria marque uma reuniao com o savio amanha`) sits **32 back from the newest** — i.e.
+  just outside the 30-message window. At `limit: 60` it is present; at `30` it is not. The fix
+  is working exactly as intended (0 → 12 inbound messages), and this specific old message has
+  simply scrolled out because the conversation continued.
+  **Before this fix, raising the window would have changed nothing** — there was no durable
+  history to widen into. Now there is, and 30 is what's left in the way. The trade is token cost
+  and latency on every router + skill call, so it is the owner's call, not an automatic bump.
+  `combine(remoteJid, hist, limit = 30)` in `lib/whatsapp.js`.
 
 ## Honest limitation
 
