@@ -396,9 +396,11 @@ the owner's testimony.
 - Reports are written **inside** `secretary/` because the container only mounts the app dir,
   and they are **gitignored** because `/opt/secretary` symlinks into the production git tree.
 
-**The loop:** `scripts/self-learning-pull.sh` (Mac → droplet over SSH; pull-based because the
-droplet's deploy key is read-only) → `Improvements/inbox/` → `/triage-failures` → a plan per
-report → owner reviews and ships.
+**The loop:** `scripts/self-learning-daily.sh` runs at 09:00 daily (launchd): it pulls the
+reports (Mac → droplet over SSH; pull-based because the droplet's deploy key is read-only) into
+`Bugs and Malfunctions/inbox/`, then runs `/triage-failures` headless, which writes a
+`Bugs and Malfunctions/bugfix-<slug>.md` plan per report and commits it. **It never pushes and
+never deploys** — `git push`/`ssh`/`docker` are denied to it. The owner reviews and ships.
 
 Self-tests: `scripts/selflearning-selftest.mjs` (capture invariants, offline) and
 `scripts/router-selftest.mjs` (that a *complaint* is filed, not executed — needs an API key).

@@ -17,7 +17,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE="secretaria-droplet"
 REMOTE_DIR="/opt/secretary/improvements"
-INBOX="$REPO/Improvements/inbox"
+INBOX="$REPO/Bugs and Malfunctions/inbox"
 
 mkdir -p "$INBOX"
 
@@ -37,5 +37,5 @@ rsync -az --ignore-existing "$REMOTE:$REMOTE_DIR/*.md" "$INBOX/"
 # Archive on the droplet ONLY after rsync succeeded (set -e guarantees we got here).
 ssh "$REMOTE" "cd $REMOTE_DIR && mkdir -p _synced && mv *.md _synced/ 2>/dev/null || true"
 
-echo "pulled $count report(s) -> Improvements/inbox/  (archived to $REMOTE_DIR/_synced/)"
+echo "pulled $count report(s) -> Bugs and Malfunctions/inbox/  (archived to $REMOTE_DIR/_synced/)"
 echo "inbox now holds $(ls -1 "$INBOX" | wc -l | tr -d ' ') report(s). Next: /triage-failures"

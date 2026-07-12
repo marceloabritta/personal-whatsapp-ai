@@ -1,0 +1,101 @@
+{
+  "cards": [
+    {
+      "id": "0dcc0fda",
+      "title": "Smoke: kanban wiring check",
+      "description": "Live-server test drive of the manager pipeline.",
+      "column": "shipped",
+      "stage": "shipped",
+      "session_id": null,
+      "gate": null,
+      "error": null,
+      "busy": false,
+      "artifacts": {
+        "SCOPE.md": "AI Coding-kanban/data/cards/0dcc0fda/SCOPE.md",
+        "PLAN.md": "AI Coding-kanban/data/cards/0dcc0fda/PLAN.md"
+      },
+      "thread": [
+        {
+          "role": "user",
+          "text": "start",
+          "ts": 1783867864.2512379
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **scoper** to map the user flow\u2026",
+          "ts": 1783867864.253624
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **critic** for a scope review \u2014 applying one round of fixes.",
+          "ts": 1783867864.856967
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **planner** to draft the implementation plan\u2026",
+          "ts": 1783867865.4595158
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **critic** for a plan review \u2014 applying one round of fixes.",
+          "ts": 1783867866.0628421
+        },
+        {
+          "role": "manager",
+          "text": "\ud83d\udccb **Plan ready for approval.** SCOPE.md and PLAN.md are written. Reply **approve** to start building, or tell me what to change.",
+          "ts": 1783867866.7041469
+        },
+        {
+          "role": "user",
+          "text": "approve",
+          "ts": 1783867866.768685
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **drift_checker** \u2014 verdict: NO MATERIAL DRIFT.",
+          "ts": 1783867866.772415
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **preflight** \u2014 verdict: GO.",
+          "ts": 1783867867.37585
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **test_writer** \u2014 tests written (failing, as expected).",
+          "ts": 1783867867.980563
+        },
+        {
+          "role": "manager",
+          "text": "Delegating to **coder** \u2014 implementation written.",
+          "ts": 1783867868.58427
+        },
+        {
+          "role": "manager",
+          "text": "Running the test suite\u2026 \u2705 all tests pass.",
+          "ts": 1783867869.186608
+        },
+        {
+          "role": "manager",
+          "text": "\ud83e\uddea **Build ready for review.** Tests are green. Reply **ship it** to release, or tell me what to fix.",
+          "ts": 1783867869.7902951
+        },
+        {
+          "role": "user",
+          "text": "ship it",
+          "ts": 1783867869.79355
+        },
+        {
+          "role": "manager",
+          "text": "\ud83d\udea2 Shipped to prod. Card closed.",
+          "ts": 1783867869.797185
+        }
+      ],
+      "created_at": 1783867864.2249548,
+      "updated_at": 1783867869.79832
+    }
+  ],
+  "order": [
+    "0dcc0fda"
+  ]
+}

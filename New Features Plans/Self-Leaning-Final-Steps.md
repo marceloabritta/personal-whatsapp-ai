@@ -73,28 +73,67 @@ local tests just work.)*
 
 ---
 
-## STEP 3 — Learn the loop (the payoff)
+## STEP 3 — ⚠️ Grant Full Disk Access to `/bin/bash`  (the daily job is BLOCKED without it)
 
-Reports pile up on the droplet. Pull them and triage whenever you feel like it — nothing is
-automatic or scheduled, by design.
+The daily job is **written, installed and loaded** — but it **cannot run yet**, and this is the
+one thing only you can fix.
 
+macOS blocks background jobs from reading `~/Library/CloudStorage` (Google Drive). The script
+works perfectly from your Terminal (Terminal has the permission); `launchd` does not:
+
+```
+getcwd: cannot access parent directories: Operation not permitted   # exit 126
+```
+
+**Fix (one minute, once):**
+
+1. **System Settings → Privacy & Security → Full Disk Access**
+2. Click **+**, press **⌘⇧G**, type `/bin/bash`, add it, and make sure its toggle is **on**.
+3. Prove it worked:
+   ```bash
+   launchctl start com.marcelo.secretary-triage
+   sleep 10 && cat ~/Library/Logs/secretary-triage.log
+   ```
+   You want to see `self-learning daily run` → `no new reports` → `Done.` — **not**
+   `Operation not permitted`.
+
+*(Granting Full Disk Access to `/bin/bash` is broad. The clean alternative is to move this repo
+out of Google Drive — git is already your backup — and repoint the plist. Your call; the repo's
+location is why the permission is needed at all.)*
+
+## STEP 4 — The loop (the payoff)
+
+**Daily, at 09:00, automatically** (`scripts/self-learning-daily.sh`, via launchd):
+
+1. pulls the secretary's failure reports off the droplet → `Bugs and Malfunctions/inbox/`
+2. **stops right there if there's nothing** — a quiet day costs you nothing, no Claude call
+3. otherwise runs `/triage-failures` headless: reads each report, investigates the codebase,
+   writes **`Bugs and Malfunctions/bugfix-<slug>.md`**, files the raw report into `_reports/`,
+   and **commits**.
+
+**It never pushes and never deploys.** `git push`, `ssh`, `docker` and `curl` are explicitly
+denied to it, so even a report containing hostile text can't talk it into shipping anything. You
+wake up to plans; you decide what ships.
+
+The plans match `Bugs and Malfunctions/bugfix-task-false-positive.md` — the one you wrote is the
+template the triage prompt points at: evidence from the logs, the real call chain, a root cause,
+what was *ruled out*, and an honest limitation.
+
+**By hand, any time:**
 ```bash
-./scripts/self-learning-pull.sh     # droplet -> Improvements/inbox/ (and archives them remotely)
+./scripts/self-learning-daily.sh          # pull + triage, same as the daily run
+./scripts/self-learning-pull.sh           # just pull
+/triage-failures                          # just triage, inside Claude Code
+tail -f ~/Library/Logs/secretary-triage.log   # what the daily job did
+launchctl unload ~/Library/LaunchAgents/com.marcelo.secretary-triage.plist   # turn it off
 ```
-Then in Claude Code:
-```
-/triage-failures
-```
-It reads each report, investigates the codebase, writes a plan to `Improvements/<date>-<slug>.md`,
-moves the raw report to `Improvements/_reports/`, and commits. **It does not push and does not
-deploy** — you review, then ship.
 
 Owner-reported files are triaged **first** and treated as ground truth. The "Auto-analysis"
 section in a report is a cheap model's *guess* — the triage prompt is told to discard it freely.
 
 ---
 
-## STEP 4 — The one habit that makes this work
+## STEP 5 — The one habit that makes this work
 
 **Report mistakes the moment you see them, and prefer replying to the wrong message.**
 
@@ -113,8 +152,8 @@ exact bad output. A bare note still works.
 - **No new env var, no API key, no OAuth scope, no dependency.** The feature adds none.
 - **No `.gitignore` work** — `secretary/improvements/*.md` is already ignored and verified on the
   droplet (this was load-bearing: `/opt/secretary` symlinks *into* the production git tree).
-- **No cron.** Triage is deliberately manual; an unattended agent with commit access was judged
-  the riskiest part of the design and buys nothing until capture is proven.
+- **No scheduling work.** The daily job is installed and loaded; it only needs the Full Disk
+  Access grant in Step 3.
 
 ---
 

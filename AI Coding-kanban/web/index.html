@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>manager-kanban</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --text:#e6e9ef; --muted:#8b93a3; --accent:#5b8cff; --accent2:#7c5bff;
+    --ok:#3fb950; --warn:#d29922; --gate:#f0883e;
+    --user:#22303f; --mgr:#1d2530; --sys:#191b22;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .mode{font-size:11px;padding:3px 8px;border-radius:20px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+  header .mode.live{color:var(--ok);border-color:#204a2b}
+  header .repo{font-size:11px;color:var(--muted);margin-left:auto;font-family:ui-monospace,monospace}
+  #conn{width:8px;height:8px;border-radius:50%;background:var(--warn)}
+  #conn.on{background:var(--ok)}
+  .board{flex:1;display:flex;gap:14px;padding:16px;overflow-x:auto;align-items:flex-start}
+  .col{flex:0 0 280px;background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;max-height:100%}
+  .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0;padding:12px 14px 8px;display:flex;justify-content:space-between}
+  .col h2 .count{background:var(--panel2);border-radius:20px;padding:0 8px;font-size:11px}
+  .col .drop{padding:6px 10px 12px;overflow-y:auto;flex:1;min-height:40px}
+  .col.dragover{outline:2px dashed var(--accent);outline-offset:-4px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 11px;margin-bottom:9px;cursor:pointer;transition:border-color .12s}
+  .card:hover{border-color:var(--accent)}
+  .card .t{font-weight:600;margin-bottom:6px}
+  .card .meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .badge{font-size:10.5px;padding:2px 7px;border-radius:6px;background:#232833;color:var(--muted);border:1px solid var(--line)}
+  .badge.gate{background:#3a2410;color:var(--gate);border-color:#5a381a}
+  .badge.busy{background:#132c1a;color:var(--ok);border-color:#204a2b}
+  .badge.err{background:#3a1414;color:#ff6b6b;border-color:#5a1f1f}
+  .add{margin:0 10px 12px;padding:8px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);
+       text-align:center;cursor:pointer;font-size:12.5px}
+  .add:hover{border-color:var(--accent);color:var(--text)}
+  /* drawer */
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(480px,92vw);background:var(--panel);
+          border-left:1px solid var(--line);transform:translateX(100%);transition:transform .18s ease;
+          display:flex;flex-direction:column;z-index:20;box-shadow:-16px 0 40px rgba(0,0,0,.35)}
+  .drawer.open{transform:translateX(0)}
+  .drawer .dh{padding:14px 16px;border-bottom:1px solid var(--line)}
+  .drawer .dh .row{display:flex;align-items:center;gap:8px}
+  .drawer .dh h3{margin:0;font-size:15px;flex:1}
+  .drawer .dh .close{cursor:pointer;color:var(--muted);font-size:20px;line-height:1;padding:2px 6px}
+  .drawer .dh .sub{color:var(--muted);font-size:12px;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .drawer .arts a{color:var(--accent);font-size:11.5px;text-decoration:none;font-family:ui-monospace,monospace}
+  .thread{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+  .msg{padding:9px 12px;border-radius:10px;max-width:92%;white-space:pre-wrap;word-wrap:break-word}
+  .msg.user{background:var(--user);align-self:flex-end;border:1px solid #2b3d4f}
+  .msg.manager{background:var(--mgr);align-self:flex-start;border:1px solid var(--line)}
+  .msg.system{background:transparent;color:var(--muted);font-size:12px;align-self:center;text-align:center;padding:2px}
+  .msg .who{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:3px}
+  .quick{display:flex;gap:6px;padding:8px 16px 0;flex-wrap:wrap}
+  .quick button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:7px;
+                 padding:5px 10px;font-size:12px;cursor:pointer}
+  .quick button:hover{border-color:var(--accent)}
+  .composer{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+  .composer textarea{flex:1;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+                      border-radius:9px;padding:9px 11px;resize:none;font:inherit;max-height:120px}
+  .composer button{background:var(--accent);color:#fff;border:0;border-radius:9px;padding:0 16px;cursor:pointer;font-weight:600}
+  .composer button:disabled{opacity:.5;cursor:default}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .18s;z-index:15}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block;animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+</style>
+</head>
+<body>
+<header>
+  <span id="conn" title="connection"></span>
+  <h1>manager-kanban</h1>
+  <span class="mode" id="mode">…</span>
+  <span class="repo" id="repo"></span>
+</header>
+<div class="board" id="board"></div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer">
+  <div class="dh">
+    <div class="row">
+      <h3 id="d-title">—</h3>
+      <span class="close" id="d-close">×</span>
+    </div>
+    <div class="sub">
+      <span id="d-stage" class="badge"></span>
+      <span id="d-busy"></span>
+      <span class="arts" id="d-arts"></span>
+    </div>
+  </div>
+  <div class="quick" id="d-quick"></div>
+  <div class="thread" id="thread"></div>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="Message the manager…"></textarea>
+    <button id="send">Send</button>
+  </div>
+</aside>
+
+<script>
+const TITLES = {
+  ideas:"Ideas", planning:"Planning", plans_ready:"Plans Ready",
+  building:"Building", build_review:"Build ready for review", shipped:"Shipped"
+};
+let COLUMNS = Object.keys(TITLES);
+let cards = [];           // latest board snapshot
+let openId = null;        // currently open card
+let openThreadTs = 0;     // last rendered msg ts (dedupe)
+let ws = null;
+
+function connect(){
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = ()=>document.getElementById('conn').classList.add('on');
+  ws.onclose = ()=>{document.getElementById('conn').classList.remove('on'); setTimeout(connect,1200);};
+  ws.onmessage = (e)=>handle(JSON.parse(e.data));
+}
+function send(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+function handle(m){
+  if(m.type==='board'){ COLUMNS=m.columns||COLUMNS; cards=m.cards; renderBoard();
+    if(openId){ const c=cards.find(x=>x.id===openId); if(c) refreshDrawerHeader(c); } }
+  else if(m.type==='card'){ if(m.id===openId) renderThread(m); }
+  else if(m.type==='message'){ if(m.card_id===openId) appendMsg(m.message); }
+}
+
+function renderBoard(){
+  const board=document.getElementById('board');
+  board.innerHTML='';
+  for(const col of COLUMNS){
+    const list=cards.filter(c=>c.column===col);
+    const el=document.createElement('div');
+    el.className='col'; el.dataset.col=col;
+    el.innerHTML=`<h2>${TITLES[col]||col}<span class="count">${list.length}</span></h2>`;
+    const drop=document.createElement('div'); drop.className='drop';
+    for(const c of list) drop.appendChild(cardEl(c));
+    el.appendChild(drop);
+    if(col===COLUMNS[0]){
+      const add=document.createElement('div'); add.className='add'; add.textContent='+ New idea';
+      add.onclick=()=>{ const t=prompt('New card title:'); if(t&&t.trim()) send({type:'create',title:t.trim()}); };
+      el.appendChild(add);
+    }
+    // drag targets
+    el.ondragover=(ev)=>{ev.preventDefault(); el.classList.add('dragover');};
+    el.ondragleave=()=>el.classList.remove('dragover');
+    el.ondrop=(ev)=>{ev.preventDefault(); el.classList.remove('dragover');
+      const id=ev.dataTransfer.getData('text/plain'); if(id) send({type:'move',card_id:id,column:col});};
+    board.appendChild(el);
+  }
+}
+
+function cardEl(c){
+  const d=document.createElement('div'); d.className='card'; d.draggable=true;
+  let badges=`<span class="badge">${c.stage||''}</span>`;
+  if(c.busy) badges+=`<span class="badge busy">working <span class="dot"></span></span>`;
+  if(c.gate) badges+=`<span class="badge gate">gate: ${c.gate.replace('_',' ')}</span>`;
+  if(c.error) badges+=`<span class="badge err">error</span>`;
+  d.innerHTML=`<div class="t">${esc(c.title)}</div><div class="meta">${badges}</div>`;
+  d.onclick=()=>openCard(c.id);
+  d.ondragstart=(ev)=>ev.dataTransfer.setData('text/plain',c.id);
+  return d;
+}
+
+function openCard(id){
+  openId=id; openThreadTs=0;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('scrim').classList.add('open');
+  const c=cards.find(x=>x.id===id); if(c) refreshDrawerHeader(c);
+  send({type:'open',card_id:id});
+}
+function closeDrawer(){ openId=null;
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('scrim').classList.remove('open'); }
+
+function refreshDrawerHeader(c){
+  document.getElementById('d-title').textContent=c.title;
+  document.getElementById('d-stage').textContent=`${TITLES[c.column]||c.column} · ${c.stage||''}`;
+  document.getElementById('d-busy').innerHTML=c.busy?'<span class="badge busy">working <span class="dot"></span></span>':(c.gate?`<span class="badge gate">awaiting you</span>`:'');
+  const arts=document.getElementById('d-arts');
+  arts.innerHTML=Object.entries(c.artifacts||{}).map(([n,p])=>`<a title="${esc(p)}">📄 ${esc(n)}</a>`).join(' ');
+  renderQuick(c);
+}
+function renderQuick(c){
+  const q=document.getElementById('d-quick'); q.innerHTML='';
+  const add=(label,text)=>{ const b=document.createElement('button'); b.textContent=label;
+    b.onclick=()=>sendMsg(text); q.appendChild(b); };
+  if(c.column==='ideas') add('▶ Start planning','start');
+  if(c.column==='plans_ready') add('✓ Approve plan','approve');
+  if(c.column==='build_review') add('🚢 Ship it','ship it');
+}
+
+function renderThread(card){
+  const t=document.getElementById('thread'); t.innerHTML=''; openThreadTs=0;
+  for(const m of (card.thread||[])) appendMsg(m);
+}
+function appendMsg(m){
+  if(m.ts && m.ts<=openThreadTs) return; if(m.ts) openThreadTs=m.ts;
+  const t=document.getElementById('thread');
+  const el=document.createElement('div'); el.className='msg '+m.role;
+  const who=m.role==='manager'?'Manager':(m.role==='user'?'You':'');
+  el.innerHTML=(who?`<div class="who">${who}</div>`:'')+fmt(m.text);
+  t.appendChild(el); t.scrollTop=t.scrollHeight;
+}
+
+function sendMsg(text){
+  if(!openId||!text.trim()) return;
+  send({type:'message',card_id:openId,text:text.trim()});
+}
+document.getElementById('send').onclick=()=>{
+  const i=document.getElementById('input'); sendMsg(i.value); i.value=''; i.style.height='auto';
+};
+document.getElementById('input').addEventListener('keydown',(e)=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('send').click();}
+});
+document.getElementById('input').addEventListener('input',(e)=>{
+  e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px';
+});
+document.getElementById('d-close').onclick=closeDrawer;
+document.getElementById('scrim').onclick=closeDrawer;
+
+function esc(s){return (s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function fmt(s){return esc(s).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+?)`/g,'<code>$1</code>');}
+
+fetch('/api/config').then(r=>r.json()).then(cfg=>{
+  const m=document.getElementById('mode');
+  m.textContent=cfg.mock?'mock mode':'live';
+  if(!cfg.mock) m.classList.add('live');
+  document.getElementById('repo').textContent=cfg.repo_dir;
+});
+connect();
+</script>
+</body>
+</html>
