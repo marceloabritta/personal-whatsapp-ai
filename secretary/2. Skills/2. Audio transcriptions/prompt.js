@@ -14,27 +14,29 @@ export const MSG = {
   en: {
     noAudio: (tag) =>
       `To transcribe, reply to the audio you want and call ${tag} again. E.g.: press and hold the audio, tap Reply and type "${tag} transcribe".`,
-    processing: "Got the audio, transcribing... ~1 min.",
     downloadFailed:
       "I couldn't download that audio from WhatsApp. It may be too old or was not saved. Try a more recent audio.",
     transcriptionFailed:
       "I downloaded the audio, but the transcription failed. Error in the log. Try again?",
     empty: "I transcribed it, but no text came out (silent or very short audio).",
-    // Wraps the final reply with the transcript (the transcript text itself is
-    // never translated — it is the audio's own words).
-    transcript: (text) => `Audio transcript:\n\n${text}`,
+    // Short audio: the transcript goes inline. (The transcript text itself is
+    // never translated — it is the audio's own words.)
+    transcript: (text) => `Here is the transcribed audio:\n\n${text}`,
+    // Long audio: the transcript ships as a .txt document; this is its caption.
+    longAudio: "The audio is long so I transcribed it onto a file. Here it is.",
   },
   pt: {
     noAudio: (tag) =>
       `Para transcrever, responda ao áudio que você quer e chame ${tag} de novo. Ex.: segure o áudio, toque em Responder e digite "${tag} transcrever".`,
-    processing: "Recebi o áudio, transcrevendo... ~1 min.",
     downloadFailed:
       "Não consegui baixar esse áudio do WhatsApp. Pode ser muito antigo ou não ter sido salvo. Tente um áudio mais recente.",
     transcriptionFailed:
       "Baixei o áudio, mas a transcrição falhou. O erro está no log. Pode tentar de novo?",
     empty:
       "Transcrevi, mas não saiu nenhum texto (áudio silencioso ou muito curto).",
-    transcript: (text) => `Transcrição do áudio:\n\n${text}`,
+    transcript: (text) => `Aqui está o áudio transcrito:\n\n${text}`,
+    longAudio:
+      "O áudio é longo, então transcrevi em um arquivo. Aqui está.",
   },
 };
 

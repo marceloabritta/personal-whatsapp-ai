@@ -40,8 +40,9 @@ export function italicizeBody(body) {
 }
 
 // A full outgoing message: bold header, blank line, italic body. `italic: false`
-// opts out of the body styling — used for the audio transcript, which is the
-// OWNER's words quoted back, not the secretary speaking.
+// opts the body out of the styling entirely — an escape hatch for a message that
+// is not the secretary's own voice. No caller needs it today (the audio transcript
+// used to, and is now italic like everything else).
 export function frame(header, body, { italic = true } = {}) {
   return `*${header}*\n\n${italic ? italicizeBody(body) : body}`;
 }

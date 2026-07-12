@@ -2,13 +2,16 @@
 //  Skill "Audio transcriptions" — LOGIC.
 //  Run by the orchestrator when the router picks "transcribe_audio".
 //  Flow: take the QUOTED (replied-to) audio -> download its base64 from
-//  Evolution -> send to AssemblyAI -> return the text over WhatsApp.
+//  Evolution -> send to AssemblyAI -> return the text over WhatsApp: inline for
+//  a short audio, as a .txt document for a long one (LONG_AUDIO_SEC).
 //
 //  Skill contract (read by the orchestrator):
 //    export const manifest = { id, description }
 //    export async function run(ctx)
 // ============================================================================
 import { msg } from "./prompt.js";
+import { headerFor } from "../../1. Orchestrator/lib/identity.js";
+import { frame } from "../../1. Orchestrator/lib/format.js";
 
 export const manifest = {
   id: "transcribe_audio",
@@ -17,6 +20,10 @@ export const manifest = {
 };
 
 const AAI_BASE = "https://api.assemblyai.com/v2";
+
+// Past this, the transcript is a wall of text in the thread — ship it as a
+// .txt attachment instead of inline.
+const LONG_AUDIO_SEC = 120;
 
 // Uploads the audio bytes to AssemblyAI and returns the upload_url.
 async function aaiUpload(apiKey, buffer) {
@@ -33,7 +40,9 @@ async function aaiUpload(apiKey, buffer) {
   return data.upload_url;
 }
 
-// Creates the transcript and polls until it completes. Returns the text.
+// Creates the transcript and polls until it completes.
+// Returns { text, durationSec } — durationSec is the audio's length as measured
+// by AssemblyAI (null if it doesn't report one), and picks the delivery format.
 async function aaiTranscribe(apiKey, uploadUrl, language) {
   const create = await fetch(`${AAI_BASE}/transcript`, {
     method: "POST",
@@ -57,11 +66,37 @@ async function aaiTranscribe(apiKey, uploadUrl, language) {
     });
     if (!poll.ok) continue;
     const data = await poll.json();
-    if (data.status === "completed") return data.text || "";
+    if (data.status === "completed")
+      return {
+        text: data.text || "",
+        durationSec: Number(data.audio_duration) || null,
+      };
     if (data.status === "error")
       throw new Error(`AAI status=error: ${data.error}`);
   }
   throw new Error("AAI timeout (transcription took too long)");
+}
+
+// Delivers a long transcript as a real, saveable .txt document. sendMedia
+// bypasses the orchestrator's send(), so the caption is framed here — same bold
+// header + italic body as every other secretary message. Returns false if the
+// send failed, and the caller then falls back to the inline transcript: a text
+// wall beats losing the transcript the owner asked for.
+async function sendTranscriptFile(ctx, text, M) {
+  const { number, evolution, lang } = ctx;
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  try {
+    return await evolution.sendMedia(number, {
+      mediatype: "document",
+      mimetype: "text/plain",
+      media: Buffer.from(text, "utf8").toString("base64"),
+      fileName: `audio-transcript-${stamp}.txt`,
+      caption: frame(headerFor(lang), M.longAudio),
+    });
+  } catch (e) {
+    console.error("Transcription/sendMedia error:", e?.message || e);
+    return false;
+  }
 }
 
 // ctx (from the orchestrator): { number, quoted, env, evolution, send }
@@ -92,20 +127,24 @@ export async function run(ctx) {
     return;
   }
 
-  await send(number, M.processing);
-
   // 2) transcribe via AssemblyAI. Prefer the detected conversation language so a
   //    PT chat transcribes in PT; fall back to the static env, then English.
+  //    No "transcribing…" ack: the transcript itself is the only message.
   try {
     const buffer = Buffer.from(base64, "base64");
     const uploadUrl = await aaiUpload(apiKey, buffer);
     const language = lang || env.ASSEMBLYAI_LANGUAGE || "en";
-    const text = await aaiTranscribe(apiKey, uploadUrl, language);
+    const { text, durationSec } = await aaiTranscribe(apiKey, uploadUrl, language);
     const clean = (text || "").trim();
-    // The transcript is the OWNER's words quoted back, not the secretary speaking —
-    // send it plain so the italics keep meaning "this is the secretary".
-    if (clean) await send(number, M.transcript(clean), { italic: false });
-    else await send(number, M.empty);
+    if (!clean) {
+      await send(number, M.empty);
+      return;
+    }
+    // 3) deliver: .txt document for a long audio, inline text for a short one.
+    //    An unknown duration reads as short — inline is the safe default.
+    if (durationSec > LONG_AUDIO_SEC && (await sendTranscriptFile(ctx, clean, M)))
+      return;
+    await send(number, M.transcript(clean));
   } catch (e) {
     console.error("Transcription/AAI error:", e?.message || e, "mime:", mimetype);
     await send(number, M.transcriptionFailed);

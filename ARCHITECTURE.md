@@ -175,8 +175,8 @@ makes the two voices visually distinct: **bold header** (`*...*`), blank line, *
 - Markers are applied **after** `localizeBody()`, so the translation model never sees them.
 
 Framing happens once, in `send()` — skills never write markup. `ctx.send(number, text, { italic:
-false })` opts a body out (used by the audio transcript, which is the owner's own words quoted
-back). Because the header now ships bolded, `isOwnMessage()` strips leading `* _ ~` before matching
+false })` opts a body out entirely; no skill needs it today (the audio transcript used to, and is
+now italic like every other reply). Because the header now ships bolded, `isOwnMessage()` strips leading `* _ ~` before matching
 — it must keep recognizing both the bold header and the unbolded ones still in chat history, or the
 bot reads its own replies as owner continuations.
 
@@ -195,9 +195,11 @@ Body: { "number": "5531999...", "mediatype": "document", "mimetype": "text/markd
 The caption carries the language-aware header (`headerFor(ctx.lang)`; media framing is the caller's job, like
 `sendText`, so it calls `frame()` itself to get the same bold-header/italic-body treatment). The **conversation** follows `ctx.lang`, but the **document body is always
 English** by design — it's destined for the owner's (English) codebase; only the caption
-localizes (see the localization note below). This is the only skill that sends a file;
-`evolution.sendMedia` was added for it (additive to `sendText`/`fetchHistory`/
-`getMediaBase64`).
+localizes (see the localization note below). `evolution.sendMedia` was added for this skill
+(additive to `sendText`/`fetchHistory`/`getMediaBase64`) and is now also used by
+`transcribe_audio`, which delivers the transcript of an audio longer than **2 minutes** as a
+`.txt` document (`mimetype: "text/plain"`) instead of a wall of inline text — same shape as
+above, same caller-frames-the-caption rule.
 
 ## Environment variables
 
