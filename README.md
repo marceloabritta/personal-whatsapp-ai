@@ -103,6 +103,20 @@ Adding a skill is a drop-in: create a folder under `secretary/2. Skills/` with a
 
 The secretary **detects the language you're writing in** (the router sets `ctx.lang`) and **replies in that same language**, system-wide across every skill. English and Portuguese (PT-BR) are maintained natively — each skill keeps its user-facing strings as a per-language `{ en, pt }` map in its own `prompt.js` (dates via `localizeDate`). Any other language is produced from the English copy by a cheap translation fallback in the orchestrator's `send()`. The reply header itself is **language-aware** — produced by `headerFor(lang)` from `OWNER_NAME` (English → `[Marcelo's AI Secretary]:`, Portuguese → `[Secretaria IA do Marcelo]:`); internal classification prompts always stay English. Audio transcription follows the detected language too, with `ASSEMBLYAI_LANGUAGE` as a fallback. See the "Localization convention" in [ARCHITECTURE.md](ARCHITECTURE.md). (Live since 2026-07-11.)
 
+## How a reply looks
+
+The secretary replies from **your own WhatsApp account**, so its messages land in the same thread as your own typing. To keep the two voices apart, every secretary message is framed the same way — **bold header**, blank line, *italic body*:
+
+> **[Marcelo's AI Secretary]:**
+>
+> _Done — event created and invites sent._
+> _- Q3 budget review_
+> _- Jul 12, 2026, 3:00 PM (45 min)_
+>
+> https://www.google.com/calendar/event?eid=…
+
+Framing happens once, in the orchestrator's `send()` (`1. Orchestrator/lib/format.js`) — skills never write markup. Links stay unstyled so they remain clickable (and so a calendar link's `eid` survives intact for reply-to-invite edits), and an audio transcript is sent plain, since that text is *your* words quoted back rather than the secretary speaking. (Live since 2026-07-11.)
+
 ## Security
 
 - The Evolution API port (`8080`) is exposed to the internet, protected only by the API key. Lock it down with a firewall (`ufw`), allowing only your own access.

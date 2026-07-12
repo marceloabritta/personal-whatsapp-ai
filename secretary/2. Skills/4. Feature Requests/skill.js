@@ -31,6 +31,7 @@ import {
   CLARIFY_SCHEMA,
 } from "./prompt.js";
 import { headerFor } from "../../1. Orchestrator/lib/identity.js";
+import { frame } from "../../1. Orchestrator/lib/format.js";
 
 export const manifest = {
   id: "feature_request",
@@ -285,9 +286,12 @@ async function finalize(ctx, draft) {
   const slug = slugify(draft.title);
   const fileName = `feature-${slug}.md`;
   const base64 = Buffer.from(md, "utf8").toString("base64");
-  const caption = `${headerFor(ctx.lang)}\n\n${reply(ctx.lang).docCaption({
-    title: draft.title || slug,
-  })}`;
+  // sendMedia bypasses the orchestrator's send(), so frame the caption here — same
+  // bold header + italic body as every other secretary message.
+  const caption = frame(
+    headerFor(ctx.lang),
+    reply(ctx.lang).docCaption({ title: draft.title || slug })
+  );
 
   let ok = false;
   try {

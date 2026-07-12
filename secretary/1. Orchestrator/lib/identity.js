@@ -39,8 +39,13 @@ const ALL_HEADERS = [...Object.values(HEADERS), ...LEGACY_HEADERS];
 // fromMe=true (same WhatsApp account as the owner), this header check is the ONLY
 // thing separating a bot message from a genuine owner message — it MUST recognize
 // every header variant or the bot can read its own reply as a continuation.
+//
+// The header goes out BOLD (`*[...]:*` — see lib/format.js), so the text starts with
+// a `*`. We strip leading WhatsApp markers before matching, which recognizes both the
+// bold header and the older unbolded ones still sitting in history / the buffer.
 export function isOwnMessage(text) {
-  return ALL_HEADERS.some((h) => text.startsWith(h));
+  const t = (text || "").replace(/^[*_~\s]+/, "");
+  return ALL_HEADERS.some((h) => t.startsWith(h));
 }
 
 // The trigger tag this message starts with (for slicing it off the order), or null.

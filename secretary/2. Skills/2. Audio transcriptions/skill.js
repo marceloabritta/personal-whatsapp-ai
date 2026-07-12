@@ -102,7 +102,10 @@ export async function run(ctx) {
     const language = lang || env.ASSEMBLYAI_LANGUAGE || "en";
     const text = await aaiTranscribe(apiKey, uploadUrl, language);
     const clean = (text || "").trim();
-    await send(number, clean ? M.transcript(clean) : M.empty);
+    // The transcript is the OWNER's words quoted back, not the secretary speaking —
+    // send it plain so the italics keep meaning "this is the secretary".
+    if (clean) await send(number, M.transcript(clean), { italic: false });
+    else await send(number, M.empty);
   } catch (e) {
     console.error("Transcription/AAI error:", e?.message || e, "mime:", mimetype);
     await send(number, M.transcriptionFailed);

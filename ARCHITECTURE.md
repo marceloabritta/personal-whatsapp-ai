@@ -155,12 +155,30 @@ GET  https://api.assemblyai.com/v2/transcript/{id}   (poll until status=complete
 ```
 POST http://api:8080/message/sendText/secretary
 apikey: <AUTHENTICATION_API_KEY>
-Body: { "number": "5531999...", "text": "[Marcelo's AI Secretary]:\n\n..." }
+Body: { "number": "5531999...", "text": "*[Marcelo's AI Secretary]:*\n\n_..._" }
 ```
 The reply header is **language-aware** — `headerFor(ctx.lang)` from `1. Orchestrator/lib/identity.js`
 stamps `[Marcelo's AI Secretary]:` (en) or `[Secretaria IA do Marcelo]:` (pt), derived from
 `OWNER_NAME`. The reply goes to the originating chat. In a group, the confirmation is visible to
 everyone (a private-reply option is on the roadmap).
+
+**Message framing (`1. Orchestrator/lib/format.js`).** Because the secretary replies from the
+owner's own WhatsApp account, its messages sit in the same thread as the owner's typing. `frame()`
+makes the two voices visually distinct: **bold header** (`*...*`), blank line, **italic body**
+(`_..._`). Three rules the implementation depends on:
+- WhatsApp italics **do not span newlines**, so the body is wrapped **line by line**, never as a
+  whole. A leading bullet/indent stays outside the markers (`- _Buy milk_`).
+- A line is left **plain** when wrapping would corrupt it: it carries a **URL** (a trailing `_` is a
+  valid base64url char and would be swallowed into a calendar link's `eid` by `findCalendarLink`,
+  silently breaking reply-to-invite edit/delete) or it already contains `_ * ~` (emails like
+  `bruno_x@…`, verbatim task titles). Plain-but-correct beats italic-but-broken.
+- Markers are applied **after** `localizeBody()`, so the translation model never sees them.
+
+Framing happens once, in `send()` — skills never write markup. `ctx.send(number, text, { italic:
+false })` opts a body out (used by the audio transcript, which is the owner's own words quoted
+back). Because the header now ships bolded, `isOwnMessage()` strips leading `* _ ~` before matching
+— it must keep recognizing both the bold header and the unbolded ones still in chat history, or the
+bot reads its own replies as owner continuations.
 
 ### 8b. skill → Evolution (send a document) — feature_request
 
@@ -172,10 +190,10 @@ POST http://api:8080/message/sendMedia/secretary
 apikey: <AUTHENTICATION_API_KEY>
 Body: { "number": "5531999...", "mediatype": "document", "mimetype": "text/markdown",
         "media": "<base64 of the .md>", "fileName": "feature-<slug>.md",
-        "caption": "[Marcelo's AI Secretary]:\n\n..." }
+        "caption": "*[Marcelo's AI Secretary]:*\n\n_..._" }
 ```
 The caption carries the language-aware header (`headerFor(ctx.lang)`; media framing is the caller's job, like
-`sendText`). The **conversation** follows `ctx.lang`, but the **document body is always
+`sendText`, so it calls `frame()` itself to get the same bold-header/italic-body treatment). The **conversation** follows `ctx.lang`, but the **document body is always
 English** by design — it's destined for the owner's (English) codebase; only the caption
 localizes (see the localization note below). This is the only skill that sends a file;
 `evolution.sendMedia` was added for it (additive to `sendText`/`fetchHistory`/

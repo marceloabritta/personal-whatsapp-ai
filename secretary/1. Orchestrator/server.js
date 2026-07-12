@@ -27,6 +27,7 @@ import {
 } from "./lib/whatsapp.js";
 import { createSessions } from "./lib/sessions.js";
 import { TAGS, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
+import { frame } from "./lib/format.js";
 import { route } from "./router/router.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -141,13 +142,15 @@ async function localizeBody(text, lang) {
   }
 }
 
-// Sends text to WhatsApp with the secretary's standard header (header + blank line).
-// `lang` drives the long-tail translation fallback; en/pt pass through unchanged.
+// Sends text to WhatsApp with the secretary's standard framing (bold header, blank
+// line, italic body — see lib/format.js). `lang` drives the long-tail translation
+// fallback; en/pt pass through unchanged. Markers are added AFTER localizeBody() so
+// the translation model never sees them (its prompt promises to preserve URLs and
+// line breaks, but says nothing about `_`/`*`). `opts.italic:false` sends a plain body.
 // Skills receive a `ctx.send` already bound to the conversation's language.
-async function send(number, text, lang = "en") {
+async function send(number, text, lang = "en", opts = {}) {
   const body = await localizeBody(text, lang);
-  const full = `${headerFor(lang)}\n\n${body}`;
-  return evolution.sendText(number, full);
+  return evolution.sendText(number, frame(headerFor(lang), body, opts));
 }
 
 // The orchestrator's OWN user-facing strings (routing/plumbing problems), en + pt.
@@ -293,7 +296,7 @@ app.post("/webhook", async (req, res) => {
     // router fills it in below. Default English. `ctx.send` reads ctx.lang lazily,
     // so setting it after routing still applies to every skill send.
     ctx.lang = (isContinuation ? session?.lang : null) || "en";
-    ctx.send = (number, text) => send(number, text, ctx.lang);
+    ctx.send = (number, text, opts) => send(number, text, ctx.lang, opts);
 
     // Cross-skill composition. `hasSkill` guards a friendly fallback; `callSkill`
     // invokes another skill's exported capability, auto-injecting THIS ctx (so the

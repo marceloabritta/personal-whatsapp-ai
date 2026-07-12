@@ -367,6 +367,25 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-11 — Bold header + italic body on every secretary message (SHIPPED, DEPLOYED).**
+  The secretary replies from the owner's own WhatsApp account, so its messages sit in the same
+  thread as the owner's typing, in the same plain text. Now every outgoing message is framed
+  **bold header** + blank line + *italic body*, so the two voices are visually distinct. New
+  `1. Orchestrator/lib/format.js` exports `frame(header, body, {italic})`; `send()` applies it
+  once, at the send boundary — **no skill reply string changed** (this is presentation only).
+  Three constraints drove the design: (1) WhatsApp italics **do not span newlines**, so the body
+  is wrapped **line by line**, with a leading bullet/indent kept outside the markers
+  (`- _Buy milk_`); (2) lines carrying a **URL** or an existing `_ * ~` are left **plain** —
+  a trailing `_` is a valid base64url char and would be swallowed into a calendar link's `eid`
+  by `findCalendarLink`, silently breaking the reply-to-invite edit/delete flow (emails like
+  `bruno_x@…` and verbatim task titles are the other carve-out); (3) markers are applied **after**
+  `localizeBody()`, so the translation model never sees them. `isOwnMessage()` now strips leading
+  `* _ ~` before matching — the bolded header would otherwise fail its `startsWith` check and the
+  bot would read its **own** replies as owner continuations (the one change that could loop it);
+  it still recognizes the unbolded headers sitting in chat history. Feature Requests' `sendMedia`
+  caption bypasses `send()`, so it calls `frame()` itself. The audio **transcript** is sent with
+  `{ italic: false }` — that text is the owner's own words quoted back, not the secretary
+  speaking. Plan archived to `Shipped Features/2026-07-11 - feature-italic-secretary-messages.md`.
 - **2026-07-11 — Calendar read/list action SHIPPED (DEPLOYED).** Added a fourth, **read-only**
   action to `calendar_action`: the owner can ask what's scheduled ("what's on my calendar
   tomorrow?", "do I have anything Friday afternoon?", "what's my next meeting?") and get an
