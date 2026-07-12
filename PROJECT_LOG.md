@@ -379,7 +379,10 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
-- **2026-07-12 — Self-learning: the secretary reports its own failures (BUILT, not yet deployed).**
+- **2026-07-12 — Self-learning: the secretary reports its own failures (SHIPPED, DEPLOYED).**
+  Deployed 2026-07-12 (git pull + `docker compose restart secretary`; boot clean, Redis connected,
+  all **five** skills loaded incl. `feedback`). Live behaviour still to be confirmed in the chat —
+  see the checklist below.
   New `1. Orchestrator/lib/logbuffer.js` (redacted in-memory log ring) + `lib/selflearning.js`
   (`captureFailure` → a Markdown report in `secretary/improvements/`), wired into the three catch
   blocks, the `notUnderstood` branch, and a soft-failure scan in the `ctx.send` wrapper.
