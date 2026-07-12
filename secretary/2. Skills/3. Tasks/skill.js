@@ -185,7 +185,7 @@ export async function run(ctx) {
     open = await fetchOpen(ctx);
   } catch (e) {
     console.error("Tasks list error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).failed());
+    await ctx.sendFailure(number, reply(ctx.lang).failed());
     return;
   }
 
@@ -194,11 +194,11 @@ export async function run(ctx) {
     plan = await planTaskOps(ctx, open);
   } catch (e) {
     console.error("Tasks/plan error:", e);
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
   if (!plan) {
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
 
@@ -308,7 +308,7 @@ async function dispatchPlan(ctx, plan, open, { recent, fromEngaged }) {
       )
     );
   if (created?.calendarUnavailable)
-    await send(number, reply(lang).calendarUnavailable());
+    await ctx.sendFailure(number, reply(lang).calendarUnavailable());
   if (created?.thirdPartyCapped)
     await send(number, reply(lang).thirdPartyCapped(created.otherCount));
   if (creates.length && !made.length && !created?.handedToCalendar && !created?.calendarUnavailable)
@@ -369,7 +369,7 @@ async function dispatchPlan(ctx, plan, open, { recent, fromEngaged }) {
     if (plan.owner_done) await sessions.clear(remoteJid); // clean close
     return; // otherwise a silent no-op inside the window
   }
-  await send(number, reply(lang).noAction());
+  await ctx.sendFailure(number, reply(lang).noAction());
 }
 
 // ---- CREATE ------------------------------------------------------------------
@@ -502,10 +502,16 @@ async function resumeConfirm(ctx, session) {
         failed.push(m);
       }
     }
-    await send(
-      number,
-      reply(lang).mutationsApplied(confirmView(done, lang), confirmView(failed, lang))
+    // PARTIAL failure: some to-dos went through, some didn't ("Couldn't do these: …").
+    // The message is mostly a success, so it reads like one — but every item in `failed`
+    // is a real failure the owner asked for and did not get. Route it through sendFailure
+    // whenever anything failed, so a batch that half-worked still files a report.
+    const applied = reply(lang).mutationsApplied(
+      confirmView(done, lang),
+      confirmView(failed, lang)
     );
+    if (failed.length) await ctx.sendFailure(number, applied);
+    else await send(number, applied);
     // Keep the window open (tag-free) with edited items as `recent`, so a follow-up
     // "actually make it Tuesday" amends without another confirm.
     const armRecent = done
@@ -622,7 +628,7 @@ async function handleList(ctx) {
     open = await fetchOpen(ctx);
   } catch (e) {
     console.error("Tasks list error:", e?.response?.data || e?.message || e);
-    await send(number, reply(lang).failed());
+    await ctx.sendFailure(number, reply(lang).failed());
     return;
   }
   if (!open.length) {

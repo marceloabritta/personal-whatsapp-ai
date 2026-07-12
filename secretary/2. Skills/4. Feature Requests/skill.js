@@ -134,11 +134,11 @@ async function startFeatureRequest(ctx) {
     out = await clarifyTurn(ctx, EMPTY_DRAFT);
   } catch (e) {
     console.error("feature_request/clarify error:", e?.message || e);
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
   if (!out) {
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
   if (out.status === "cancel") {
@@ -167,7 +167,7 @@ async function resumeClarify(ctx, session) {
     // Unparseable turn (e.g. a truncated reply). Don't strand the owner in silence —
     // the prior draft is still in the session, so tell them and keep the window open so
     // "write it up" retries the finalize. (readReply already logged the cause.)
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
 
@@ -212,7 +212,7 @@ async function finalize(ctx, draft) {
   }
   if (!md) {
     // Keep the session so the owner can retry the write without re-speccing.
-    await send(number, reply(ctx.lang).renderError());
+    await ctx.sendFailure(number, reply(ctx.lang).renderError());
     return;
   }
 
@@ -241,7 +241,7 @@ async function finalize(ctx, draft) {
   }
 
   await sessions.clear(remoteJid);
-  if (!ok) await send(number, reply(ctx.lang).sendFailed());
+  if (!ok) await ctx.sendFailure(number, reply(ctx.lang).sendFailed());
 }
 
 // ---- Document generation (ALWAYS English; returns markdown PROSE, not JSON) ---

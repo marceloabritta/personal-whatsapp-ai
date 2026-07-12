@@ -82,12 +82,14 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, quoted, hasQuotedAudio,
-    catalog, env, evolution, send, sessions, session, lang, hasSkill, callSkill`.
+    catalog, env, evolution, send, sendFailure, sessions, session, lang, hasSkill,
+    callSkill, _turn`.
     `session` is set **only** on a continuation (else `null`). `ctx.lang` is the
     conversation language — from the session on a continuation, from the router on a fresh
     command (set after `route()` returns), default `"en"`; `ctx.send` is bound to it (see
     the localizing `send` above). `ctx.hasSkill`/`ctx.callSkill` are the capability-registry
-    helpers (see "Composing skills" below).
+    helpers (see "Composing skills" below). `_turn` is the self-learning per-turn flag (see
+    below).
 12. **Dispatch:**
     - **Continuation** → **bypass the router**, run `SKILLS[session.skill](ctx)` directly
       (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
@@ -96,6 +98,52 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
       **`route(ctx)`** (one Claude call via the router) → `tasks[]`, validated against the
       catalog. Empty/unknown → "I didn't understand… Available skills: …". Otherwise run
       each `SKILLS[task](ctx)` in order; per-skill errors → "I failed to run that task."
+
+### Self-learning — the orchestrator's failure capture
+`installLogBuffer()` (`lib/logbuffer.js`) runs **first**, above everything that logs: it wraps
+`console` so stdout is unchanged (`docker logs` still works) while every line also enters a
+redacted, truncated 500-entry ring the secretary can read back about itself.
+
+`fireCapture(ctx, info)` → `captureFailure` (`lib/selflearning.js`) writes a Markdown report to
+`secretary/improvements/`. It's wired into **four** places, always **after** the user has
+already received their error reply:
+
+| Where | Phase |
+|---|---|
+| the continuation catch | `throw:continuation` |
+| the router catch | `throw:router` |
+| the per-skill catch | `throw:skill` |
+| the `notUnderstood` branch | `unrouted` (a *missing capability*, not a bug — the highest-signal machine report) |
+
+**Plus `ctx.sendFailure(number, text)` — the `soft` phase, and the one that fires most.** Most
+failures never reach a catch block: the skill understands the order, fails to execute it, and
+*says so* ("I understood the request but failed to create it in Google", "I hit an error while
+thinking", "Something went wrong with your tasks"). `sendFailure` sends exactly like `ctx.send`
+and **always** files a report; 29 call sites across the four skills use it. `ctx._turn.skill`
+(set before each dispatch) names the culprit skill in that report.
+
+**A malfunction is exactly three things:** a code error, a soft landing of an *uncompleted
+task* (declared via `sendFailure`), and the owner reporting a mistake. Everything else is
+**guidance** — "reply to the audio you want", "which task did you mean?", "your list is empty" —
+and guidance is the secretary *working*, so it stays on plain `ctx.send` and files nothing.
+
+**`ctx.send` is never scanned.** No regex, no sniffing. Text can't be classified by keyword:
+the version that tried missed "I hit an error while thinking" (no failure word in it) *and*
+flagged "I couldn't find: X. Which one did you mean?" — a question — as a defect. Only the
+skill knows which it just sent. A **lint** in `scripts/selflearning-selftest.mjs` catches a
+skill that forgets, at test time, with the file and line.
+
+The orchestrator's own `ORCH_MSG` replies go through the **bare `send()`**, not `ctx.send` —
+they're already covered by the catch block or the `unrouted` branch that produced them.
+
+The fifth trigger, **`reported`**, is the only one a human pulls: the `feedback` skill, when the
+owner says the secretary got something wrong.
+
+**`ctx._turn` is an object, not a boolean, and that is load-bearing.** It caps capture at one
+report per webhook turn — but `ctx.callSkill` hands the callee `{ ...ctx, _skillDepth }`, a
+**spread**. A boolean flag set by a callee would mutate a *copy* and never be seen by the
+caller, so the flag has to live on a shared object whose *reference* the spread copies.
+`scripts/selflearning-selftest.mjs` pins this so a refactor can't quietly reintroduce it.
 
 ### `send(number, text)` — the localizing choke point
 Prepends the language-aware header (`headerFor(ctx.lang)` from `lib/identity.js`) + a blank

@@ -41,6 +41,17 @@ Rules:
 - If the message is a REPLY to a message that contains a Google Calendar link, it
   is almost certainly a calendar action (edit or delete/cancel) — including a bare
   "yes"/"confirm" reply confirming a cancellation. Route it to the calendar task.
+- COMPLAINTS ARE NOT COMMANDS. If ${ownerName} is telling you that you ALREADY DID something
+  wrong — past tense, blaming the secretary ("you made a mistake", "that's wrong", "you got
+  the time wrong", "você errou") — route it to the FEEDBACK task, **even when the subject is
+  a calendar event or a task**. The subject matter is not the intent: "you scheduled that at
+  the wrong time" is a BUG REPORT, not a request to schedule anything. Filing it as feedback
+  is how the secretary learns; executing it as a fresh order is a second mistake on top of
+  the first.
+- He can want BOTH — to report the mistake AND to have it fixed now ("you got the time
+  wrong, move it to 5pm"). Then return BOTH tasks, feedback first: ["feedback",
+  "calendar_action"]. Reporting a mistake never fixes anything on its own, and asking for the
+  fix is just an ordinary second order.
 - "lang": the language ${ownerName} is writing in, from the order + recent conversation.
   A lowercase ISO 639-1 code — "en" for English, "pt" for Portuguese, or the matching
   code for any other language. Judge by ${ownerName}'s OWN words (the owner's side of

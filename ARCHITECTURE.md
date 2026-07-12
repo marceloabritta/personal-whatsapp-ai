@@ -229,6 +229,18 @@ export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — se
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
 
+**Send failures with `ctx.sendFailure`, not `ctx.send`.** A reply that means *"you asked me to
+do something and I did not do it"* — an API error, "something went wrong", a batch that only
+half-applied — goes through `ctx.sendFailure(number, text)`. It sends exactly like `ctx.send`
+**and** files a self-learning failure report (see "Self-learning" below), which is how the bug
+reaches the owner instead of dying in the chat.
+
+Everything else stays on `ctx.send`: successes, confirmations, **questions** ("which task did
+you mean?"), and empty-but-true answers ("your list is empty"). Asking for more information is
+not failing. The test is not whether the message *sounds* apologetic — it's whether the owner
+asked for something and didn't get it. A lint in `scripts/selflearning-selftest.mjs` fails the
+test run if a reply named `*Error`/`*Failed`/`noAction` is sent with plain `send()`.
+
 ### The shared lib (`1. Orchestrator/lib/`) — don't re-implement these
 
 Skills import these directly (`../../1. Orchestrator/lib/<x>.js`). Each one existed as a
@@ -242,6 +254,8 @@ still live in the others. Reach for them before writing your own:
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
 | `identity.js` | `headerFor`, `TAGS`, `isOwnMessage`, `matchedTag` | The trigger tags and the reply header. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
+| `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
+| `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |
 
 Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`,
 `hasSkill`/`callSkill`) arrives on **`ctx`** — see `server.js`. If you find yourself editing
@@ -293,3 +307,98 @@ document* to a fixed language even though its chat replies follow `ctx.lang`.
 owner's English codebase) while the clarifying conversation and the file's caption still
 follow `ctx.lang`. The rule stands for user-facing chat prose; a saved artifact can opt
 out.
+
+## Self-learning — how the secretary reports its own failures
+
+The secretary writes **failure reports about itself** to `secretary/improvements/`; the Mac
+pulls them and turns each into an implementation plan. The capture layer is
+`1. Orchestrator/lib/{logbuffer,selflearning}.js` — **infrastructure, not a skill** (every
+loaded skill lands in `CATALOG`, the router's menu, so a skill the router must never pick is
+a misroute hazard with no upside).
+
+**Six triggers — five the machine sees, one only the owner can.**
+
+| Trigger | Fires when | Wired at |
+|---|---|---|
+| `throw:continuation` / `throw:router` / `throw:skill` | a hard exception | the three catch blocks in `server.js` |
+| `unrouted` | the router understood nothing — a **missing capability**, not a bug | the `notUnderstood` branch |
+| `soft` | **a skill says it failed without throwing** — the biggest category by far | **`ctx.sendFailure()`**, explicitly, at ~29 call sites across the skills |
+| **`reported`** | **the owner says the secretary was wrong** | the **`feedback` skill** |
+
+### A malfunction is exactly three things
+
+1. **A code error** — something threw (`throw:*`).
+2. **A soft landing of an uncompleted task** — the owner asked for something and did not get
+   it. **Declared by the skill** with `ctx.sendFailure` (`soft`). This also covers *"I didn't
+   understand"*: the `unrouted` branch and the skills' own `noAction` ("I didn't identify a
+   calendar action"). It reads like guidance, but he asked and got nothing — and it is the
+   clearest signal the system has of a **missing capability**, which is what tells you what to
+   build next. **Deliberate call, 2026-07-12: keep filing these.**
+3. **The owner saying it got something wrong** (`reported`).
+
+**Everything else the secretary says is GUIDANCE, and guidance is not a malfunction.**
+"Reply to the audio you want transcribed." "Which task did you mean?" "What should the task
+say?" "Your list is empty." "Nothing on your calendar." A secretary asking a question, or
+truthfully reporting an empty result, is a secretary **working** — filing that as a defect
+would bury the real ones.
+
+**The test is not whether the message sounds apologetic. It is whether the owner asked for
+something and didn't get it.** "I couldn't find: buy milk. *Which one did you mean?*" sounds
+like a failure and is a question. "Done — but couldn't do these: call Ana" sounds like a
+success and is a failure. Read the outcome, not the tone.
+
+**#2 is the common case, and it is DECLARED, never inferred.** Most failures never reach a
+catch block: *"I understood the request but failed to create it in Google."* *"I hit an error
+while thinking."* *"Something went wrong with your tasks."* So the skill says which is which,
+at the call site:
+
+```js
+await ctx.sendFailure(number, reply(ctx.lang).createGoogleError());  // sends AND files a report
+await ctx.send(number, reply(ctx.lang).whichOne(ref));               // a question — not a failure
+```
+
+**There is no runtime text scanning, by design.** An earlier version regex-scanned every
+outgoing message and was wrong in *both* directions: it **missed** half the real failures
+(`thinkingError` — "I hit an error while thinking" — contains no failure word) and it **fired
+on guidance** ("I couldn't find: X. *Which one did you mean?*" is a clarifying question, not a
+defect). Prose can't be classified by keyword. Only the skill knows whether it just failed the
+owner or just asked him something, so only the skill decides. The guard against a skill
+*forgetting* is a **lint over the call sites** in `scripts/selflearning-selftest.mjs`: a reply
+key named `*Error`/`*Failed`/`*NoMatch`/`noAction` that is sent with plain `send()` fails the
+test run, naming the file and line.
+
+Note this includes **partial** failures: Tasks' "Couldn't do these:" after a batch half-applied
+goes through `sendFailure`, because the two to-dos that didn't happen are two to-dos the owner
+asked for and didn't get.
+
+The first five triggers only fire when the code *knows* it failed. The failures that matter
+most are invisible even to `sendFailure`: a **false positive**, a confidently wrong answer, an
+event on the wrong day. The secretary reports *success*; nothing looks broken; the only
+detector is the owner. `reported` is therefore the only **human-verified** report in the
+system, and triage takes it first.
+
+**What a report contains:** the error + stack (or the owner's note + the offending message he
+replied to), the recent logs from the ring buffer, the chat transcript, and a cheap-model
+"likely cause" guess kept in its own clearly-labelled, discardable section — never mixed with
+the owner's testimony.
+
+**Invariants worth not breaking:**
+- **Capture never throws** and never masks the original error; it runs *after* the user has
+  their reply.
+- **One report per webhook turn** (`ctx._turn`), which is an **object, not a boolean**:
+  `ctx.callSkill` spreads the ctx, so a boolean flag set by a callee would mutate a copy and
+  never reach the caller.
+- **Machine failures dedupe (10 min) and are capped (~20/h)** — a crash loop must not fill the
+  droplet's disk. **Owner reports do neither**: a human can't loop, two notes are two
+  complaints, and a silently dropped note is the worst failure this system has.
+- **Secrets are redacted on the way *into* the ring buffer**, and the whole report again on the
+  way out — these files live in a git repo.
+- Reports are written **inside** `secretary/` because the container only mounts the app dir,
+  and they are **gitignored** because `/opt/secretary` symlinks into the production git tree.
+
+**The loop:** `scripts/self-learning-pull.sh` (Mac → droplet over SSH; pull-based because the
+droplet's deploy key is read-only) → `Improvements/inbox/` → `/triage-failures` → a plan per
+report → owner reviews and ships.
+
+Self-tests: `scripts/selflearning-selftest.mjs` (capture invariants, offline) and
+`scripts/router-selftest.mjs` (that a *complaint* is filed, not executed — needs an API key).

@@ -29,6 +29,13 @@ import { createSessions } from "./lib/sessions.js";
 import { TAGS, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
 import { route } from "./router/router.js";
+import { installLogBuffer } from "./lib/logbuffer.js";
+import { captureFailure } from "./lib/selflearning.js";
+
+// SELF-LEARNING: wrap console so the secretary can read its own recent logs back when it
+// writes a failure report. Must run before anything else logs — including loadSkills()
+// below. stdout is untouched, so `docker logs` still works exactly as before.
+installLogBuffer();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = path.join(__dirname, "..", "2. Skills");
@@ -187,6 +194,17 @@ function orch(lang, key, ...args) {
 // Max depth of skill→skill delegation (ctx.callSkill), a loop/recursion backstop.
 const MAX_SKILL_DEPTH = 4;
 
+// SELF-LEARNING: write a failure report, guarded. captureFailure() already promises never
+// to throw; this is the belt to its braces, because a bug in the thing that records bugs
+// must never be the thing that breaks a reply the owner was waiting for.
+async function fireCapture(ctx, info) {
+  try {
+    await captureFailure(ctx, info);
+  } catch (e) {
+    console.error("fireCapture failed:", e?.message || e);
+  }
+}
+
 // ---- Boot -------------------------------------------------------------------
 const { skills: SKILLS, catalog: CATALOG, caps: CAPS } = await loadSkills();
 console.log(
@@ -289,6 +307,11 @@ app.post("/webhook", async (req, res) => {
       evolution,
       sessions, // store: get/set/clear per-chat state
       session: isContinuation ? session : null, // present only on a continuation
+      // SELF-LEARNING: one failure report per webhook turn. This is an OBJECT, not a
+      // boolean, and that is load-bearing: ctx.callSkill spreads the ctx ({ ...ctx }), so a
+      // flag set by a callee on a boolean field would mutate a COPY and never be seen by
+      // the caller. The spread copies this object's reference, so every frame shares it.
+      _turn: { captured: false },
     };
 
     // Conversation language. On a continuation it's persisted in the session (so a
@@ -296,7 +319,46 @@ app.post("/webhook", async (req, res) => {
     // router fills it in below. Default English. `ctx.send` reads ctx.lang lazily,
     // so setting it after routing still applies to every skill send.
     ctx.lang = (isContinuation ? session?.lang : null) || "en";
+
+    // ctx.send — an ORDINARY reply. It is NEVER scanned, sniffed or second-guessed.
     ctx.send = (number, text, opts) => send(number, text, ctx.lang, opts);
+
+    // SELF-LEARNING (soft failures) — the BIG category, and the one a skill must DECLARE.
+    //
+    // Most of the time the secretary fails, it does not throw: it understands the order,
+    // fails to execute it, and says so politely ("I understood the request but failed to
+    // create it in Google", "I hit an error while thinking", "Something went wrong with
+    // your tasks"). None of that reaches a catch block, and it is the failure the owner
+    // actually experiences.
+    //
+    // A MALFUNCTION IS EXACTLY THREE THINGS:
+    //   1. a code error (the catch blocks below),
+    //   2. a soft landing of an UNCOMPLETED task — declared here, via ctx.sendFailure,
+    //   3. the owner saying it got something wrong (the `feedback` skill).
+    //
+    // Everything else is GUIDANCE, and guidance is not a malfunction: "reply to the audio
+    // you want transcribed", "which task did you mean?", "what should the task say?",
+    // "your list is empty". The secretary asking a question, or truthfully reporting an
+    // empty result, is it working — not failing.
+    //
+    // That line cannot be drawn by reading the prose. An earlier version of this file
+    // scanned every ctx.send with a regex, and it was wrong in BOTH directions: it missed
+    // half the real failures ("I hit an error while thinking" contains no failure word) and
+    // it would have flagged "I couldn't find: X. Which one did you mean?" — a clarifying
+    // QUESTION — as a malfunction. Only the skill knows whether it just failed the owner or
+    // just asked him something, so only the skill gets to say. There is no runtime guessing.
+    // `scripts/selflearning-selftest.mjs` lints the call sites so a forgotten one is caught
+    // in the test run, not in production.
+    ctx.sendFailure = async (number, text, opts) => {
+      const res = await send(number, text, ctx.lang, opts);
+      await fireCapture(ctx, {
+        phase: "soft",
+        taskId: ctx._turn.skill || "soft",
+        softMessage: String(text),
+        detection: "ctx.sendFailure (declared by the skill)",
+      });
+      return res;
+    };
 
     // Cross-skill composition. `hasSkill` guards a friendly fallback; `callSkill`
     // invokes another skill's exported capability, auto-injecting THIS ctx (so the
@@ -321,11 +383,17 @@ app.post("/webhook", async (req, res) => {
         await sessions.clear(remoteJid); // owning skill gone; drop stale state
         return;
       }
+      ctx._turn.skill = session.skill; // so a soft report names the skill, not just "soft"
       try {
         await run(ctx);
       } catch (e) {
         console.error(`Session skill '${session.skill}' error:`, e);
         await send(number, orch(ctx.lang, "continuationError"), ctx.lang);
+        await fireCapture(ctx, {
+          phase: "throw:continuation",
+          taskId: session.skill,
+          error: e,
+        });
       }
       return;
     }
@@ -342,14 +410,21 @@ app.post("/webhook", async (req, res) => {
     } catch (e) {
       console.error("Router error:", e);
       await send(number, orch(ctx.lang, "routerError"), ctx.lang);
+      await fireCapture(ctx, { phase: "throw:router", taskId: "router", error: e });
       return;
     }
     console.log("ROUTER -> tasks:", tasks, "lang:", ctx.lang);
 
-    // No recognized skill.
+    // No recognized skill. The router ran FINE and understood nothing — that's not a bug,
+    // it's a MISSING CAPABILITY, and the highest-signal machine report of the four.
     if (!tasks.length || tasks.every((x) => !SKILLS[x])) {
       const names = CATALOG.map((c) => c.id).join(", ");
       await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
+      await fireCapture(ctx, {
+        phase: "unrouted",
+        taskId: "router",
+        unroutedOrder: ctx.order,
+      });
       return;
     }
 
@@ -357,11 +432,13 @@ app.post("/webhook", async (req, res) => {
     for (const task of tasks) {
       const run = SKILLS[task];
       if (!run) continue;
+      ctx._turn.skill = task; // so a soft report names the skill, not just "soft"
       try {
         await run(ctx);
       } catch (e) {
         console.error(`Skill '${task}' error:`, e);
         await send(number, orch(ctx.lang, "skillError"), ctx.lang);
+        await fireCapture(ctx, { phase: "throw:skill", taskId: task, error: e });
       }
     }
   } catch (e) {

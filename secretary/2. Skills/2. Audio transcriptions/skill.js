@@ -113,7 +113,7 @@ export async function run(ctx) {
   const apiKey = env.ASSEMBLYAI_API_KEY;
   if (!apiKey) {
     console.error("ASSEMBLYAI_API_KEY missing in .env");
-    await send(number, M.transcriptionFailed);
+    await ctx.sendFailure(number, M.transcriptionFailed);
     return;
   }
 
@@ -123,7 +123,7 @@ export async function run(ctx) {
     ({ base64, mimetype } = await evolution.getMediaBase64(quoted.id));
   } catch (e) {
     console.error("Transcription/download error:", e?.message || e);
-    await send(number, M.downloadFailed);
+    await ctx.sendFailure(number, M.downloadFailed);
     return;
   }
 
@@ -147,6 +147,6 @@ export async function run(ctx) {
     await send(number, M.transcript(clean));
   } catch (e) {
     console.error("Transcription/AAI error:", e?.message || e, "mime:", mimetype);
-    await send(number, M.transcriptionFailed);
+    await ctx.sendFailure(number, M.transcriptionFailed);
   }
 }

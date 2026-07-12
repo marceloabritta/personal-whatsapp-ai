@@ -287,7 +287,7 @@ export async function run(ctx) {
     info = await interpret(ctx);
   } catch (e) {
     console.error("Calendar/Claude error:", e);
-    await send(number, reply(ctx.lang).thinkingError());
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
     return;
   }
 
@@ -296,7 +296,7 @@ export async function run(ctx) {
   if (info?.action === "edit") return handleEdit(ctx, info);
   if (info?.action === "list") return handleList(ctx, info);
 
-  await send(number, reply(ctx.lang).noAction({ summary: info?.summary }));
+  await ctx.sendFailure(number, reply(ctx.lang).noAction({ summary: info?.summary }));
 }
 
 // ---- CREATE ----------------------------------------------------------------
@@ -470,7 +470,7 @@ async function resumeCreate(ctx, session) {
   } catch (e) {
     console.error("Calendar error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).createGoogleError());
+    await ctx.sendFailure(number, reply(ctx.lang).createGoogleError());
   }
 }
 
@@ -892,11 +892,11 @@ async function handleEdit(ctx, info) {
     matches = await matchEventTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
     console.error("Calendar edit match error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).editCheckError());
+    await ctx.sendFailure(number, reply(ctx.lang).editCheckError());
     return;
   }
   if (!matches.length) {
-    await send(number, reply(ctx.lang).editNoMatch());
+    await ctx.sendFailure(number, reply(ctx.lang).editNoMatch());
     return;
   }
 
@@ -911,11 +911,11 @@ async function handleEdit(ctx, info) {
     patch = await interpretEdit(ctx, ev);
   } catch (e) {
     console.error("edit interpret error:", e?.message || e);
-    await send(number, reply(ctx.lang).editCheckError());
+    await ctx.sendFailure(number, reply(ctx.lang).editCheckError());
     return;
   }
   if (!patch) {
-    await send(number, reply(ctx.lang).editCheckError());
+    await ctx.sendFailure(number, reply(ctx.lang).editCheckError());
     return;
   }
 
@@ -1023,7 +1023,7 @@ async function resumeEditConfirm(ctx, session) {
     const ev = await getEvent(env, eventId);
     if (!ev || ev.status !== "confirmed") {
       await sessions.clear(remoteJid);
-      await send(number, reply(ctx.lang).editNoMatch());
+      await ctx.sendFailure(number, reply(ctx.lang).editNoMatch());
       return;
     }
     await applyEditDraft(ctx, eventId, draft);
@@ -1031,7 +1031,7 @@ async function resumeEditConfirm(ctx, session) {
   } catch (e) {
     console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).editGoogleError());
+    await ctx.sendFailure(number, reply(ctx.lang).editGoogleError());
   }
 }
 
@@ -1061,12 +1061,12 @@ async function handleDelete(ctx, info) {
     matches = await matchEventTargets(env, { eidEventId, startIso, emails });
   } catch (e) {
     console.error("Calendar match error:", e?.response?.data || e?.message || e);
-    await send(number, reply(ctx.lang).deleteCheckError());
+    await ctx.sendFailure(number, reply(ctx.lang).deleteCheckError());
     return;
   }
 
   if (!matches.length) {
-    await send(number, reply(ctx.lang).deleteNoMatch());
+    await ctx.sendFailure(number, reply(ctx.lang).deleteNoMatch());
     return;
   }
 
@@ -1130,7 +1130,7 @@ async function resumeDelete(ctx, session) {
   } catch (e) {
     console.error("Calendar delete error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
-    await send(number, reply(ctx.lang).deleteGoogleError());
+    await ctx.sendFailure(number, reply(ctx.lang).deleteGoogleError());
   }
 }
 
@@ -1160,7 +1160,7 @@ async function handleList(ctx, info) {
       items = (r.data.items || []).filter((e) => e.status === "confirmed");
     } catch (e) {
       console.error("Calendar list(next) error:", e?.response?.data || e?.message || e);
-      return send(number, reply(lang).listError());
+      return ctx.sendFailure(number, reply(lang).listError());
     }
     const next = items.find((e) => e.start?.dateTime || e.start?.date);
     return send(number, reply(lang).listNext({ event: next ? toListItem(next) : null }));
@@ -1187,7 +1187,7 @@ async function handleList(ctx, info) {
     items = (r.data.items || []).filter((e) => e.status === "confirmed");
   } catch (e) {
     console.error("Calendar list error:", e?.response?.data || e?.message || e);
-    return send(number, reply(lang).listError());
+    return ctx.sendFailure(number, reply(lang).listError());
   }
 
   await send(

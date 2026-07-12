@@ -15,6 +15,13 @@ _to_delete/
 # Old scratch (abandoned Z-API approach)
 _deprecated_zapi_scaffold/
 
+# Self-learning: runtime failure reports (spool; synced to the top-level Improvements/).
+# LOAD-BEARING: /opt/secretary is a symlink INTO the production git tree, so reports the
+# container writes land in the live working copy. Untracked, they keep `git pull --ff-only`
+# on the droplet unblocked and keep private chat content out of the production checkout.
+secretary/improvements/*.md
+secretary/improvements/_synced/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

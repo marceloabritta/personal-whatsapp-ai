@@ -361,11 +361,44 @@ routing, both skill flows, and every guardrail without network or real keys. Wor
 formalizing into a `test/` folder with `node --test`. Boot + skill-discovery is the
 cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
+**Two committed self-tests** (the first of the `test/` folder above, in spirit):
+
+- `node scripts/selflearning-selftest.mjs` — the self-learning capture invariants, fully
+  offline (fake `ctx`, stub `anthropic`, reports redirected to a temp dir via
+  `SELF_LEARNING_DIR`). Asserts redaction, machine dedupe, the `{ ...ctx }`-spread guard, that
+  an **owner-reported note is never deduped or dropped**, and that capture never throws.
+- `ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs` — calls the **live** router against
+  the real catalog and asserts that a *complaint* ("you scheduled that at the wrong time") is
+  **filed as feedback, not executed as a calendar order**. Costs a few cents. Run it after any
+  edit to `router/prompt.js` or to a skill manifest: every guard there is a prompt, and prompts
+  regress silently.
+
 ---
 
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-12 — Self-learning: the secretary reports its own failures (BUILT, not yet deployed).**
+  New `1. Orchestrator/lib/logbuffer.js` (redacted in-memory log ring) + `lib/selflearning.js`
+  (`captureFailure` → a Markdown report in `secretary/improvements/`), wired into the three catch
+  blocks, the `notUnderstood` branch, and a soft-failure scan in the `ctx.send` wrapper.
+  **Plus a fifth trigger no amount of try/catch could ever provide: the new `feedback` skill.**
+  Reply to a wrong message with `@secretary you made a mistake here` and the complaint is filed
+  as a human-verified bug report — the only way a *false positive* or a confidently-wrong answer
+  ever enters the loop, since the code doesn't know it failed. Say "…and fix it to 5pm" and the
+  router returns **both** tasks: file the defect *and* do the fix.
+  Reports sync to the Mac (`scripts/self-learning-pull.sh`, pull-based — the droplet's deploy key
+  is read-only) and `/triage-failures` turns each into a plan.
+  Three things the build got right only because they were checked against the code first:
+  `ctx._turn` is an **object** (a boolean would be lost to `callSkill`'s ctx spread); the
+  `feedback` skill **writes the report before it asks its clarifying question** (a new tagged
+  order clears the session, so asking first would silently lose the complaint); and reports use
+  an **exclusive-create write** (a one-second filename stamp meant two notes in the same second
+  overwrote each other — caught by the self-test). Owner reports are exempt from dedupe and the
+  hourly cap by design. Self-tests: `scripts/selflearning-selftest.mjs` (24 checks, offline,
+  green) and `scripts/router-selftest.mjs` (live router; **not yet run — no local API key**).
+  Plan: `New Features Plans/self-learning-skill.md`.
 
 - **2026-07-11 — Bold header + italic body on every secretary message (SHIPPED, DEPLOYED, verified live).**
   Deployed to production 2026-07-11 (git pull + `docker compose restart secretary`; boot clean, all
