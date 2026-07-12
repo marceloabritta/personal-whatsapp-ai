@@ -367,7 +367,11 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
-- **2026-07-11 — Bold header + italic body on every secretary message (SHIPPED, DEPLOYED).**
+- **2026-07-11 — Bold header + italic body on every secretary message (SHIPPED, DEPLOYED, verified live).**
+  Deployed to production 2026-07-11 (git pull + `docker compose restart secretary`; boot clean, all
+  four skills loaded) and **confirmed working in production** the same day — including the two
+  regression guards: the calendar link's `eid` survives framing (reply-to-invite cancel still
+  resolves) and the bot does not re-consume its own bolded reply as an owner continuation.
   The secretary replies from the owner's own WhatsApp account, so its messages sit in the same
   thread as the owner's typing, in the same plain text. Now every outgoing message is framed
   **bold header** + blank line + *italic body*, so the two voices are visually distinct. New
