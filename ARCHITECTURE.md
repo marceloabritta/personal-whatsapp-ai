@@ -227,6 +227,25 @@ export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — se
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
 
+### The shared lib (`1. Orchestrator/lib/`) — don't re-implement these
+
+Skills import these directly (`../../1. Orchestrator/lib/<x>.js`). Each one existed as a
+copy-paste in two or three skills before it was lifted here; a bug fixed in a copy was a bug
+still live in the others. Reach for them before writing your own:
+
+| Module | Exports | Use it for |
+| --- | --- | --- |
+| `llm.js` | `jsonFormat`, `readReply`, `readText`, `parseJsonReply` | Any Claude call that must return JSON. `jsonFormat(SCHEMA)` → `output_config`; `readReply(msg, "<skill>")` → the parsed object, or `null` on a refusal/truncated reply (it logs `stop_reason` + size). Never hand-parse a model reply. |
+| `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
+| `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
+| `identity.js` | `headerFor`, `TAGS`, `isOwnMessage`, `matchedTag` | The trigger tags and the reply header. |
+| `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
+
+Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`,
+`hasSkill`/`callSkill`) arrives on **`ctx`** — see `server.js`. If you find yourself editing
+the orchestrator to add a skill, that's the signal `ctx` or this lib is missing something:
+fix it **once**, here, rather than reaching around it.
+
 ### Composing skills (the capability registry)
 
 A skill has **two faces**. The *routable* face (`manifest` + `run`) is what the router

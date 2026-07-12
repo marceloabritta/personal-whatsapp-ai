@@ -189,11 +189,13 @@ by the orchestrator's `send()` fallback; the reply header (produced per-language
 
 ### Structured outputs (all six LLM calls)
 Every LLM call passes `output_config: { format: { type: "json_schema", schema } }`, so the
-API returns **only** schema-valid JSON. The six schemas live in `prompt.js` as the single
-source of truth for reply *shape* (`CAL_SCHEMA`, `CONFIRM_SCHEMA`, `REVIEW_SCHEMA`,
-`RESOLVE_SCHEMA`, `EDIT_SCHEMA`, `EDIT_REVIEW_SCHEMA`); the prompts describe what each field
-*means*. In `skill.js`,
-`jsonFormat(schema)` builds the `output_config`, and `readReply(msg)` reads it — guarding
+API returns **only** schema-valid JSON. This skill's schemas live in `prompt.js` as the single
+source of truth for reply *shape* (`CAL_SCHEMA`, `REVIEW_SCHEMA`, `RESOLVE_SCHEMA`,
+`EDIT_SCHEMA`, `EDIT_REVIEW_SCHEMA`); the prompts describe what each field
+*means*. `CONFIRM_SCHEMA` is **shared** — it lives in `1. Orchestrator/lib/confirm.js` with the
+rest of the confirm-first machinery.
+The helpers are shared too (`1. Orchestrator/lib/llm.js`): `jsonFormat(schema)` builds the
+`output_config`, and `readReply(msg, "calendar")` reads it — guarding
 `stop_reason:"refusal"` (→ `null`, a safe no-op) and falling back to `parseJsonReply`
 (fence-strip + whole-parse + balanced-brace scan) if the model is ever swapped to one
 without structured-output support. Requires `@anthropic-ai/sdk` ≥ 0.111 (installed on
@@ -288,8 +290,8 @@ emails) and `start_iso` for deletes too.
    confident = **≥ 70**. No confident match → "couldn't find a matching event". Otherwise
    open a session (`intent:"delete"`, `stage:"await_confirmation"`, `awaitFrom:"owner"`,
    600 s) with the matched ids and send the confirm question.
-2. **`resumeDelete`:** `classifyConfirmation` (one Claude call, `buildConfirmSystem`,
-   `CONFIRM_SCHEMA`, `max_tokens: 1024`) → `confirm | decline | unrelated` (default
+2. **`resumeDelete`:** `classifyConfirmation` (the shared one from
+   `1. Orchestrator/lib/confirm.js`; one Claude call) → `confirm | decline | unrelated` (default
    `unrelated`). `unrelated` → silent. `decline` → clear + "I'll keep it". `confirm` →
    `cancelMeeting` (delete each matched id **and** sweep same-meeting duplicates via
    `findConfirmedDuplicates`, each `events.delete` with `sendUpdates:"all"`; `410` counts as

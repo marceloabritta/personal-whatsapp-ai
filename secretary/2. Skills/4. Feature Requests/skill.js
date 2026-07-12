@@ -32,6 +32,7 @@ import {
 } from "./prompt.js";
 import { headerFor } from "../../1. Orchestrator/lib/identity.js";
 import { frame } from "../../1. Orchestrator/lib/format.js";
+import { jsonFormat, readReply, readText } from "../../1. Orchestrator/lib/llm.js";
 
 export const manifest = {
   id: "feature_request",
@@ -56,74 +57,6 @@ const EMPTY_DRAFT = {
   edge_cases: [],
   open_questions: [],
 };
-
-// ---- Structured-output helpers (same pattern as calendar_action / task_action) --
-function jsonFormat(schema) {
-  return { format: { type: "json_schema", schema } };
-}
-function readReply(msg) {
-  if (msg?.stop_reason === "refusal") {
-    console.error("feature_request: model refused the request");
-    return null;
-  }
-  const out = (msg?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-  const parsed = parseJsonReply(out);
-  // A null parse is almost always truncation (stop_reason "max_tokens") — the
-  // accumulated draft is re-emitted every turn and grows. Log the cause + size so a
-  // future failure is diagnosable instead of a silent null.
-  if (!parsed) {
-    console.error(
-      `feature_request: unparseable reply (stop_reason=${msg?.stop_reason}, chars=${out.length})`
-    );
-  }
-  return parsed;
-}
-// Read the raw text blocks (for the prose document — NOT JSON).
-function readText(msg) {
-  return (msg?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-}
-// Pull the FIRST balanced {...} out of an LLM reply; tolerates ```json fences and
-// stray prose. Returns the parsed object or null (never throws).
-function parseJsonReply(out) {
-  if (!out) return null;
-  let s = String(out).trim();
-  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenced) s = fenced[1].trim();
-  try {
-    return JSON.parse(s);
-  } catch {
-    /* fall through */
-  }
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0,
-    inStr = false,
-    esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-    } else if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
-      try {
-        return JSON.parse(s.slice(start, i + 1));
-      } catch {
-        return null;
-      }
-    }
-  }
-  return null;
-}
 
 // Merge the model's draft over the prior one, always carrying every field forward so a
 // dropped/blanked field never erases known content. Arrays stay arrays.
@@ -170,7 +103,7 @@ async function clarifyTurn(ctx, priorDraft) {
       },
     ],
   });
-  const out = readReply(msg);
+  const out = readReply(msg, "feature_request");
   console.log("FEATURE CLARIFY RAW:", JSON.stringify(out));
   if (!out) return null;
   if (!["clarifying", "finalize", "cancel"].includes(out.status)) {

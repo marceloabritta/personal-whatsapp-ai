@@ -7,7 +7,7 @@
 //  with ctx.lang via reply(). English is canonical; pt is maintained; any other
 //  language is produced from the `en` copy by the orchestrator's send() translation
 //  fallback. Add BOTH en + pt for every new message. Internal/classification prompts
-//  (buildPlanSystem / buildConfirmSystem below) stay English.
+//  (buildPlanSystem below) stay English.
 //
 //  ONE-RESOLVER MODEL (see New Features Plans/task-improvements.md): a single
 //  list-aware planner (`planTaskOps` in skill.js, PLAN_SCHEMA here) reads the
@@ -92,15 +92,8 @@ export const PLAN_SCHEMA = {
   },
 };
 
-// classifyConfirmation: does the latest message confirm/decline a pending action?
-export const CONFIRM_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["decision"],
-  properties: {
-    decision: { type: "string", enum: ["confirm", "decline", "unrelated"] },
-  },
-};
+// The yes/no/unrelated classifier for a pending confirmation is shared by every
+// confirm-first skill — schema + prompts live in 1. Orchestrator/lib/confirm.js.
 
 // ---- Planner (interpret + resolve, in one list-aware call) -------------------
 export function buildPlanSystem(OWNER_NAME) {
@@ -149,24 +142,6 @@ Recent conversation:
 ${transcript || "(no history)"}
 
 ${OWNER_NAME}'s latest message: ${order}`;
-}
-
-// ---- Confirmation classifier (yes/no on a pending mutation) -------------------
-export function buildConfirmSystem(action) {
-  return `You decide whether the LATEST message is a response to a pending confirmation.
-The assistant asked to confirm: ${action}.
-Use the recent conversation only as context; judge ONLY the latest message.
-Decide one "decision" value — "confirm", "decline", or "unrelated":
-- "confirm": the latest message clearly agrees to proceed (e.g. yes, confirm, go ahead, sim, pode, isso).
-- "decline": the latest message clearly refuses (e.g. no, don't, leave it, não, deixa).
-- "unrelated": the latest message is normal conversation OR a NEW request, NOT a yes/no to this confirmation. If unsure, choose "unrelated".`;
-}
-
-export function buildConfirmUser({ transcript, latest }) {
-  return `Recent conversation:
-${transcript || "(none)"}
-
-Latest message: ${latest}`;
 }
 
 // ============================================================================

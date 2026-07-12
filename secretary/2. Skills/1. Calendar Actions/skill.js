@@ -16,8 +16,6 @@ import { google } from "googleapis";
 import {
   buildSystem,
   buildUserPrompt,
-  buildConfirmSystem,
-  buildConfirmUser,
   buildCreateReviewSystem,
   buildCreateReviewUser,
   buildResolveSystem,
@@ -27,7 +25,6 @@ import {
   buildEditReviewSystem,
   buildEditReviewUser,
   CAL_SCHEMA,
-  CONFIRM_SCHEMA,
   REVIEW_SCHEMA,
   RESOLVE_SCHEMA,
   EDIT_SCHEMA,
@@ -35,26 +32,11 @@ import {
   reply,
   localizeDate,
 } from "./prompt.js";
-
-// Structured outputs: pass a JSON Schema so the API returns ONLY schema-valid
-// JSON (no fences, no prose, no shape drift). Helper wraps the schema in the
-// output_config.format shape and reads the guaranteed-valid reply — falling back
-// to parseJsonReply if the model refused (empty/partial content) or is ever
-// swapped to one without structured-output support.
-function jsonFormat(schema) {
-  return { format: { type: "json_schema", schema } };
-}
-function readReply(msg) {
-  if (msg?.stop_reason === "refusal") {
-    console.error("calendar: model refused the request");
-    return null;
-  }
-  const out = (msg?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-  return parseJsonReply(out);
-}
+// Structured outputs (jsonFormat/readReply), the shared confirm-first classifier and
+// Google OAuth all live in the orchestrator's lib — see those files.
+import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
+import { classifyConfirmation } from "../../1. Orchestrator/lib/confirm.js";
+import { googleAuth } from "../../1. Orchestrator/lib/google.js";
 
 // Capabilities exposed to OTHER skills through the orchestrator's registry
 // (ctx.callSkill) — NOT seen by the router. `startCreate` runs the full
@@ -75,56 +57,11 @@ export const manifest = {
 const CAL_TZ = "America/Sao_Paulo";
 
 function calendarClient(env) {
-  const o = new google.auth.OAuth2(
-    env.GOOGLE_CLIENT_ID,
-    env.GOOGLE_CLIENT_SECRET
-  );
-  o.setCredentials({ refresh_token: env.GOOGLE_REFRESH_TOKEN });
-  return google.calendar({ version: "v3", auth: o });
+  return google.calendar({ version: "v3", auth: googleAuth(env) });
 }
 
 function calId(env) {
   return env.GOOGLE_CALENDAR_ID || "primary";
-}
-
-// Robustly pull a JSON object out of an LLM reply. Tolerates ```json fences and
-// stray prose, and — unlike a greedy /\{[\s\S]*\}/ match (first "{" to LAST "}",
-// which corrupts on any trailing brace) — extracts the FIRST balanced {...}.
-// Returns the parsed object, or null if nothing valid is found (never throws).
-// (If the SDK is bumped to one supporting output_config.format, structured
-// outputs would make this a straight JSON.parse — see PROJECT notes.)
-function parseJsonReply(out) {
-  if (!out) return null;
-  let s = String(out).trim();
-  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenced) s = fenced[1].trim();
-  try {
-    return JSON.parse(s); // happy path: reply is exactly the JSON object
-  } catch {
-    /* fall through to balanced-brace scan */
-  }
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0,
-    inStr = false,
-    esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-    } else if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
-      try {
-        return JSON.parse(s.slice(start, i + 1));
-      } catch {
-        return null;
-      }
-    }
-  }
-  return null;
 }
 
 async function createEvent(env, { title, emails, start_iso, end_iso, summary }) {
@@ -317,7 +254,7 @@ async function interpret(ctx) {
     output_config: jsonFormat(CAL_SCHEMA),
     messages: [{ role: "user", content: prompt }],
   });
-  const info = readReply(msg);
+  const info = readReply(msg, "calendar");
   console.log("CALENDAR RAW:", JSON.stringify(info));
   return info;
 }
@@ -576,7 +513,7 @@ async function reviewCreate(ctx, draft) {
         },
       ],
     });
-    const parsed = readReply(msg);
+    const parsed = readReply(msg, "calendar");
     console.log("CREATE REVIEW RAW:", JSON.stringify(parsed));
     if (!parsed) return null;
     if (!["confirm", "modify", "cancel", "unrelated"].includes(parsed.decision)) {
@@ -702,7 +639,7 @@ async function inspectMissing(ctx, draft, m) {
         },
       ],
     });
-    const patch = readReply(msg);
+    const patch = readReply(msg, "calendar");
     console.log("RESOLVE RAW:", JSON.stringify(patch));
     return patch;
   } catch (e) {
@@ -825,7 +762,7 @@ async function interpretEdit(ctx, ev) {
       },
     ],
   });
-  const patch = readReply(msg);
+  const patch = readReply(msg, "calendar");
   console.log("EDIT RAW:", JSON.stringify(patch));
   return patch;
 }
@@ -853,7 +790,7 @@ async function reviewEdit(ctx, draft) {
         },
       ],
     });
-    const parsed = readReply(msg);
+    const parsed = readReply(msg, "calendar");
     console.log("EDIT REVIEW RAW:", JSON.stringify(parsed));
     if (!parsed) return null;
     if (!["confirm", "modify", "cancel", "unrelated"].includes(parsed.decision)) {
@@ -1170,6 +1107,7 @@ async function resumeDelete(ctx, session) {
 
   const decision = await classifyConfirmation(ctx, {
     action: `cancel the event "${title}"${when ? ` at ${when}` : ""}`,
+    who: "calendar",
   });
 
   if (decision === "unrelated") return; // not a response to us — ignore silently
@@ -1193,31 +1131,6 @@ async function resumeDelete(ctx, session) {
     console.error("Calendar delete error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
     await send(number, reply(ctx.lang).deleteGoogleError());
-  }
-}
-
-// LLM judgment: does the latest message respond to a pending confirmation?
-// Returns "confirm" | "decline" | "unrelated" (defaults to "unrelated" on doubt/error).
-async function classifyConfirmation(ctx, { action }) {
-  const { anthropic, model, transcript, order } = ctx;
-  try {
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 1024,
-      system: buildConfirmSystem(action),
-      output_config: jsonFormat(CONFIRM_SCHEMA),
-      messages: [
-        { role: "user", content: buildConfirmUser({ transcript, latest: order }) },
-      ],
-    });
-    const decision = readReply(msg)?.decision;
-    console.log("CONFIRM RAW:", decision);
-    return decision === "confirm" || decision === "decline"
-      ? decision
-      : "unrelated";
-  } catch (e) {
-    console.error("confirm classify error:", e?.message || e);
-    return "unrelated"; // on error, do nothing (safe)
   }
 }
 

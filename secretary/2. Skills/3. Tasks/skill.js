@@ -29,14 +29,14 @@ import { google } from "googleapis";
 import {
   buildPlanSystem,
   buildPlanUser,
-  buildConfirmSystem,
-  buildConfirmUser,
   reply,
   localizeDueDate,
   threePmOnDue,
   PLAN_SCHEMA,
-  CONFIRM_SCHEMA,
 } from "./prompt.js";
+import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
+import { classifyConfirmation } from "../../1. Orchestrator/lib/confirm.js";
+import { googleAuth } from "../../1. Orchestrator/lib/google.js";
 
 export const manifest = {
   id: "task_action",
@@ -44,65 +44,9 @@ export const manifest = {
     "add one or more to-dos for the owner OR another person, list open tasks, complete/check off tasks, or edit/rename/reschedule/delete existing tasks",
 };
 
-// ---- Structured-output helpers (same pattern as calendar_action) -------------
-function jsonFormat(schema) {
-  return { format: { type: "json_schema", schema } };
-}
-function readReply(msg) {
-  if (msg?.stop_reason === "refusal") {
-    console.error("tasks: model refused the request");
-    return null;
-  }
-  const out = (msg?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-  return parseJsonReply(out);
-}
-// Pull the FIRST balanced {...} out of an LLM reply; tolerates ```json fences and
-// stray prose. Returns the parsed object or null (never throws).
-function parseJsonReply(out) {
-  if (!out) return null;
-  let s = String(out).trim();
-  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenced) s = fenced[1].trim();
-  try {
-    return JSON.parse(s);
-  } catch {
-    /* fall through */
-  }
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0,
-    inStr = false,
-    esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-    } else if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
-      try {
-        return JSON.parse(s.slice(start, i + 1));
-      } catch {
-        return null;
-      }
-    }
-  }
-  return null;
-}
-
 // ---- Google Tasks client -----------------------------------------------------
 function tasksClient(env) {
-  const o = new google.auth.OAuth2(
-    env.GOOGLE_CLIENT_ID,
-    env.GOOGLE_CLIENT_SECRET
-  );
-  o.setCredentials({ refresh_token: env.GOOGLE_REFRESH_TOKEN });
-  return google.tasks({ version: "v1", auth: o });
+  return google.tasks({ version: "v1", auth: googleAuth(env) });
 }
 function listId(env) {
   return env.GOOGLE_TASKLIST_ID || "@default";
@@ -199,7 +143,7 @@ async function planTaskOps(ctx, open) {
       },
     ],
   });
-  const plan = readReply(msg);
+  const plan = readReply(msg, "tasks");
   console.log("TASK PLAN RAW:", JSON.stringify(plan));
   return plan;
 }
@@ -535,6 +479,7 @@ async function resumeConfirm(ctx, session) {
 
   const decision = await classifyConfirmation(ctx, {
     action: summarizeMutations(mutations),
+    who: "tasks",
   });
 
   if (decision === "confirm") {
@@ -690,31 +635,6 @@ async function handleList(ctx) {
       open.map((t) => ({ title: t.title, when: localizeDueDate(lang, t.due) }))
     )
   );
-}
-
-// LLM: does the latest message confirm/decline the pending action? Defaults to
-// "unrelated" on doubt/error (the safe no-op).
-async function classifyConfirmation(ctx, { action }) {
-  const { anthropic, model, transcript, order } = ctx;
-  try {
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 256,
-      system: buildConfirmSystem(action),
-      output_config: jsonFormat(CONFIRM_SCHEMA),
-      messages: [
-        { role: "user", content: buildConfirmUser({ transcript, latest: order }) },
-      ],
-    });
-    const decision = readReply(msg)?.decision;
-    console.log("TASK CONFIRM RAW:", decision);
-    return decision === "confirm" || decision === "decline"
-      ? decision
-      : "unrelated";
-  } catch (e) {
-    console.error("task confirm classify error:", e?.message || e);
-    return "unrelated";
-  }
 }
 
 // Exposed as an internal capability in case another skill wants the open list.

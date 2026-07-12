@@ -55,14 +55,8 @@ export const CAL_SCHEMA = {
   },
 };
 
-export const CONFIRM_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["decision"],
-  properties: {
-    decision: { type: "string", enum: ["confirm", "decline", "unrelated"] },
-  },
-};
+// The yes/no/unrelated classifier for a pending confirmation is shared by every
+// confirm-first skill — schema + prompts live in 1. Orchestrator/lib/confirm.js.
 
 export const REVIEW_SCHEMA = {
   type: "object",
@@ -212,25 +206,6 @@ range_end_iso=null.`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----
-// Used while a session is open. The secretary sees EVERY message from the awaited
-// party and must ignore normal chatter, acting only on a real yes/no.
-export function buildConfirmSystem(action) {
-  return `You decide whether the LATEST message is a response to a pending confirmation.
-The assistant asked to confirm: ${action}.
-Use the recent conversation only as context; judge ONLY the latest message.
-Decide one "decision" value — "confirm", "decline", or "unrelated":
-- "confirm": the latest message clearly agrees to proceed (e.g. yes, confirm, go ahead, sim, pode, isso).
-- "decline": the latest message clearly refuses (e.g. no, don't, keep it, não, deixa).
-- "unrelated": the latest message is normal conversation, NOT a reply to this confirmation. If unsure, choose "unrelated".`;
-}
-
-export function buildConfirmUser({ transcript, latest }) {
-  return `Recent conversation:
-${transcript || "(none)"}
-
-Latest message: ${latest}`;
-}
-
 // ---- Continuation: review a pending CREATE (confirm / modify / cancel) --------
 // After proposing an event, the secretary shows a draft and asks the owner to confirm.
 // This runs for EVERY owner message while that session is open: it BOTH classifies

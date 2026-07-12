@@ -191,8 +191,9 @@ JSON Schemas, and the localized `reply(lang)` string map + `localizeDueDate`).
   Follows the ARCHITECTURE "Localization convention".
 
 ### Google Tasks specifics
-- Client: `google.tasks({version:"v1", auth})` (OAuth2 + refresh token), list
-  `GOOGLE_TASKLIST_ID || "@default"`.
+- Client: `google.tasks({ version: "v1", auth: googleAuth(env) })` — the OAuth2 client is
+  built once in `1. Orchestrator/lib/google.js` (shared with `calendar_action`); the service
+  stays here. List: `GOOGLE_TASKLIST_ID || "@default"`.
 - **Due is date-only**, stored at UTC midnight. `toTasksDue` normalizes a −03:00 ISO to
   the São Paulo calendar date pinned to UTC midnight; `localizeDueDate` renders in UTC so
   the shown date matches what was stored.
