@@ -67,7 +67,10 @@ export function findCalendarLink(text) {
 
 // ---------------------------------------------------------------------------
 //  In-memory buffer (short-term context). Cleared when the container is
-//  recreated; the real history lives in Evolution's Postgres (via fetchHistory).
+//  recreated; the real history lives in Evolution's Postgres (via fetchHistory,
+//  which reads a 1:1 chat under BOTH its phone JID and its @lid JID — see the
+//  note there. Read under one key only, the durable history comes back empty and
+//  this volatile buffer silently becomes the secretary's whole memory).
 // ---------------------------------------------------------------------------
 const buffers = new Map(); // remoteJid -> [{ t, fromMe, text, pushName }]
 

@@ -59,9 +59,30 @@ pass through but are discarded and never sent to any external API.
 POST http://api:8080/chat/findMessages/secretary
 apikey: <AUTHENTICATION_API_KEY>
 ```
-Body: `{ "where": { "key": { "remoteJid": "..." } } }`. The secretary merges this with its
-in-memory buffer, dedups, sorts by time and builds a transcript of the last ~30
-messages as `ME: ...` / `OTHER: ...`.
+Sent **twice** — once as `{ "where": { "key": { "remoteJid": "…" } } }` and once as
+`{ "where": { "key": { "remoteJidAlt": "…" } } }` — and merged. The secretary then merges
+*that* with its in-memory buffer, dedups, sorts by time and builds a transcript of the last
+~30 messages as `ME: ...` / `OTHER: ...`.
+
+> **Why two queries — WhatsApp LID addressing.** In a **1:1 chat**, Evolution persists
+> inbound messages under the contact's **`…@lid`** JID, while the JID the webhook hands us —
+> and that we send to — is the phone **`…@s.whatsapp.net`**. Query the phone JID alone and the
+> durable history comes back containing **nothing but the secretary's own outbound messages**:
+> it reads its own voice back and sees no conversation at all. Evolution records the phone JID
+> on those LID rows as `key.remoteJidAlt`, which is the link between the two. **Group chats
+> (`@g.us`) are unaffected** — their inbound messages are stored under the same JID the webhook
+> delivers, so the second query is a no-op there.
+>
+> This was a real, silent, high-severity bug (fixed 2026-07-12): the durable read returned
+> nothing usable, so the secretary's entire memory of any 1:1 chat silently collapsed onto the
+> volatile 50-message in-memory buffer — and **every container restart wiped it**. It looked
+> like a deployment problem. It was one wrong lookup key. See
+> `Bugs and Malfunctions/bugfix-lid-history-blindness.md`, and
+> `scripts/history-selftest.mjs`, which fails if anyone drops back to a single query.
+>
+> Note `findMessages` paginates at **50 rows/page**, page 1 being the **newest** (descending) —
+> which is what makes the merge correct. Those 50 are raw rows, though, including non-text
+> protocol noise, so a busy chat's usable transcript can be far thinner than 30 messages.
 
 ### 3. secretary → Claude (router)
 

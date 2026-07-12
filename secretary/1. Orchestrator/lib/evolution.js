@@ -35,28 +35,45 @@ export function createEvolution({ url, apikey, instance }) {
     return res.ok;
   }
 
-  // Fetches a conversation's history and normalizes to { t, fromMe, text, pushName }.
-  async function fetchHistory(remoteJid) {
+  // One findMessages page. Returns [] on any failure, so one bad query can never
+  // take down the other in fetchHistory.
+  async function findMessages(where) {
     try {
       const res = await fetch(`${base}/chat/findMessages/${instance}`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ where: { key: { remoteJid } } }),
+        body: JSON.stringify({ where }),
       });
       if (!res.ok) return [];
       const data = await res.json();
-      const recs = Array.isArray(data)
+      return Array.isArray(data)
         ? data
         : data?.messages?.records || data?.records || [];
-      return recs.map((r) => ({
-        t: Number(r.messageTimestamp) || 0,
-        fromMe: r.key?.fromMe,
-        text: extractText(r.message).trim(),
-        pushName: r.pushName,
-      }));
     } catch {
       return [];
     }
+  }
+
+  // Fetches a conversation's history and normalizes to { t, fromMe, text, pushName }.
+  //
+  // WhatsApp LID addressing: in a 1:1 chat, inbound messages are persisted under the
+  // contact's `…@lid` JID, while the JID the webhook hands us (and that we send to) is
+  // the phone `…@s.whatsapp.net`. Querying `remoteJid` alone therefore returns nothing
+  // but our OWN outbound messages — the secretary reading its own voice back. Evolution
+  // records the phone JID on those LID rows as `key.remoteJidAlt`, so we ask both ways
+  // and merge. Group chats (@g.us) match on the first query and no-op on the second.
+  // `combine` (whatsapp.js) dedupes the overlap by timestamp+text.
+  async function fetchHistory(remoteJid) {
+    const pages = await Promise.all([
+      findMessages({ key: { remoteJid } }),
+      findMessages({ key: { remoteJidAlt: remoteJid } }),
+    ]);
+    return pages.flat().map((r) => ({
+      t: Number(r.messageTimestamp) || 0,
+      fromMe: r.key?.fromMe,
+      text: extractText(r.message).trim(),
+      pushName: r.pushName,
+    }));
   }
 
   // Downloads a message's decrypted media (by id) and returns { base64, mimetype }.
