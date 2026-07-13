@@ -461,7 +461,7 @@ purpose — this list went stale once already by counting.*
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
 - **2026-07-13 — The secretary got slow: a fresh calendar order took 16–23s to reply, as unbroken
-  silence (BUILT, NOT YET DEPLOYED — maintenance card 9af6967a).** It used to be ~6.5s. **Two causes,
+  silence (SHIPPED, DEPLOYED — maintenance card 9af6967a).** It used to be ~6.5s. **Two causes,
   both in the SHARED request path** — which is why every skill regressed at once, and why the fix is
   a rails fix. This is a **cure**: both steps remove a cause. There is no retry, no timeout bump, no
   special case anywhere in it.
@@ -516,8 +516,11 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   round-trips before the first reply), `scripts/calendar-extraction-livetest.mjs` (live, opt-in — the
   accuracy bar, three arms, with a pre-declared STOP rule: *a faster, dumber assistant is a worse
   product*), `scripts/calendar-editdelete-livetest.mjs` (live, human-gated, zero attendees).
-  **Not fixed here, and it is a different card:** the wrong-recipient bug (the contact's own email
-  attached to a *different* person). **No improvement is claimed.** An earlier draft of this entry
+  **Not fixed here, and they are a different card:** **(a)** the wrong-recipient bug (the contact's own
+  email attached to a *different* person); **(b)** *"na sexta"* does not reliably resolve to Friday.
+  Both were measured failing **identically on production code** during build review, so the accuracy
+  livetest is **red on both arms and exits 1 by design** — that red is the script working, and the way
+  to clear it is to fix the product, never to weaken the expectations. **No improvement is claimed.** An earlier draft of this entry
   claimed "7/8 → 0/8" — that number came from a card-folder experiment and **did not reproduce at
   HEAD** under the build review's live probe. It has been removed rather than qualified, because a
   bogus improvement figure is exactly how the open wrong-recipient card gets closed without a fix.
