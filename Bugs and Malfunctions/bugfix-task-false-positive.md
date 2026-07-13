@@ -365,7 +365,8 @@ his private to-do list. A louder failure is not a safer one.
   for deploying** this fix — it is the only thing that proves the posture actually works on the
   model, in both directions — and it has now been met: **48/48 live, 3 runs out of 3**, both
   directions proved (the two logged sentences that wrote the phantom task produce the empty plan;
-  the genuine untagged follow-ups — edit, delete, complete, create, list — still act). The fix is
-  committed but **not yet on the droplet**; the deploy is the owner's call.
+  the genuine untagged follow-ups — edit, delete, complete, create, list — still act). The fix
+  shipped as `8c138e6` and is **live on the droplet** (deployed 2026-07-13 14:44 UTC, verified in
+  the running container: the `ctx.isTagged` field, the untagged posture, and all three call sites).
 - **The phantom task itself** is still on the owner's real Google Tasks list. Operational, not
   code — the owner deletes it.
