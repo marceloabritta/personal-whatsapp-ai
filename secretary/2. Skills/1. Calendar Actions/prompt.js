@@ -122,6 +122,10 @@ export const RESOLVE_SCHEMA = {
 // request, it returns ONLY the fields that change (null / empty when untouched) —
 // or, if the request is ambiguous or missing a needed detail, a short `clarify`
 // question with every change left null. Emails to add/remove are plain arrays.
+//
+// The `new_*` prefix is this pair of schemas' own convention: the same all-day fields
+// CAL_SCHEMA / REVIEW_SCHEMA carry on the create side, named as the CHANGE they are.
+// null = "not changing this" — see THE RULE on new_all_day in skill.js (applyPatchToDraft).
 export const EDIT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -130,6 +134,8 @@ export const EDIT_SCHEMA = {
     "new_duration_min",
     "new_title",
     "new_summary",
+    "new_all_day",
+    "new_all_day_end_iso",
     "add_emails",
     "remove_emails",
     "clarify",
@@ -139,6 +145,8 @@ export const EDIT_SCHEMA = {
     new_duration_min: { type: ["number", "null"] },
     new_title: { type: ["string", "null"] },
     new_summary: { type: ["string", "null"] },
+    new_all_day: { type: ["boolean", "null"] },
+    new_all_day_end_iso: { type: ["string", "null"] },
     add_emails: { type: "array", items: { type: "string" } },
     remove_emails: { type: "array", items: { type: "string" } },
     clarify: { type: ["string", "null"] },
@@ -158,6 +166,8 @@ export const EDIT_REVIEW_SCHEMA = {
     "new_duration_min",
     "new_title",
     "new_summary",
+    "new_all_day",
+    "new_all_day_end_iso",
     "add_emails",
     "remove_emails",
     "clarify",
@@ -168,6 +178,10 @@ export const EDIT_REVIEW_SCHEMA = {
     new_duration_min: { type: ["number", "null"] },
     new_title: { type: ["string", "null"] },
     new_summary: { type: ["string", "null"] },
+    // Same two fields as EDIT_SCHEMA, same meaning. They are HERE so that "na verdade, o
+    // dia todo" / "só até sexta" works at the CONFIRM step too — the refinement loop.
+    new_all_day: { type: ["boolean", "null"] },
+    new_all_day_end_iso: { type: ["string", "null"] },
     add_emails: { type: "array", items: { type: "string" } },
     remove_emails: { type: "array", items: { type: "string" } },
     clarify: { type: ["string", "null"] },
@@ -348,10 +362,15 @@ Latest message: ${latest}`;
 export function buildEditSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. ${OWNER_NAME} wants to CHANGE an existing event. You are given the event's CURRENT state, the recent conversation, and ${OWNER_NAME}'s latest change request. Return ONLY the fields that should change; leave everything else null or empty.
 
-- new_start_iso: the event's NEW start, ISO 8601 with the -03:00 offset, resolving relative times ("4pm", "tomorrow", "move it 30 min later") against the current date/time and the event's current start. null if the time/date is NOT changing.
+- new_start_iso: the event's NEW start, ISO 8601 with the -03:00 offset, resolving relative times ("4pm", "tomorrow", "move it 30 min later") against the current date/time and the event's current start. null if the time/date is NOT changing. For an ALL-DAY event this is the new FIRST day at 00:00, -03:00.
 - new_duration_min: the NEW length in minutes if the request changes it ("make it 30 min", "an hour instead"). null if the duration is NOT changing. Changing only the start does NOT change the duration.
 - new_title: the NEW short calendar heading if the request renames it. null otherwise.
 - new_summary: a NEW one-line agenda/description if the request changes it. null otherwise.
+- new_all_day: the event's WHOLE-DAY state, and ONLY when the request CHANGES it.
+  - true when it becomes a whole-day event ("na verdade é o dia todo", "o dia inteiro", "make it all day"). Also fill new_start_iso with the day it lands on IF the day is also changing; if the day stays the same, leave new_start_iso null.
+  - false when it stops being one and GETS A TIME ("na verdade é às 10h", "at 3pm instead") — and then you MUST also fill new_start_iso with that time. Turning all-day off ALWAYS means giving the event a time.
+  - null in EVERY other case. A rename, a duration change, adding or removing an attendee, or moving an all-day event to another DAY all leave the whole-day state ALONE — null, not false.
+- new_all_day_end_iso: ONLY when the request changes the RANGE of an all-day event ("na verdade vai até sexta", "só quarta mesmo", "a semana toda"). The LAST day the event STILL COVERS, at 00:00 with the -03:00 offset — INCLUSIVE: "até sexta" is FRIDAY, do not add a day. null when the range is not changing, and null when the event collapses back to a single day. A rename/duration/attendee change touches NEITHER this field NOR new_all_day.
 - add_emails: array of email addresses to ADD as attendees (["carlos@x.com"]). Empty array if none. Only include addresses that actually appear in the request/conversation — NEVER invent one.
 - remove_emails: array of email addresses to REMOVE from the attendees. Empty array if none.
 - clarify: if the request is AMBIGUOUS or missing a detail you need (e.g. "move it earlier"/"push it back" with no target time, or "add João" with no email on record), set this to a SHORT question asking for exactly that, and leave every change field null/empty. Otherwise clarify=null.
@@ -385,7 +404,11 @@ Choose the "decision":
 - "cancel": the latest message calls the edit off / wants to keep the event as it was (e.g. no, leave it, forget it, deixa, mantém).
 - "unrelated": normal conversation, NOT a response to this confirmation. If unsure, choose "unrelated".
 
-Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, add_emails[], remove_emails[]. Change ONLY what the latest message asks; never invent a time or an email — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.`;
+Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, new_all_day, new_all_day_end_iso, add_emails[], remove_emails[]. Change ONLY what the latest message asks; never invent a time or an email — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.
+
+The WHOLE-DAY fields, same rules as the first pass:
+- new_all_day = true when ${OWNER_NAME} now says it is the whole day ("na verdade, o dia todo"); false ONLY when he gives it a TIME ("na verdade às 10h") — and then you MUST also fill new_start_iso with that time. In EVERY other case leave it null. A rename, a duration change, an attendee change, or moving an all-day event to another DAY all leave it null — NEVER false.
+- new_all_day_end_iso = the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when the RANGE changes ("só até sexta" → FRIDAY, do not add a day); null when the range is not changing or the event collapses back to a single day.`;
 }
 
 export function buildEditReviewUser({ eventJson, transcript, latest, nowStr }) {
@@ -619,16 +642,19 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
     editClarify: (question) => question,
     editNoChange: () =>
       "I couldn't tell what to change. Tell me the new time, duration, title, or which attendee to add/remove.",
+    // `when` arrives PRE-RENDERED by localizeWhen (all-day -> "14 de jul. de 2026 · All
+    // day (3 days)"), and `duration` is null for an all-day event — the same contract
+    // createConfirm has. "(1440 min)" is the bug, not the event.
     editConfirm: ({ title, emails, when, duration }) =>
       `Here's the updated event:
 - ${title}
 - ${emails}
-- ${when} (${duration} min)
+- ${when}${duration ? ` (${duration} min)` : ""}
 
 Reply "yes" to save and notify everyone, or tell me what else to change.`,
     editCancelled: ({ title }) => `Okay, I'll leave "${title}" as it was.`,
     editDone: ({ title, when, duration, emails, link }) =>
-      `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
+      `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nHere is a link for the event:\n${link}`,
     editGoogleError: () =>
       "I understood the change but failed to update it in Google. Error in the log.",
     listEvents: ({ startMs, endMs, events, capped }) => {
@@ -719,12 +745,12 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
       `Aqui está o evento atualizado:
 - ${title}
 - ${emails}
-- ${when} (${duration} min)
+- ${when}${duration ? ` (${duration} min)` : ""}
 
 Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.`,
     editCancelled: ({ title }) => `Ok, vou deixar "${title}" como estava.`,
     editDone: ({ title, when, duration, emails, link }) =>
-      `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
+      `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nAqui está o link do evento:\n${link}`,
     editGoogleError: () =>
       "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
     listEvents: ({ startMs, endMs, events, capped }) => {

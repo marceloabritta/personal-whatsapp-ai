@@ -200,6 +200,75 @@ function addDays(day, n) {
   return localDayStr(Date.parse(`${day}T12:00:00-03:00`) + n * 86400000);
 }
 
+// THE INCLUSIVE -> EXCLUSIVE CONVERSION HAPPENS HERE, AND ONLY HERE. The draft (and the
+// model, and the confirm bubble) speak INCLUSIVE days: all_day_end_iso is the last day the
+// event still covers. Google's `end.date` is EXCLUSIVE. A single day on 2026-07-14 is
+// start 2026-07-14 / end 2026-07-15; Mon 13 -> Wed 15 is start 2026-07-13 / end 2026-07-16
+// (a THURSDAY). Off by one is a 2-day event, or a zero-day one Google rejects.
+//
+// It is a FUNCTION, and not a line inside createFromDraft, because there are now TWO
+// writers — createFromDraft and applyEditDraft. There is still exactly ONE place days are
+// converted, which is what keeps the sentence above true.
+function allDayWireDates(draft) {
+  // The DAY is derived from start_iso in CAL_TZ — which is why start_iso stays REQUIRED
+  // (missingOf().noTime guards the null-start -> 1970 write on create; on edit the draft is
+  // seeded from the event itself, see allDayFromEvent).
+  const start_date = localDayStr(new Date(draft.start_iso).getTime());
+  const last_date = draft.all_day_end_iso
+    ? localDayStr(new Date(draft.all_day_end_iso).getTime())
+    : start_date;
+  return { start_date, end_date: addDays(last_date, 1) }; // end_date EXCLUSIVE
+}
+
+// The two ALL-DAY sanity clamps, in ONE place. Returns the sanitized INCLUSIVE
+// `all_day_end_iso`. Neither clamp has an error reply: the owner SEES the result in the
+// confirm bubble ("Dia todo", "(3 dias)") and corrects it before anything is written.
+//   - not all-day, or no end given -> null (a single day).
+//   - the end day is BEFORE the start day (or unparseable) -> null (a single day), so a
+//     MOVE that strands the old range end behind the new start self-heals instead of
+//     writing a backwards event Google rejects.
+//   - an absurdly long range -> clamp the SPAN. He sees "(31 dias)" and corrects it.
+function normalizeAllDay(start_iso, all_day, all_day_end_iso) {
+  let end = all_day ? all_day_end_iso || null : null;
+  if (!end) return null;
+  const startDay = dayOfIso(start_iso);
+  const endDay = dayOfIso(end);
+  if (!startDay || !endDay || endDay <= startDay) return null;
+  const span =
+    Math.round(
+      (Date.parse(`${endDay}T12:00:00-03:00`) - Date.parse(`${startDay}T12:00:00-03:00`)) /
+        86400000
+    ) + 1;
+  if (span > MAX_ALL_DAY_DAYS) {
+    end = `${addDays(startDay, MAX_ALL_DAY_DAYS - 1)}T00:00:00-03:00`;
+  }
+  return end;
+}
+
+// The READ direction: the all-day shape of a REAL Google event, in the house's own terms.
+// The inverse of allDayWireDates — Google's `end.date` is EXCLUSIVE, so the INCLUSIVE last
+// day is one day back, and it is null when that IS the start day (a single all-day day
+// carries no range end — the create convention).
+//
+// `start_iso` is HERE, and not left to the callers, because an all-day event has NO
+// `start.dateTime` at all: without it an edit draft has no day, and a RENAME of an all-day
+// event would reach allDayWireDates with a null start and write `new Date(null)` — the
+// event lands in 1970. It is the day at 00:00 -03:00, the same shape the model is asked to
+// emit on a create. For a TIMED event this returns the event's own dateTime, unchanged.
+function allDayFromEvent(ev) {
+  const all_day = !ev?.start?.dateTime && !!ev?.start?.date;
+  if (!all_day) {
+    return { all_day: false, start_iso: ev?.start?.dateTime || null, all_day_end_iso: null };
+  }
+  const startDay = ev.start.date;
+  const lastDay = ev.end?.date ? addDays(ev.end.date, -1) : startDay; // EXCLUSIVE -> INCLUSIVE
+  return {
+    all_day: true,
+    start_iso: `${startDay}T00:00:00-03:00`,
+    all_day_end_iso: lastDay > startDay ? `${lastDay}T00:00:00-03:00` : null,
+  };
+}
+
 function calendarClient(env) {
   return google.calendar({ version: "v3", auth: googleAuth(env) });
 }
@@ -251,14 +320,29 @@ async function getEvent(env, eventId) {
   return r.data;
 }
 
-// Patch an existing event with only the changed fields and notify the attendees.
-async function patchEvent(env, eventId, requestBody) {
+// The ONE events.update in the repo: a FULL-RESOURCE REPLACE of an existing event, and the
+// attendees are emailed about the change (the ordinary Google "updated invitation" — the
+// same event, the same identity, no cancel-and-recreate).
+//
+// ⚠ UPDATE, NOT PATCH — deliberately. Converting a TIMED event into an ALL-DAY one means
+// the old `start.dateTime` must not survive alongside the new `start.date`; a half-converted
+// event is the corruption the edit path used to REFUSE the write rather than risk. Clearing
+// a nested field through `events.patch` rests on Google's patch semantics, which no offline
+// test can prove. A full replace makes the half-converted event STRUCTURALLY IMPOSSIBLE:
+// `start` is a fresh literal, so nothing of the old one is left.
+//
+// Its one real cost: WHAT THE BODY DOES NOT CARRY, GOOGLE CLEARS. So the caller passes the
+// FRESHLY FETCHED event and we spread it — reminders, colorId, recurrence, sequence and
+// everything else we never touch ride along. resumeEditConfirm already re-fetches the event
+// before writing, so this costs NO extra API call. (scripts/calendar-edit-selftest.mjs pins
+// colorId as the tripwire for exactly this.)
+async function updateEvent(env, eventId, ev, fields) {
   const cal = calendarClient(env);
-  const r = await cal.events.patch({
+  const r = await cal.events.update({
     calendarId: calId(env),
     eventId,
     sendUpdates: "all", // email the attendees about the change
-    requestBody,
+    requestBody: { ...ev, ...fields },
   });
   return r.data;
 }
@@ -566,30 +650,12 @@ function draftFromInfo(ctx, info) {
     `${owner} & ${names.join(" & ") || contact || "Guest"}`;
   const duration_min = Number(info.duration_min) > 0 ? Number(info.duration_min) : 45;
 
-  // ALL-DAY. `all_day_end_iso` is the LAST day the event still COVERS — INCLUSIVE. Both
-  // sanity clamps live HERE and nowhere else, because this is the one normalizer every
-  // merge path funnels through. Neither clamp has an error reply: the owner SEES the result
-  // in the confirm bubble ("Dia todo", "(3 dias)") and corrects it before anything is written.
+  // ALL-DAY. `all_day_end_iso` is the LAST day the event still COVERS — INCLUSIVE. The two
+  // sanity clamps are normalizeAllDay's, and this is the one normalizer every create merge
+  // path funnels through. applyPatchToDraft (edit) calls the same clamps, so a move that
+  // strands the old range end behind the new start self-heals there too.
   const all_day = !!info.all_day;
-  let all_day_end_iso = all_day ? info.all_day_end_iso || null : null;
-  if (all_day_end_iso) {
-    const startDay = dayOfIso(info.start_iso);
-    const endDay = dayOfIso(all_day_end_iso);
-    if (!startDay || !endDay || endDay <= startDay) {
-      // The end day is BEFORE the start day (or unparseable) → drop it → a single-day event.
-      all_day_end_iso = null;
-    } else {
-      const span =
-        Math.round(
-          (Date.parse(`${endDay}T12:00:00-03:00`) - Date.parse(`${startDay}T12:00:00-03:00`)) /
-            86400000
-        ) + 1;
-      // Absurdly long range → clamp the SPAN. He sees "(31 dias)" and corrects it.
-      if (span > MAX_ALL_DAY_DAYS) {
-        all_day_end_iso = `${addDays(startDay, MAX_ALL_DAY_DAYS - 1)}T00:00:00-03:00`;
-      }
-    }
-  }
+  const all_day_end_iso = normalizeAllDay(info.start_iso, all_day, info.all_day_end_iso);
 
   return {
     title,
@@ -642,13 +708,8 @@ async function openCreateConfirm(ctx, draft) {
   );
 }
 
-// Actually write the confirmed draft to Google and report back.
-//
-// THE INCLUSIVE -> EXCLUSIVE CONVERSION HAPPENS HERE, AND ONLY HERE. The draft (and the
-// model, and the confirm bubble) speak INCLUSIVE days: all_day_end_iso is the last day the
-// event still covers. Google's `end.date` is EXCLUSIVE. A single day on 2026-07-14 is
-// start 2026-07-14 / end 2026-07-15; Mon 13 -> Wed 15 is start 2026-07-13 / end 2026-07-16
-// (a THURSDAY). Off by one is a 2-day event, or a zero-day one Google rejects.
+// Actually write the confirmed draft to Google and report back. The INCLUSIVE -> EXCLUSIVE
+// day conversion is allDayWireDates' — the one place it happens, shared with applyEditDraft.
 async function createFromDraft(ctx, draft) {
   const { env, number, send } = ctx;
   const emails = draftEmails(draft);
@@ -658,13 +719,7 @@ async function createFromDraft(ctx, draft) {
   let end_date = null;
   let end_iso = null;
   if (all_day) {
-    // The DAY is derived from start_iso in CAL_TZ — which is why start_iso stays REQUIRED
-    // and missingOf().noTime still guards the null-start → 1970 write.
-    start_date = localDayStr(new Date(draft.start_iso).getTime());
-    const last_date = draft.all_day_end_iso
-      ? localDayStr(new Date(draft.all_day_end_iso).getTime())
-      : start_date;
-    end_date = addDays(last_date, 1); // EXCLUSIVE
+    ({ start_date, end_date } = allDayWireDates(draft));
   } else {
     end_iso = new Date(
       new Date(draft.start_iso).getTime() + draft.duration_min * 60000
@@ -967,42 +1022,45 @@ async function inspectMissing(ctx, draft, m, { gathering = false } = {}) {
 // event tagless ("actually 4:30", "also add bruno@x.com") — same review machinery
 // as create (confirm | modify | cancel | unrelated). Nothing is written until "yes".
 
-// Compact view of the real event handed to the focused edit pass.
+// Compact view of the real event handed to the focused edit pass. It must show the model
+// WHAT IT IS EDITING: an all-day event has no `start.dateTime`, so reporting only that left
+// the model blind to both the event's day and the fact that it is all-day at all.
 function eventForLLM(ev) {
-  const start = ev.start?.dateTime || null;
-  const end = ev.end?.dateTime || null;
+  const { all_day, start_iso, all_day_end_iso } = allDayFromEvent(ev);
+  const end = all_day ? null : ev.end?.dateTime || null;
   const duration_min =
-    start && end ? Math.round((new Date(end) - new Date(start)) / 60000) : null;
+    start_iso && end ? Math.round((new Date(end) - new Date(start_iso)) / 60000) : null;
   return {
     title: ev.summary || "",
-    start_iso: start,
+    start_iso,
     end_iso: end,
     duration_min,
+    all_day,
+    all_day_end_iso,
     attendees: (ev.attendees || []).map((a) => a.email).filter(Boolean),
   };
 }
 
-// The editable DRAFT = the event's target state. Seeded from the current event, then
-// each requested change is folded in; the confirm writes it to Google.
+// The editable DRAFT = the event's target state. Seeded from the current event, then each
+// requested change is folded in; the confirm writes it to Google. Its ALL-DAY fields are
+// the create draft's, with the same meaning — `all_day_end_iso` is the LAST day the event
+// still covers, INCLUSIVE — so the same renderer (localizeWhen) and the same wire
+// conversion (allDayWireDates) serve both sides. There is no second all-day model.
 //
-// ⚠ THE ALL-DAY GUARD (corruption prevention — it does NOT make an all-day event editable).
-// An all-day event has NO `start.dateTime`, so `start_iso` is null here and `duration_min`
-// falls back to 45. `applyPatchToDraft` then FILLS start_iso in on "move a biópsia pra
-// quarta", and `applyEditDraft` — guarded only by `if (draft.start_iso)` — would patch
-// `start:{dateTime}` over it, SILENTLY CONVERTING the owner's all-day event into a
-// 45-minute block. Carrying `all_day` onto the draft is what lets that guard refuse. The
-// event is still renamed / re-invited; it is simply not MOVED. Rescheduling an all-day
-// event is a separate card.
+// `duration_min` falls back to 45 for an all-day event. That is not a guess about the
+// event: it is the default length used only IF the owner converts it to a timed one
+// ("na verdade é às 10h") without stating a length — exactly the create default.
 function editDraftFromEvent(ev) {
-  const start = ev.start?.dateTime || null;
-  const end = ev.end?.dateTime || null;
+  const { all_day, start_iso, all_day_end_iso } = allDayFromEvent(ev);
+  const end = all_day ? null : ev.end?.dateTime || null;
   const duration_min =
-    start && end ? Math.round((new Date(end) - new Date(start)) / 60000) : 45;
+    start_iso && end ? Math.round((new Date(end) - new Date(start_iso)) / 60000) : 45;
   return {
     title: ev.summary || "",
-    start_iso: start,
+    start_iso,
     duration_min,
-    all_day: !ev.start?.dateTime && !!ev.start?.date,
+    all_day,
+    all_day_end_iso,
     summary: ev.description || "",
     emails: (ev.attendees || []).map((a) => a.email).filter(Boolean),
   };
@@ -1010,12 +1068,18 @@ function editDraftFromEvent(ev) {
 
 // Does the patch actually change anything? (An all-null/empty patch means the model
 // couldn't extract a change — distinct from a `clarify` question.)
+//
+// `new_all_day === true` is a change ON ITS OWN — "na verdade é o dia todo" says nothing
+// else, and without this it was answered with "não consegui entender o que mudar". So is a
+// new range end. `new_all_day === false` is NOT: see THE RULE below.
 function hasEditChange(p) {
   return !!(
     p.new_start_iso ||
     Number(p.new_duration_min) > 0 ||
     p.new_title ||
     (typeof p.new_summary === "string" && p.new_summary.trim()) ||
+    p.new_all_day === true ||
+    p.new_all_day_end_iso ||
     (Array.isArray(p.add_emails) && p.add_emails.length) ||
     (Array.isArray(p.remove_emails) && p.remove_emails.length)
   );
@@ -1023,6 +1087,14 @@ function hasEditChange(p) {
 
 // Fold a change patch onto the draft (immutably): overwrite the touched fields, merge
 // attendees (case-insensitive remove, then dedup add). Untouched fields carry over.
+//
+// ⚠ THE RULE — `new_all_day === false` IS HONOURED ONLY ALONGSIDE A `new_start_iso`.
+// EDIT_SCHEMA REQUIRES the field, so a model answering an ordinary RENAME can emit `false`
+// rather than `null` — and a naive fold would then SILENTLY CONVERT the owner's all-day
+// event into a 45-minute block. That is the exact harm the old guard existed to prevent,
+// re-entering through the front door. Turning all-day OFF means GIVING the event a time
+// ("na verdade é às 10h") — always. So a bare `false` is IGNORED. `true` and a new range
+// end are honoured on their own. Enforced HERE, in code, not in prompt hope.
 function applyPatchToDraft(draft, patch) {
   const d = { ...draft, emails: [...draft.emails] };
   if (patch.new_title) d.title = patch.new_title;
@@ -1030,6 +1102,14 @@ function applyPatchToDraft(draft, patch) {
     d.summary = patch.new_summary;
   if (patch.new_start_iso) d.start_iso = patch.new_start_iso;
   if (Number(patch.new_duration_min) > 0) d.duration_min = Number(patch.new_duration_min);
+
+  if (patch.new_all_day === true) d.all_day = true;
+  else if (patch.new_all_day === false && patch.new_start_iso) d.all_day = false;
+  if (patch.new_all_day_end_iso) d.all_day_end_iso = patch.new_all_day_end_iso;
+  // The same two clamps draftFromInfo applies, so a move that strands the old range end
+  // behind the new start self-heals into a single day instead of writing a backwards
+  // event, and turning all-day off drops the range end with it.
+  d.all_day_end_iso = normalizeAllDay(d.start_iso, d.all_day, d.all_day_end_iso);
 
   const remove = new Set(
     (patch.remove_emails || []).map((e) => String(e || "").trim().toLowerCase())
@@ -1046,16 +1126,20 @@ function applyPatchToDraft(draft, patch) {
 }
 
 // The draft rendered as an "event" for the review LLM (so it judges against the
-// currently-proposed target, not the original).
+// currently-proposed target, not the original). An ALL-DAY target has no end instant —
+// printing start+duration for one describes an event that does not exist.
 function draftAsEventJson(d) {
-  const end_iso = d.start_iso
-    ? new Date(new Date(d.start_iso).getTime() + d.duration_min * 60000).toISOString()
-    : null;
+  const end_iso =
+    d.start_iso && !d.all_day
+      ? new Date(new Date(d.start_iso).getTime() + d.duration_min * 60000).toISOString()
+      : null;
   return JSON.stringify({
     title: d.title,
     start_iso: d.start_iso,
     end_iso,
     duration_min: d.duration_min,
+    all_day: !!d.all_day,
+    all_day_end_iso: d.all_day_end_iso || null,
     attendees: d.emails,
   });
 }
@@ -1144,46 +1228,56 @@ async function openEditConfirm(ctx, eventId, draft) {
     reply(ctx.lang).editConfirm({
       title: draft.title,
       emails: draft.emails.join(", "),
-      when: localizeDate(ctx.lang, draft.start_iso),
-      duration: draft.duration_min,
+      // localizeWhen, not localizeDate: an all-day target has no clock time to print, and
+      // an all-day event has no duration to state. Identical to openCreateConfirm.
+      when: localizeWhen(ctx.lang, draft),
+      duration: draft.all_day ? null : draft.duration_min,
     })
   );
 }
 
-// Write the confirmed draft to Google (patch the existing event) and report back.
-async function applyEditDraft(ctx, eventId, draft) {
+// Write the confirmed draft to Google (a full-resource update of the existing event) and
+// report back. `ev` is the FRESHLY FETCHED event resource — see updateEvent for why the
+// caller owns the fetch and why the body is spread from it.
+//
+// The old guard here REFUSED to write a start/end for an all-day event, because the only
+// shape it knew how to write was a `dateTime` one, and that would have converted the event
+// into a timed block. Its intent is honoured, not deleted: an all-day draft is now written
+// in the ALL-DAY WIRE SHAPE (`start:{date}` / `end:{date}`, the end EXCLUSIVE — the same
+// conversion createFromDraft makes), so there is nothing left to refuse.
+async function applyEditDraft(ctx, eventId, draft, ev) {
   const { env, number, send } = ctx;
-  const body = {
+  const all_day = !!draft.all_day;
+
+  const fields = {
     summary: draft.title,
     description: draft.summary || "",
     attendees: draft.emails.map((email) => ({ email })),
   };
-  // `!draft.all_day` — see editDraftFromEvent. Writing a `dateTime` start onto an ALL-DAY
-  // event would convert it into a timed block. Refuse the write; change everything else.
-  if (draft.start_iso && !draft.all_day) {
+  if (all_day && draft.start_iso) {
+    const { start_date, end_date } = allDayWireDates(draft);
+    fields.start = { date: start_date };
+    fields.end = { date: end_date };
+  } else if (draft.start_iso) {
     const endIso = new Date(
       new Date(draft.start_iso).getTime() + draft.duration_min * 60000
     ).toISOString();
-    body.start = { dateTime: draft.start_iso, timeZone: CAL_TZ };
-    body.end = { dateTime: endIso, timeZone: CAL_TZ };
+    fields.start = { dateTime: draft.start_iso, timeZone: CAL_TZ };
+    fields.end = { dateTime: endIso, timeZone: CAL_TZ };
   }
 
-  const updated = await patchEvent(env, eventId, body);
+  const updated = await updateEvent(env, eventId, ev, fields);
 
-  const finalStart = updated.start?.dateTime || draft.start_iso || null;
-  const finalEnd = updated.end?.dateTime || null;
-  const finalDur =
-    finalStart && finalEnd
-      ? Math.round((new Date(finalEnd) - new Date(finalStart)) / 60000)
-      : draft.duration_min;
+  // Rendered from the DRAFT, not by reading `updated.start.dateTime` back — which is null
+  // for an all-day event, and is where "(sem horário)" came from.
   await send(
     number,
     reply(ctx.lang).editDone({
-      title: updated.summary || draft.title || "(untitled)",
-      emails: (updated.attendees || []).map((a) => a.email).filter(Boolean).join(", "),
-      when: localizeDate(ctx.lang, finalStart),
-      duration: finalDur,
-      link: updated.htmlLink || "",
+      title: draft.title || "(untitled)",
+      emails: draft.emails.join(", "),
+      when: localizeWhen(ctx.lang, draft),
+      duration: all_day ? null : draft.duration_min,
+      link: updated.htmlLink || ev.htmlLink || "",
     })
   );
 }
@@ -1341,17 +1435,19 @@ async function resumeEditConfirm(ctx, session) {
 
   // decision === "confirm" — write it now.
   try {
-    // Re-check the event still exists before patching (it may have been deleted).
+    // Re-check the event still exists before writing (it may have been deleted). The
+    // fetched resource is then HANDED to applyEditDraft: events.update replaces the whole
+    // event, so the body must carry everything we do not touch. Same fetch, no extra call.
     const ev = await getEvent(env, eventId);
     if (!ev || ev.status !== "confirmed") {
       await sessions.clear(remoteJid);
       await ctx.sendFailure(number, reply(ctx.lang).editNoMatch());
       return;
     }
-    await applyEditDraft(ctx, eventId, draft);
+    await applyEditDraft(ctx, eventId, draft, ev);
     await sessions.clear(remoteJid);
   } catch (e) {
-    console.error("Calendar edit patch error:", e?.response?.data || e?.message || e);
+    console.error("Calendar edit update error:", e?.response?.data || e?.message || e);
     await sessions.clear(remoteJid);
     await ctx.sendFailure(number, reply(ctx.lang).editGoogleError());
   }

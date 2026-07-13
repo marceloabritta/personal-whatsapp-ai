@@ -307,15 +307,23 @@ in the strip at the top of the day — not a 24h timed block. Two fields carry i
 
 > ⚠️ **Google's `end.date` is EXCLUSIVE.** The draft, the model, the confirm bubble and this
 > doc all speak **inclusive** days; the conversion happens in **exactly one place**,
-> `createFromDraft` (`end_date = addDays(last_date, 1)`). A single day on 2026-07-14 is
-> `start.date 2026-07-14` / `end.date 2026-07-15`. **Mon 13 → Wed 15 is `start.date
-> 2026-07-13` / `end.date 2026-07-16` — a THURSDAY.** Off by one is a 2-day event, or a
-> zero-day one Google rejects.
+> **`allDayWireDates(draft)`** (`end_date = addDays(last_date, 1)`) — called by
+> `createFromDraft` *and* by `applyEditDraft`, which is why it is a function and not a line.
+> A single day on 2026-07-14 is `start.date 2026-07-14` / `end.date 2026-07-15`. **Mon 13 →
+> Wed 15 is `start.date 2026-07-13` / `end.date 2026-07-16` — a THURSDAY.** Off by one is a
+> 2-day event, or a zero-day one Google rejects.
 
-Two sanity clamps, both in `draftFromInfo` (the one normalizer every merge path funnels
-through), both **silent** — the owner SEES the result in the confirm bubble before anything is
-written, and confirm-first is the safety net: an end day **before** the start day is dropped
-(→ a single-day event), and a span longer than `MAX_ALL_DAY_DAYS` (31) is **clamped** to it.
+Two sanity clamps, both in **`normalizeAllDay(start_iso, all_day, all_day_end_iso)`** (called
+by `draftFromInfo` on create and by `applyPatchToDraft` on edit), both **silent** — the owner
+SEES the result in the confirm bubble before anything is written, and confirm-first is the
+safety net: an end day **before** the start day is dropped (→ a single-day event), and a span
+longer than `MAX_ALL_DAY_DAYS` (31) is **clamped** to it.
+
+**`allDayFromEvent(ev)`** is the READ direction — the inverse — turning a real Google event
+back into `{ all_day, start_iso, all_day_end_iso }`: the inclusive last day is
+`addDays(ev.end.date, -1)`, and `start_iso` is the event's day at 00:00 -03:00 **because an
+all-day event has no `start.dateTime` at all**. Without that seeded start an edit draft has no
+day, and a *rename* would reach `allDayWireDates` with a null start and land the event in 1970.
 
 The when-line is rendered by **`localizeWhen(lang, draft)`** (prompt.js): timed →
 `localizeDate`; all-day single → `14 de jul. de 2026 · Dia todo`; all-day range → both
@@ -325,12 +333,18 @@ right one is the real danger. `createConfirm`/`createDone` are passed `duration:
 all-day event, so the `(N min)` suffix disappears entirely. The words "All day"/"Dia todo"
 are the ones the READ side (`eventBlock`) already prints.
 
-**EDITING an all-day event is NOT supported** (its own card). `editDraftFromEvent` carries
-`all_day` (`!ev.start?.dateTime && !!ev.start?.date`) purely so `applyEditDraft`'s guard
-(`if (draft.start_iso && !draft.all_day)`) can **refuse the start/end patch**: without it,
-"move a biópsia pra quarta" would write a `dateTime` start over an all-day event and silently
-convert it into a 45-minute block. The event is still renamed/re-invited — it is simply not
-**moved**.
+**EDITING an all-day event works** (card 64ff1f1d) — through the same confirm-first flow as
+any other event: move it to another day, change its multi-day range, flip a timed event to
+all-day and back. It reuses this exact shape (`all_day` / `all_day_end_iso`, inclusive days,
+the same 31-day clamp) — there is **no second all-day model**. See §Task: EDIT.
+
+`applyEditDraft` used to carry a **guard** (`if (draft.start_iso && !draft.all_day)`) that
+**refused** to write a start/end for an all-day event, because the only shape it knew how to
+write was a `dateTime` one — which would have silently converted the owner's all-day event
+into a 45-minute block. **That guard's intent is honoured, not deleted:** the all-day branch
+now writes the correct wire shape (`start:{date}` / `end:{date}`), so there is nothing left
+to refuse. Read the guard's replacement — **THE RULE** on `new_all_day` — under §Task: EDIT
+before touching that path.
 
 **The rule the predicate encodes:** *a required field is legitimate only if a TRUTHFUL answer
 can satisfy it.* The old **≥1-attendee** invariant failed that test ("nobody, it's just me" was
@@ -441,11 +455,22 @@ link) works too. **Confirm-first and stays open** (reuses
 create's confirm/modify machinery): the change is folded into a **draft** of the event's
 target state, shown for confirmation, and written to Google only on `yes`. While the confirm
 session is open the owner can keep refining the same event tagless. **The draft** — seeded by
-`editDraftFromEvent(ev)` — is `{ title, start_iso, duration_min, all_day, summary, emails[] }`
-(`all_day` exists only to make `applyEditDraft` refuse the start/end patch on an all-day event
-— see ALL-DAY under CREATE; an all-day event is renamed/re-invited but **not moved**);
-`applyPatchToDraft(draft, patch)` folds a change onto it (overwrite touched fields; merge
-attendees: case-insensitive remove then dedup add).
+`editDraftFromEvent(ev)` — is `{ title, start_iso, duration_min, all_day, all_day_end_iso,
+summary, emails[] }`: the CREATE draft's own all-day shape (see ALL-DAY under CREATE), seeded
+off the real event by `allDayFromEvent(ev)`, so `localizeWhen` and `allDayWireDates` serve
+both sides. `applyPatchToDraft(draft, patch)` folds a change onto it (overwrite touched
+fields; merge attendees: case-insensitive remove then dedup add; then re-run
+`normalizeAllDay`, so a move that strands the old range end behind the new start self-heals).
+
+> 🔴 **THE RULE — `new_all_day === false` is honoured ONLY alongside a `new_start_iso`.**
+> `EDIT_SCHEMA` **requires** the field, so a model answering an ordinary **rename** can emit
+> `false` rather than `null` — and a naive fold would then silently convert the owner's
+> all-day event into a **45-minute block**. That is precisely the harm the old guard existed
+> to prevent, re-entering through the front door. Turning all-day **off** means **giving the
+> event a time** ("na verdade é às 10h") — always. So a bare `false` is **ignored**;
+> `new_all_day:true` and `new_all_day_end_iso` are honoured on their own. Enforced in
+> `applyPatchToDraft`, **in code, not in prompt hope** — the rename-only tripwire in
+> `scripts/calendar-edit-selftest.mjs` (f) is what proves it.
 
 1. **`handleEdit`:** gather `emails` + `start_iso` from `info` and `eidEventId =
    resolveEventId(quoted.calendarLink)` (may be null) — same signals delete uses. Here
@@ -461,9 +486,14 @@ attendees: case-insensitive remove then dedup add).
    ```jsonc
    { "new_start_iso": string|null, "new_duration_min": number|null,
      "new_title": string|null, "new_summary": string|null,
+     "new_all_day": boolean|null,        // null = not changing. See THE RULE above.
+     "new_all_day_end_iso": string|null, // the LAST day COVERED, INCLUSIVE. null = not changing.
      "add_emails": string[], "remove_emails": string[],
      "clarify": string|null }   // a question when the request is ambiguous/underspecified
    ```
+   `hasEditChange` counts `new_all_day:true` and a `new_all_day_end_iso` as changes **on
+   their own** ("na verdade é o dia todo" says nothing else); a bare `false` is **not** a
+   change.
    - `clarify` set **and** no concrete change (`hasEditChange` false) → open a session
      (`stage:"await_clarification"`, `awaitFrom:"owner"`, 600 s, holds only `eventId`) and
      ask the question.
@@ -478,9 +508,25 @@ attendees: case-insensitive remove then dedup add).
 3. **`resumeEditConfirm`** (`await_confirmation`, every owner message): one review call
    **`reviewEdit`** (`buildEditReviewSystem`, `EDIT_REVIEW_SCHEMA`, 2048) — the change fields
    **plus** a `decision` — judged against the *proposed draft* (`draftAsEventJson`):
-   - `confirm` → re-`getEvent` (still `confirmed`?) then **`applyEditDraft`**: patch
-     `summary`/`description`/`start`/`end` (end = start + duration)/`attendees` from the
-     draft, `events.patch({ sendUpdates:"all" })`, `editDone` from the returned event, clear.
+   - `confirm` → re-`getEvent` (still `confirmed`?) then **`applyEditDraft(ctx, eventId,
+     draft, ev)`** — the fetched resource is **handed to it** — writing
+     `summary`/`description`/`attendees` plus either `start:{date}/end:{date}` (all-day, the
+     end EXCLUSIVE via `allDayWireDates`) or `start:{dateTime}/end:{dateTime}` (timed, end =
+     start + duration). `editDone` renders from the **DRAFT** (`localizeWhen`; `duration:
+     null` when all-day), **not** by reading `updated.start.dateTime` back — that is `null`
+     for an all-day event, and is where `(sem horário)` came from. Then clear.
+
+     > ⚠️ **The write is `events.update` (`updateEvent`), NOT `events.patch`** — a full
+     > **resource replace**. Flipping a timed event to all-day means the old `start.dateTime`
+     > must not survive next to the new `start.date`; a half-converted event is the corruption
+     > the guard used to refuse the write over. Clearing a nested field via `patch` rests on
+     > Google's patch semantics, which **no offline test can prove** — a green suite would mean
+     > nothing. A replace makes the half-converted event *structurally impossible*. **Its one
+     > cost: what the body does not carry, Google CLEARS** — so the body is `{ ...ev, summary,
+     > description, attendees, start, end }`, spreading the freshly-fetched event so
+     > `reminders` / `colorId` / `recurrence` / `sequence` survive. `resumeEditConfirm` was
+     > **already** re-fetching the event, so this costs **no extra API call**. The `colorId`
+     > tripwire in the selftest (a6/f4) is what pins it.
    - `modify` → `hasEditChange` → `applyPatchToDraft` onto the draft + `openEditConfirm`
      (re-show, **keep open**); ambiguous further change (`clarify`, no change) → ask + keep
      open; nothing resolved → silent.
@@ -522,7 +568,8 @@ localized "(Showing the first 50.)" note rather than truncating silently; the em
   Model = `ctx.model`.
 - **Google Calendar (OAuth refresh token):** `events.list` (dedupe on create + match/sweep
   on delete + **read the window on list**), `events.get` (resolve a decoded link id; read current state on edit),
-  `events.insert` (create), `events.patch` (edit, `sendUpdates:"all"`), `events.delete`
+  `events.insert` (create), `events.update` (edit — a full-resource REPLACE, `sendUpdates:"all"`;
+  see §Task: EDIT for why it is not `patch`), `events.delete`
   (cancel). `sendUpdates:"all"` sends invite / change / cancellation emails.
 - **WhatsApp:** all user-facing text via `ctx.send`.
 
@@ -540,7 +587,7 @@ localized "(Showing the first 50.)" note rather than truncating silently; the em
   `yes`/answer is ignored (start over with `@secretary`).
 - **Completes when:** CREATE → owner confirms and `events.insert` succeeds (message + link
   sent). DELETE → owner confirms and `events.delete` succeeds. EDIT → owner confirms and
-  `events.patch` succeeds (message + link sent; session cleared). **No calendar write until
+  `events.update` succeeds (message + link sent; session cleared). **No calendar write until
   the owner confirms**, for all three.
 - **Failure modes:** every external call is wrapped; failures send a plain-language reply
   and clear the session where relevant. A model refusal or unparseable reply resolves to

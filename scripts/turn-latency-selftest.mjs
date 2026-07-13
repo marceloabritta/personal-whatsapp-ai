@@ -672,6 +672,7 @@ const calendar = () => ({
       const e = new Error("Not Found"); e.code = 404; throw e;
     },
     patch: async (a) => { rec("events.patch", a); return { data: { id: a.eventId } }; },
+    update: async (a) => { rec("events.update", a); return { data: { id: a.eventId } }; },
     delete: async (a) => { rec("events.delete", a); return { data: {} }; },
   },
 });
@@ -820,7 +821,10 @@ function reset(jid) {
 const body_ = (s) => String(s).replace(/^\*\[[^\]]+\]:\*\s*/, "").trim();
 const shown = (o) => (o.length ? JSON.stringify(body_(o[0])) : "(NOTHING AT ALL)");
 const inserts = () => googleCalls.filter((c) => c.name === "events.insert");
-const patches = () => googleCalls.filter((c) => c.name === "events.patch");
+// The edit WRITE, whichever verb carries it: patch and update are both a write to Google, and
+// which one the skill uses is an implementation detail. T3.3 is about the confirm-first promise
+// — nothing written before "sim", the edit written after — so it watches the write, not the verb.
+const editWrites = () => googleCalls.filter((c) => c.name === "events.patch" || c.name === "events.update");
 const deletes = () => googleCalls.filter((c) => c.name === "events.delete");
 const kinds = () => llmCalls.map((c) => c.kind);
 
@@ -1022,7 +1026,7 @@ console.log("\n=== CAPABILITY: nothing was traded away for speed ===\n");
 const EID = Buffer.from(`${EVENT_ID} marcelo@example.com`).toString("base64");
 const INVITE = `Convite criado: Reunião com a Laura — https://calendar.google.com/event?eid=${EID}`;
 
-// ---- T3.3 — EDIT: a quoted invite + "move it to 5pm" -> confirm -> events.patch ----------
+// ---- T3.3 — EDIT: a quoted invite + "move it to 5pm" -> confirm -> the edit is written -----
 reset("5566666666666@s.whatsapp.net");
 scripted = [
   ROUTER(),
@@ -1042,7 +1046,8 @@ check("T3.3a CAPABILITY — edit reaches the EDIT CONFIRM card, showing the NEW 
     /evento atualizado/i.test(body_(r.out[0])) &&
     /5:00 PM/.test(body_(r.out[0])) &&
     /"sim"/i.test(body_(r.out[0])), 3);
-check("T3.3b CAPABILITY — and NOTHING is patched before the owner says 'sim'", patches().length === 0, 3);
+check("T3.3b CAPABILITY — and NOTHING is written to Google before the owner says 'sim'",
+  editWrites().length === 0, 3);
 
 scripted = [
   { kind: "edit_review", json: JSON.stringify({ decision: "confirm", new_start_iso: null, new_duration_min: null,
@@ -1051,8 +1056,8 @@ scripted = [
 r = await say("sim");
 console.log(`   owner    : sim                                        <- UNTAGGED`);
 console.log(`   assistant: ${shown(r.out)}`);
-check(`T3.3c CAPABILITY — 'sim' PATCHES Google (events.patch, ${patches().length} call${patches().length === 1 ? "" : "s"})`,
-  patches().length === 1, 3);
+check(`T3.3c CAPABILITY — 'sim' WRITES the edit to Google (${editWrites().length === 1 ? editWrites()[0].name : "no write"}, ${editWrites().length} call${editWrites().length === 1 ? "" : "s"})`,
+  editWrites().length === 1, 3);
 
 // ---- T3.4 — DELETE: a quoted invite + "cancel it" -> confirm -> events.delete ------------
 reset("5577777777777@s.whatsapp.net");
