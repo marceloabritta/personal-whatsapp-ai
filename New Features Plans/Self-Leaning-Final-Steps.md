@@ -1,109 +1,168 @@
 # Self-Learning — Final Steps (what only YOU can do)
 
-> **Status: BUILT, DEPLOYED, LIVE — but not yet verified in the chat.**
-> The code is in production (droplet restarted 2026-07-12, five skills loaded incl. `feedback`).
-> Everything below is what a human has to do, because it needs your WhatsApp, your API key, or
-> your judgement. No code changes are pending.
+> **Status (2026-07-12, updated): the droplet half is LIVE AND PROVEN. The Mac half is BLOCKED.**
+> The secretary is already writing real failure reports about itself in production. What does not
+> work is the *local* daily job that pulls them down and turns them into bugfix plans — macOS
+> blocks it. **No code changes are pending. The remaining work is three chores on the Mac.**
 
-**Context for a future agent:** this was built in Claude Code session
-`afe44b80-14f1-4262-95d6-be6320f6d7ff`. Commits: `14e9c17` (the feature), `4a8c92d` (deploy +
-plan archived), `086a752` (docs). The full design lives in
-`Shipped Features/2026-07-12 - self-learning.md`; the taxonomy is in `ARCHITECTURE.md`
-("Self-learning") and `secretary/1. Orchestrator/ORCHESTRATOR.md`.
+**Context for a future agent:** built in Claude Code session `afe44b80-14f1-4262-95d6-be6320f6d7ff`.
+Commits: `14e9c17` (feature), `4a8c92d` (deploy), `086a752` (docs). Full design in
+`Shipped Features/2026-07-12 - self-learning.md`; taxonomy in `ARCHITECTURE.md` ("Self-learning")
+and `secretary/1. Orchestrator/ORCHESTRATOR.md`.
+
+---
+
+## ⬅ START HERE — the three things left
+
+Marcelo deferred these until his open sessions are done. Nothing is half-finished; each is a
+clean, independent chore.
+
+| # | What | Why it's pending |
+|---|------|------------------|
+| 1 | **Move `~/Desktop/Coding` → `~/Coding`** | Unblocks the daily job. **Decision made: move the whole `Coding` folder** (all 3 projects), not just this repo. |
+| 2 | **Run the router fixture** | Needs an API key on the Mac. **Decision made: reuse the app's own key**, read out of the production container. |
+| 3 | **Commit the two path fixes** | Already sitting uncommitted in the working tree (see bottom). |
+
+Everything below explains each one.
 
 ---
 
 ## What the system does (one paragraph)
 
-The secretary now writes **failure reports about itself** into `secretary/improvements/` on the
+The secretary writes **failure reports about itself** into `secretary/improvements/` on the
 droplet. You pull them to the Mac and a coding agent turns each into an implementation plan.
 A malfunction is **exactly three things**: a **code error**, a **soft landing of an uncompleted
 task** (declared by the skill via `ctx.sendFailure` — 29 call sites), and **you telling it that
-it made a mistake** (`@secretary you made a mistake here` → the new `feedback` skill).
-Everything else it says is **guidance** ("which task did you mean?", "your list is empty") and
-files nothing.
+it made a mistake** (`@secretary you made a mistake here` → the `feedback` skill). Everything else
+it says is **guidance** ("which task did you mean?", "your list is empty") and files nothing.
+
+**It runs across two machines, and only one of them is stuck:**
+
+- **Droplet (production)** — detects failures, writes reports. ✅ **Working. Proven live.**
+- **Mac (local)** — pulls reports, triages them into bugfix plans, commits. ❌ **Blocked by macOS.**
+
+Triage lives on the Mac *by design*: it needs the codebase and a coding agent, and the agent that
+**writes code** is deliberately kept away from the box that **runs production**. The daily job is
+explicitly denied `git push`, `ssh`, `docker` and `curl`, so even a report containing hostile text
+can't talk it into shipping anything. You wake up to plans; you decide what ships.
 
 ---
 
-## STEP 1 — Verify it live in WhatsApp  ⬅ do this first
+## STEP 1 — Verify it live in WhatsApp ✅ MOSTLY DONE
 
-Nothing here needs a developer. Send five messages and read the replies. Ask Claude Code to
-tail the droplet logs while you do it (`ssh secretaria-droplet 'docker logs -f --tail 30 secretary'`)
-and it can tell you exactly what routed where.
+**This is no longer theoretical — it worked in the real chat.** On 2026-07-12 you sent
+`anote erro` about the MedFlower scheduling loop and the system produced:
 
-| # | Send this | Expected |
-|---|---|---|
-| 1 | **Reply to a past secretary message** with `@secretary you made a mistake here, I said 5pm` | *"Noted — logged as a mistake to investigate: …"*. It must **never** claim to have fixed it. |
-| 2 | `@secretary you scheduled that at the wrong time` | Must route to **`feedback`** and file a report. **Must NOT create or move any event.** ⚠️ **This is the riskiest test — see Step 2.** |
-| 3 | `@secretary you got the time wrong, move it to 5pm` | **Both**: the "noted" confirmation **and** the event actually moves (router returns `["feedback","calendar_action"]`). |
-| 4 | `@secretary book me a flight to Rio` | The "I didn't understand" reply **and** an `unrouted` report (you decided these keep filing — they're the missing-capability signal). |
-| 5 | `@secretary transcribe` **without** replying to an audio | The "reply to the audio" guidance and **NO report**. This is the negative test for the whole taxonomy. |
-| 6 | `@secretary you made a mistake` (vague, nothing quoted) | One follow-up question. Answer it → *"added that to the report"*. Or **ignore it** — the report was already written **before** the question was asked, so nothing is lost. |
-
-**Then confirm the reports actually landed:**
-```bash
-ssh secretaria-droplet 'ls -la /opt/secretary/improvements/'
-ssh secretaria-droplet 'cat /opt/secretary/improvements/*.md | head -60'
 ```
-Check the report has: your note, the **quoted offending message**, the transcript, the logs —
-and that **no API key appears anywhere** (redaction). Expect `Source: OWNER-REPORTED`.
+/opt/secretary/improvements/2026-07-12T12-19-23-reported-calendar-action.md
+```
 
-> **If test 2 misroutes** (it schedules something instead of filing a bug) — that's the one
-> known unverified risk. The fix is prompt-only: the "COMPLAINTS ARE NOT COMMANDS" rule in
-> `secretary/1. Orchestrator/router/prompt.js` and the `NOT for…` clauses in
-> `secretary/2. Skills/5. Feedback/skill.js`. Tell Claude Code and it will tighten them.
+That report is **still sitting on the droplet, waiting for Step 1 to unblock the courier.** It
+contains the note, the full transcript, the ROUTER/CALENDAR/RESOLVE logs, `Source: OWNER-REPORTED`,
+and **no API key anywhere** (redaction verified). It correctly says the offending message wasn't
+quoted, because you reported it without replying to one.
+
+**Critically, it FILED the complaint instead of EXECUTING it** — no phantom event was created.
+That was flagged as "the one known unverified risk" and it is now **empirically covered in
+production**. The `feedback` skill routes correctly. All five skills load
+(`calendar_action, transcribe_audio, task_action, feature_request, feedback`).
+
+Still unexercised, if you ever want the rest of the matrix — none are blocking:
+
+| Send this | Expected |
+|-----------|----------|
+| `@secretary you got the time wrong, move it to 5pm` | **Both** the "noted" confirmation **and** the event actually moves (router returns `["feedback","calendar_action"]`). |
+| `@secretary book me a flight to Rio` | "I didn't understand" **and** an `unrouted` report (missing-capability signal). |
+| `@secretary transcribe` **without** replying to an audio | The guidance reply and **NO report**. The negative test for the whole taxonomy. |
 
 ---
 
-## STEP 2 — Run the router fixture (needs YOUR API key)
+## STEP 2 — ⏳ PENDING: Run the router fixture
 
-**This never ran.** There is no `ANTHROPIC_API_KEY` on the Mac, and I refused to pull the
-production key out of the container to run a test. It is the automated version of test 2 above:
-it calls the **live router** and asserts that a *complaint* is **filed**, not **executed**.
+**Still has never run.** It calls the **live router** and asserts that a *complaint* is **filed**,
+not **executed** — the automated, repeatable version of what production just proved by hand.
+Not blocking, but it's the regression guard: **every protection there is a prompt, and prompts
+regress silently.** Re-run it after any edit to `router/prompt.js` or a skill manifest.
+
+**The key question is settled — reuse the application's own key.** There is no `ANTHROPIC_API_KEY`
+and no `.env` on the Mac; the only copy lives inside the running production container.
+
+Two ways to get it:
 
 ```bash
-cd "/Users/marceloabritta/Library/CloudStorage/GoogleDrive-marceloabritta@gmail.com/My Drive/Claude Projects/Personal Whatsapp AI"
-ANTHROPIC_API_KEY=sk-ant-… node scripts/router-selftest.mjs
-```
-Costs a few cents. **Re-run it after any edit to `router/prompt.js` or to a skill manifest** —
-every protection there is a prompt, and prompts regress silently.
+# EITHER: paste the key yourself into a local .env  (.env is gitignored — verified)
+echo 'ANTHROPIC_API_KEY=sk-ant-…' >> .env && chmod 600 .env
 
-*(Optional, permanent: put the key in a local `.env` / your shell profile so this and other
-local tests just work.)*
+# OR: read the app's key out of the container. This is a READ; it changes nothing on the droplet.
+# NOTE FOR A FUTURE AGENT: Claude Code's permission classifier will BLOCK this unless Marcelo
+# explicitly authorizes pulling the credential out of production. "use the same key" is not
+# enough — he must name the container read. He has already agreed in principle (2026-07-12).
+ssh secretaria-droplet 'docker exec secretary printenv ANTHROPIC_API_KEY'
+```
+
+Then:
+```bash
+cd "/Users/marceloabritta/Coding/Personal Whatsapp AI"   # ← path AFTER the Step 1 move
+node scripts/router-selftest.mjs                          # costs a few cents
+```
 
 ---
 
-## STEP 3 — ⚠️ Grant Full Disk Access to `/bin/bash`  (the daily job is BLOCKED without it)
+## STEP 3 — ⏳ PENDING (THE REAL BLOCKER): move the repo to `~/Coding`
 
-The daily job is **written, installed and loaded** — but it **cannot run yet**, and this is the
-one thing only you can fix.
-
-macOS blocks background jobs from reading `~/Library/CloudStorage` (Google Drive). The script
-works perfectly from your Terminal (Terminal has the permission); `launchd` does not:
+The daily job is **written, installed and loaded** — but it has **never successfully run**:
 
 ```
 getcwd: cannot access parent directories: Operation not permitted   # exit 126
 ```
 
-**Fix (one minute, once):**
+**Why the earlier fix didn't work.** The repo was moved out of Google Drive to `~/Desktop/Coding`,
+and the plist was correctly repointed. **This did not help: macOS protects `~/Desktop` under the
+same TCC rules as CloudStorage.** `launchd`'s `/bin/bash` can't read either one. The script still
+works fine from Terminal (Terminal *has* the permission); the background job does not.
 
-1. **System Settings → Privacy & Security → Full Disk Access**
-2. Click **+**, press **⌘⇧G**, type `/bin/bash`, add it, and make sure its toggle is **on**.
-3. Prove it worked:
-   ```bash
-   launchctl start com.marcelo.secretary-triage
-   sleep 10 && cat ~/Library/Logs/secretary-triage.log
-   ```
-   You want to see `self-learning daily run` → `no new reports` → `Done.` — **not**
-   `Operation not permitted`.
+**The fix (decided): move the whole `Coding` folder one level up, out of Desktop.**
 
-*(Granting Full Disk Access to `/bin/bash` is broad. The clean alternative is to move this repo
-out of Google Drive — git is already your backup — and repoint the plist. Your call; the repo's
-location is why the permission is needed at all.)*
+```
+~/Desktop/Coding/          →     ~/Coding/
+    AI Coding-kanban                 AI Coding-kanban
+    Mailbox Unjunker                 Mailbox Unjunker
+    Personal Whatsapp AI             Personal Whatsapp AI
+```
 
-## STEP 4 — The loop (the payoff)
+`~/Coding` = `/Users/marceloabritta/Coding` — a plain folder in the home directory, a sibling of
+`Desktop`/`Documents`/`Downloads` but **not one of them**, so it is not TCC-protected and needs
+**no permission grant at all**. (`fleet` and `google-cloud-sdk` already live there.) Reach it in
+Finder with **Go → Home** (⇧⌘H). Git history and remotes are unaffected by a move.
 
-**Daily, at 09:00, automatically** (`scripts/self-learning-daily.sh`, via launchd):
+**Only two files in the repo hard-code the path** — this doc and the plist — so the move is cheap.
+
+### The procedure (hand this to Claude Code)
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.marcelo.secretary-triage.plist
+mv ~/Desktop/Coding ~/Coding
+# repoint BOTH paths in scripts/com.marcelo.secretary-triage.plist to ~/Coding/... , then:
+cp scripts/com.marcelo.secretary-triage.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.marcelo.secretary-triage.plist
+
+# prove it — this should now PULL THE WAITING MEDFLOWER REPORT and write a bugfix plan
+launchctl start com.marcelo.secretary-triage
+sleep 30 && cat ~/Library/Logs/secretary-triage.log
+```
+
+You want `self-learning daily run` → a pulled report → `Done.` — **not** `Operation not permitted`.
+Also update the `cd` path in Step 2 above and re-point any Finder sidebar shortcut.
+
+> **Rejected alternative:** granting Full Disk Access to `/bin/bash` (System Settings → Privacy &
+> Security → Full Disk Access → + → ⌘⇧G → `/bin/bash`). It works and keeps the repo on the Desktop,
+> but it hands **every bash script on the machine** full disk access. The move is narrower and free.
+
+---
+
+## STEP 4 — The loop (the payoff, once Step 3 lands)
+
+**Daily at 09:00, automatically** (`scripts/self-learning-daily.sh`, via launchd):
 
 1. pulls the secretary's failure reports off the droplet → `Bugs and Malfunctions/inbox/`
 2. **stops right there if there's nothing** — a quiet day costs you nothing, no Claude call
@@ -111,15 +170,17 @@ location is why the permission is needed at all.)*
    writes **`Bugs and Malfunctions/bugfix-<slug>.md`**, files the raw report into `_reports/`,
    and **commits**.
 
-**It never pushes and never deploys.** `git push`, `ssh`, `docker` and `curl` are explicitly
-denied to it, so even a report containing hostile text can't talk it into shipping anything. You
-wake up to plans; you decide what ships.
+**It never pushes and never deploys.** The plans match the two you already have —
+`bugfix-task-false-positive.md` and `bugfix-lid-history-blindness.md` — which are the templates the
+triage prompt points at: evidence from the logs, the real call chain, a root cause, what was *ruled
+out*, and an honest limitation.
 
-The plans match `Bugs and Malfunctions/bugfix-task-false-positive.md` — the one you wrote is the
-template the triage prompt points at: evidence from the logs, the real call chain, a root cause,
-what was *ruled out*, and an honest limitation.
+Owner-reported files are triaged **first** and treated as ground truth. The "Auto-analysis" section
+in a report is a cheap model's *guess* — the triage prompt is told to discard it freely. (The
+MedFlower report is a good example: its auto-analysis blames context-window injection, which may
+well be wrong.)
 
-**By hand, any time:**
+**By hand, any time** (works TODAY from Terminal, even with Step 3 pending):
 ```bash
 ./scripts/self-learning-daily.sh          # pull + triage, same as the daily run
 ./scripts/self-learning-pull.sh           # just pull
@@ -128,60 +189,71 @@ tail -f ~/Library/Logs/secretary-triage.log   # what the daily job did
 launchctl unload ~/Library/LaunchAgents/com.marcelo.secretary-triage.plist   # turn it off
 ```
 
-Owner-reported files are triaged **first** and treated as ground truth. The "Auto-analysis"
-section in a report is a cheap model's *guess* — the triage prompt is told to discard it freely.
-
 ---
 
 ## STEP 5 — The one habit that makes this work
 
 **Report mistakes the moment you see them, and prefer replying to the wrong message.**
 
-The other five triggers only fire when the code *knows* it failed. The failures that actually
-annoy you — the wrong time, the false positive, the confidently wrong answer — crash nothing and
-look like success. **You are the only detector.** A note you don't send is a bug that does not
-exist as far as the system is concerned.
+The other triggers only fire when the code *knows* it failed. The failures that actually annoy you
+— the wrong time, the false positive, the confidently wrong answer — crash nothing and look like
+success. **You are the only detector.** A note you don't send is a bug that does not exist as far
+as the system is concerned. The MedFlower report exists only because you typed `anote erro`.
 
-Replying to the offending message is worth the extra tap: it hands the engineer the secretary's
-exact bad output. A bare note still works.
+Replying to the offending message hands the engineer the secretary's exact bad output. A bare note
+still works (MedFlower was one) — it just costs the triage agent more guesswork.
+
+---
+
+## Uncommitted work sitting in the tree
+
+Two path fixes from the Desktop move, **not yet committed** (they'll need updating again after the
+`~/Coding` move, so it may be cleanest to do the move first and commit once):
+
+- `scripts/com.marcelo.secretary-triage.plist` — repointed off Google Drive
+- `New Features Plans/Self-Leaning-Final-Steps.md` — this file
 
 ---
 
 ## What you do NOT need to do
 
-- **No new env var, no API key, no OAuth scope, no dependency.** The feature adds none.
+- **No new env var, no OAuth scope, no dependency.** The feature adds none. (The API key in Step 2
+  is for a *local test*, not for the app — production already has its own.)
 - **No `.gitignore` work** — `secretary/improvements/*.md` is already ignored and verified on the
-  droplet (this was load-bearing: `/opt/secretary` symlinks *into* the production git tree).
-- **No scheduling work.** The daily job is installed and loaded; it only needs the Full Disk
-  Access grant in Step 3.
+  droplet (load-bearing: `/opt/secretary` symlinks *into* the production git tree). `.env` is
+  ignored too (verified 2026-07-12).
+- **No scheduling work.** The daily job is installed and loaded. It only needs the Step 3 move.
+- **No droplet work.** That half is done and running.
 
 ---
 
 ## Open decisions you may want to revisit later
 
 1. **Guidance stays silent.** "Reply to the audio", "which task did you mean?", "your list is
-   empty" file nothing. If you later decide a *needSignal* message ("reply to the invite to
-   cancel") is really a capability gap worth learning from, it's a one-line change per call site
-   (`ctx.send` → `ctx.sendFailure`).
+   empty" file nothing. If you later decide a *needSignal* message is really a capability gap worth
+   learning from, it's a one-line change per call site (`ctx.send` → `ctx.sendFailure`).
 2. **Owner reports never dedupe and never hit the normal hourly cap.** Deliberate: a human can't
    loop, and a silently dropped note is the worst failure this system could have. There's still a
    ~10/hour disk backstop, and if it ever rejects a note the secretary **tells you** instead of
    confirming a lie.
-3. **`unrouted` / `noAction` are filed** (your call, 2026-07-12). If they turn out to be noise,
-   drop the `fireCapture` in the `notUnderstood` branch of `server.js`.
+3. **`unrouted` / `noAction` are filed** (your call, 2026-07-12). If they turn out to be noise, drop
+   the `fireCapture` in the `notUnderstood` branch of `server.js`.
 
 ---
 
 ## Health checks (any time)
 
 ```bash
-# is it up, and did all five skills load?
-ssh secretaria-droplet 'docker logs --tail 20 secretary | grep "available skills"'
+# is it up, and did all five skills load?   [verified green 2026-07-12]
+ssh secretaria-droplet 'docker logs --tail 40 secretary | grep "available skills"'
 #   expect: calendar_action, transcribe_audio, task_action, feature_request, feedback
+
+# what reports are waiting on the droplet?  [1 waiting as of 2026-07-12]
+ssh secretaria-droplet 'ls -la /opt/secretary/improvements/'
 
 # the offline test suite (capture invariants + the call-site lint)
 node scripts/selflearning-selftest.mjs
 ```
 
-The lint is the guard that keeps this honest: if anyone adds a skill and sends a failure reply
-with plain `send()` instead of `ctx.sendFailure()`, the test run fails with the file and line.
+The lint is the guard that keeps this honest: if anyone adds a skill and sends a failure reply with
+plain `send()` instead of `ctx.sendFailure()`, the test run fails with the file and line.
