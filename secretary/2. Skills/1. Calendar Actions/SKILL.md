@@ -30,8 +30,11 @@
 >   `@secretary do I have anything Friday afternoon?`, `@secretary what's my next meeting?`.
 >   It replies right away; there's no confirm step because nothing is written.
 >
-> If something needed is missing (the time, who to invite, or an attendee's email), it
-> **asks and waits** — no re-tag — and the answer can come from you **or** the attendee.
+> If something needed is missing (the time, or an attendee's email), it **asks and waits** — no
+> re-tag — and the answer can come from you **or** the attendee. Every truthful answer works:
+> *"nobody, it's just me"* (an event with **no guests** is fine), *"I don't have her email"* (it
+> creates the event **without her, and tells you so**), and *"forget it"* (it drops the whole
+> thing).
 
 > **Reused by other skills.** This skill exports a `capabilities.startCreate` entry —
 > the full confirm-first create flow (draft → `yes` → invite, including chasing a missing
@@ -53,7 +56,8 @@ in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`)
    then watches this chat for your answer for 10 minutes (no tag needed):
    > Confirm this event:
    > - &lt;title&gt;
-   > - &lt;attendee emails&gt;
+   > - &lt;attendee emails, or **"(no guests)"** when there are none&gt;
+   > - &lt;**"Without Laura — I don't have their email."**, only when someone is being left out&gt;
    > - &lt;date, hh:mm AM/PM&gt; (&lt;duration&gt; min)
    >
    > Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.
@@ -62,8 +66,11 @@ in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`)
      > Done! Invite created and sent:
      >
      > - &lt;title&gt;
-     > - &lt;attendee emails&gt;
+     > - &lt;attendee emails, or **"(no guests)"**&gt;
      > - &lt;date, hh:mm AM/PM&gt; (&lt;duration&gt; min)
+     >
+     > **I created it without inviting Laura — I don't have their email.** *(only when someone
+     > was left out — a guest is never dropped without you being told)*
      >
      > Here is a link for the event:
      > &lt;calendar link&gt;
@@ -72,12 +79,19 @@ in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`)
    - a **cancel** ("no", "forget it", "deixa") → *"Okay, I won't create "&lt;title&gt;"."*
    - **anything else (normal conversation)** → **ignored silently**; it keeps waiting.
 4. **If something needed is missing** (the secretary first re-inspects the chat for it, then
-   asks only if it truly can't find it):
+   asks only if it truly can't find it) — only the **date/time** and a named guest's **email**
+   can be missing; an event with **no guests at all** is complete and goes straight to the
+   confirmation:
    - one attendee's email → *"Ana, I'm missing your email. Can you send it so I can add
      you to the invite?"* — and the answer may come from **you or from Ana herself**.
-   - the date/time or who to invite → *"Before I can set this up, I still need the date
-     and time / who to invite. Send it here and I'll continue."*
-   Once every required detail is in, it rolls into the confirmation in step 2.
+   - the date/time → *"Before I can set this up, I still need the date and time. Send it here
+     and I'll continue."*
+   While it waits, your next message is read as one of four things: an **answer** (including
+   *"I don't have her email"* → it books **without her and says so**, and *"don't invite Laura"*
+   → she is dropped from the draft), a **cancel** (*"forget it"*, *"esquece"* → *"Okay, I won't
+   create …"*, and the pending event is discarded), or **ordinary conversation** → **ignored
+   silently**; it keeps waiting. Once every required detail is in, it rolls into the
+   confirmation in step 2.
 5. Other one-off replies: *"I understood the request but failed to create it in Google.
    Error in the log."* (Google error) · *"I didn't identify a calendar action. …"* (the
    order wasn't calendar-related) · *"I hit an error while thinking. Try again?"* (LLM error).
@@ -237,20 +251,34 @@ pass against the real event; the other `CAL_SCHEMA` fields are ignored. The thre
 handlers.)
 
 ### Task: CREATE — fully stateful, confirm-first
-Required to create (everything else has a fallback and never blocks): a **date/time**,
-**≥1 attendee**, and an **email for every attendee**. `missingOf(draft)` /
+Required to create (everything else has a fallback and never blocks): a **date/time**, and an
+**email for every named guest the owner has not said he lacks one for**. **Zero guests is a
+complete, ordinary event** — an event has 0–n outside guests. `missingOf(draft)` /
 `isComplete(m)` compute this; `draftFromInfo` normalizes and applies fallbacks
 (title → inferred or `Owner & names`; `duration_min` → 45).
+
+**The rule the predicate encodes:** *a required field is legitimate only if a TRUTHFUL answer
+can satisfy it.* The old **≥1-attendee** invariant failed that test ("nobody, it's just me" was
+unrepresentable) and is **gone**. The email requirement passes it *only because the answer now
+exists*: `no_email_for[]` → a participant's **`noEmail`** flag, meaning *the owner has told us he
+hasn't got it*. The field is still required; it is now **answerable**.
+
+> ⚠️ **`noTime` stays required, and must.** `createFromDraft` does `new Date(draft.start_iso)` —
+> with a null start that is `new Date(null)` = the UNIX epoch, and the event is written to Google
+> **in 1970**. `missingOf().noTime` is the **only** guard against that write.
 
 **`handleCreate` → `resolveDraft` → `advanceCreate`:**
 1. `interpret` builds the draft.
 2. **`resolveDraft`** — if anything required is missing, a **focused second LLM pass**
    (`inspectMissing`, `buildResolveSystem`, `RESOLVE_SCHEMA`, `max_tokens: 2048`)
    re-inspects the chat + latest message *precisely* for the missing fields, told exactly
-   what's missing via a structured contract (`needsTime` / `needsAttendees` /
-   `needEmailFor`). `mergeDraft` folds in what it found (fill emails by name; add
-   newly-named attendees; a lone bare email fills the one missing attendee). No LLM call
-   when nothing is missing.
+   what's missing via a structured contract (`needsTime` / `needEmailFor`) and whether this
+   message is an answer or the original order (`gathering`). `mergeDraft` folds in what it
+   found: the resolver's `participants` is the **FULL, AUTHORITATIVE list and REPLACES** the
+   draft's (`null` = "nothing to add", so the list is kept; `[]` = "no outside guests", so it is
+   emptied) — with one fallback kept ahead of it: a lone **bare email** fills the single
+   attendee still missing one, so a guest can answer with nothing but her address. Names in
+   `no_email_for` get `noEmail: true`. No LLM call when nothing is missing.
 3. **`advanceCreate`** — complete → **`openCreateConfirm`** (session `await_info` →
    `await_confirmation`, `awaitFrom:"owner"`, `reply(lang).createConfirm`); incomplete →
    **`openInquiry`** (session `await_info`, `awaitFrom:"any"`, `reply(lang).inquiry` — a
@@ -258,24 +286,44 @@ Required to create (everything else has a fallback and never blocks): a **date/t
    composed "Before I can set this up, I still need …"). Both `openCreateConfirm` and
    `openInquiry` persist `lang` in the session.
 
-**`resumeInfo`** (every owner/attendee message while gathering): re-run `inspectMissing`,
-`mergeDraft`; **nothing new resolved → return silently** (chatter); progressed →
-`advanceCreate` (ask for the rest, or confirm). Loops until `isComplete`, bounded by the
-10-min TTL.
+**`resumeInfo`** (every owner/attendee message while gathering — `awaitFrom:"any"`, so it hears
+the whole chat): one `inspectMissing` call **classifies and resolves at once**, returning
+`confirm | modify | cancel | unrelated` alongside the fields. It no longer infers "was that for
+me?" from a field diff (`sameMissing` is **gone**), which is what met every truthful answer the
+code had no field for with **total silence**.
+- `unrelated` → **return silently** (chatter — the only silent exit left).
+- `cancel` → **clear the session** + "Okay, I won't create …" (`createCancelled`). Clearing is
+  the load-bearing half: an abandoned draft left armed can be resurrected by a stray message.
+- `confirm` / `modify` → `mergeDraft` then `advanceCreate` (ask for the rest, or confirm).
+- a **null patch** (API error / refusal / unparseable) → `ctx.sendFailure` + `thinkingError` —
+  reported, not swallowed.
+
+Loops until `isComplete`, bounded by the 10-min TTL.
 
 **`resumeCreate`** (every owner message at the confirm step): one Claude call
 (`reviewCreate`, `buildCreateReviewSystem`, `REVIEW_SCHEMA`, `max_tokens: 4096`) that both
 classifies and, for a change, re-drafts → `confirm | modify | cancel | unrelated`.
 - `confirm` → `createFromDraft` + clear session.
 - `modify` → `applyDraftUpdate` then `advanceCreate` (re-show confirm, or chase a
-  newly-missing email).
+  newly-missing email). `applyDraftUpdate` tests `Array.isArray(review.participants)`, **not**
+  `.length`: an **emptied** guest list is an *answer* ("don't invite anyone") and sticks; only an
+  absent list falls back to the draft's. It carries each person's known email and `noEmail`
+  across, so a title-only change never resurrects an email question already answered.
 - `cancel` → clear + "Okay, I won't create …".
 - `unrelated` → return silently.
+
+**Never drop a person silently.** `createConfirm` and `createDone` both render the guests line as
+the email list, or **`(no guests)` / `(ninguém convidado)`** when there are none — never a bare,
+empty `- ` bullet. And when a named guest is being left out because the owner said he has no email
+for them (`draftUninvited`), both say so outright: *"- Without Laura — I don't have their email."*
+in the draft, and *"I created it without inviting Laura — I don't have their email."* on the
+confirmation. A guest is never dropped without the owner being told.
 
 **`createFromDraft` → `createEvent`** is **idempotent**: it first calls
 `findConfirmedDuplicates` (title + exact start instant) and **reuses** an identical
 confirmed event instead of inserting a duplicate; otherwise `events.insert` with
-`sendUpdates:"all"` (Google emails the invite). Success → confirmation with `htmlLink`
+`sendUpdates:"all"` (Google emails the invite). `draftEmails` drops null emails, so a guest
+with no address is simply not on the invite. Success → confirmation with `htmlLink`
 (reworded when reused).
 
 ### Task: DELETE — `handleDelete` + `resumeDelete`

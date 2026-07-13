@@ -445,6 +445,21 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-13 — Calendar create: "nobody", "I don't have their email" and "forget it" are now
+  ANSWERS (card 33bb6637).** The create flow had three required states that a truthful answer could
+  not satisfy. `missingOf`'s **`noAttendees` invariant is gone** — a calendar event has **0–n outside
+  guests, and zero is an ordinary event**. The email requirement is **not** gone but is now
+  *answerable*: `RESOLVE_SCHEMA` gains `no_email_for[]`, so *"não tenho o e-mail dela"* creates the
+  event **without** that guest **and says so** (*"criei sem convidar a Laura"*) — never a silent drop.
+  And the gathering loop's `if (sameMissing(before, after)) return;`, which inferred *"was that
+  message for me?"* from a field diff and answered an untagged correction with **total silence**, is
+  replaced by the same `confirm|modify|cancel|unrelated` decision channel `flight_search` already uses
+  while gathering. `await_info` therefore has a **cancel branch for the first time**, and an Anthropic
+  error during gathering is now reported instead of swallowed. `mergeDraft` and `applyDraftUpdate` now
+  treat the resolver's guest list as **authoritative** (an empty list is an answer, not an absence) —
+  which also ends a separate outward harm: *"não é a Laura, é a Ana"* used to invite **both**.
+  Skill-local: **no rails, no manifest, no router change.** New: `scripts/calendar-create-selftest.mjs`.
+
 - **2026-07-13 — Name change: "secretária" → "assistente" (SHIPPED — committed 2026-07-13;
   NOT yet deployed to the droplet).** The trigger tag is now **`@assistente`/`@assistant`**. The old
   `@secretaria`/`@secretary` pair **stops working — no alias, no grace period**: `matchedTag()`

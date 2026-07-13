@@ -311,30 +311,31 @@ async function handleCreate(ctx, info) {
   await advanceCreate(ctx, resolved);
 }
 
-// Required to create: a date/time, at least one attendee, and an email for EVERY
-// attendee. Everything else has a fallback and never blocks.
+// Required to create: a date/time, and an email for every named guest the owner has NOT
+// told us he lacks one for. An event with ZERO outside guests is an ordinary, complete
+// event. Everything else has a fallback and never blocks.
+//
+// The rule: a required field is legitimate only if a TRUTHFUL answer can satisfy it. The
+// old ">= 1 attendee" invariant could not be satisfied by "nobody, it's just me", and the
+// email requirement could not be satisfied by "I don't have hers" — so the owner could
+// never leave the gathering loop. The email is still REQUIRED; it is now ANSWERABLE
+// (`noEmail` = the owner said he hasn't got it), which is what was missing.
+//
+// ⚠ noTime STAYS. createFromDraft does `new Date(draft.start_iso)`: with a null start that
+// is `new Date(null)` = the UNIX epoch, and the event lands in Google in 1970. This
+// predicate is the ONLY thing guarding that write.
 function missingOf(draft) {
   return {
     noTime: !draft.start_iso,
-    noAttendees: draft.participants.length === 0,
     emailNames: draft.participants
-      .filter((p) => !p.email)
+      .filter((p) => !p.email && !p.noEmail)
       .map((p) => p.name)
       .filter(Boolean),
   };
 }
 
 function isComplete(m) {
-  return !m.noTime && !m.noAttendees && m.emailNames.length === 0;
-}
-
-function sameMissing(a, b) {
-  return (
-    a.noTime === b.noTime &&
-    a.noAttendees === b.noAttendees &&
-    a.emailNames.length === b.emailNames.length &&
-    a.emailNames.every((n) => b.emailNames.includes(n))
-  );
+  return !m.noTime && m.emailNames.length === 0;
 }
 
 // The FOCUSED second pass: given what's missing, re-inspect the chat + latest
@@ -344,7 +345,9 @@ function sameMissing(a, b) {
 async function resolveDraft(ctx, draft) {
   const m = missingOf(draft);
   if (isComplete(m)) return draft;
-  const patch = await inspectMissing(ctx, draft, m);
+  // gathering:false — on this immediate pass the "message" IS the order, so there is
+  // nothing to classify; patch.decision is ignored here.
+  const patch = await inspectMissing(ctx, draft, m, { gathering: false });
   return mergeDraft(ctx, draft, patch);
 }
 
@@ -363,8 +366,14 @@ async function advanceCreate(ctx, draft) {
 // eventually insert. Applies the title fallback: inferred topic, else Owner & names.
 function draftFromInfo(ctx, info) {
   const { owner, contact } = ctx;
+  // noEmail rides along: it is the owner's ANSWER ("I don't have hers"), and it must
+  // survive every re-normalization or the email question comes back from the dead.
   const participants = (Array.isArray(info.participants) ? info.participants : [])
-    .map((p) => ({ name: p?.name || null, email: p?.email || null }))
+    .map((p) => ({
+      name: p?.name || null,
+      email: p?.email || null,
+      noEmail: !!p?.noEmail,
+    }))
     .filter((p) => p.name || p.email);
   const names = participants.map((p) => p.name).filter(Boolean);
   const title =
@@ -382,6 +391,13 @@ function draftFromInfo(ctx, info) {
 
 function draftEmails(draft) {
   return (draft.participants || []).map((p) => p?.email).filter(Boolean);
+}
+
+// Named guests we will NOT be inviting: no email, and the owner has said he hasn't got
+// one. They are named in the confirm draft and again in the confirmation — a person is
+// never dropped silently.
+function draftUninvited(draft) {
+  return (draft.participants || []).filter((p) => !p.email && p.name).map((p) => p.name);
 }
 
 // Open (or refresh) the confirmation session holding the draft and show it. The
@@ -407,6 +423,7 @@ async function openCreateConfirm(ctx, draft) {
       emails: draftEmails(draft).join(", "),
       when: localizeDate(ctx.lang, draft.start_iso),
       duration: draft.duration_min,
+      uninvited: draftUninvited(draft),
     })
   );
 }
@@ -434,6 +451,7 @@ async function createFromDraft(ctx, draft) {
       when: localizeDate(ctx.lang, draft.start_iso),
       duration: draft.duration_min,
       link: ev.htmlLink || "",
+      uninvited: draftUninvited(draft),
     })
   );
 }
@@ -474,13 +492,31 @@ async function resumeCreate(ctx, session) {
   }
 }
 
+// Carry what the owner has ALREADY ANSWERED onto a fresh guest list: a person matched by
+// name keeps any known email and their noEmail flag. Without it, a later "modify" would
+// resurrect an email question he has already answered. Shared with mergeDraft.
+function carryNoEmail(prevList, nextList) {
+  return (nextList || []).map((p) => {
+    const was = (prevList || []).find(
+      (q) => q?.name && p?.name && normName(q.name) === normName(p.name)
+    );
+    return {
+      name: p?.name || null,
+      email: p?.email || was?.email || null,
+      noEmail: !!(p?.noEmail || was?.noEmail),
+    };
+  });
+}
+
 // Merge a "modify" review onto the current draft: prefer the review's fields, fall
 // back to the previous draft for anything it didn't return, then re-normalize.
+// Array.isArray, NOT `.length` — an EMPTIED guest list is an ANSWER ("don't invite
+// anyone"), not an absence of information, and it must stick. Only a missing list
+// (null/undefined) means "the review said nothing about the guests".
 function applyDraftUpdate(ctx, prev, review) {
-  const participants =
-    Array.isArray(review.participants) && review.participants.length
-      ? review.participants
-      : prev.participants;
+  const participants = Array.isArray(review.participants)
+    ? carryNoEmail(prev.participants, review.participants)
+    : prev.participants;
   return draftFromInfo(ctx, {
     title: review.title ?? prev.title,
     participants,
@@ -550,13 +586,16 @@ async function openInquiry(ctx, draft, m) {
 
 const normName = (s) => String(s || "").trim().toLowerCase();
 
-// Merge a resolver patch onto the draft: take start_iso if provided; fill emails
-// for known attendees by name and append any newly-identified attendees. Robust
-// single case: one attendee still missing an email + one email in the patch →
-// assign it directly even if the names don't line up. Re-normalized at the end.
+// Merge a resolver patch onto the draft: take start_iso if provided, and treat the
+// resolver's guest list as AUTHORITATIVE — its own prompt promises the FULL list, so the
+// list REPLACES the draft's rather than being appended to it. That is what makes an
+// emptied list ("don't invite Laura") an answer, and it is what stops a substitution
+// ("not Laura, Ana") from inviting BOTH — createEvent runs sendUpdates:"all", so an
+// appended Laura is a real invite emailed to someone the owner removed.
+// patch.participants === null still means "no information" → keep the previous list.
 function mergeDraft(ctx, prev, patch) {
   if (!patch) return prev;
-  const participants = prev.participants.map((p) => ({ ...p }));
+  let participants = prev.participants.map((p) => ({ ...p }));
 
   if (Array.isArray(patch.participants)) {
     const clean = patch.participants.filter((p) => p && (p.name || p.email));
@@ -564,22 +603,27 @@ function mergeDraft(ctx, prev, patch) {
     const patchEmails = clean.filter(
       (p) => typeof p.email === "string" && p.email.includes("@")
     );
-    // Bare-email fallback: one attendee still missing + one UN-named email → assign
-    // it directly. A named email goes through the by-name matcher below instead.
+    // Bare-email fallback — FIRST, and unchanged. One attendee still missing an email +
+    // one UN-named email in the patch → assign it directly. This is how a guest who
+    // answers with nothing but her address is understood; it must NOT go through the
+    // replace below, which would overwrite her name with the patch's null.
     if (missing.length === 1 && patchEmails.length === 1 && !patchEmails[0].name) {
       missing[0].email = patchEmails[0].email;
     } else {
-      for (const pp of clean) {
-        const idx = participants.findIndex(
-          (p) => pp.name && normName(p.name) === normName(pp.name)
-        );
-        if (idx >= 0) {
-          if (!participants[idx].email && pp.email) participants[idx].email = pp.email;
-        } else if (pp.name || pp.email) {
-          participants.push({ name: pp.name || null, email: pp.email || null });
-        }
-      }
+      // Otherwise the patch's list wins, carrying over what we already know (a known
+      // email, and the noEmail the owner already answered) for anyone matched by name.
+      participants = carryNoEmail(participants, clean);
     }
+  }
+
+  // The NEGATIVE channel: the names the owner has ANSWERED that he has no email for.
+  // They stay on the guest list (so he can be TOLD they are not invited) but no longer
+  // block completion — the requirement is satisfied by the answer, not by an address.
+  const noEmailFor = new Set(
+    (patch.no_email_for || []).map((n) => normName(n)).filter(Boolean)
+  );
+  for (const p of participants) {
+    if (p.name && noEmailFor.has(normName(p.name))) p.noEmail = true;
   }
 
   return draftFromInfo(ctx, {
@@ -591,11 +635,16 @@ function mergeDraft(ctx, prev, patch) {
   });
 }
 
-// Resume a gathering session. Runs for EVERY owner/contact message while open:
-// re-inspect precisely for what's still missing, merge, then ask for the rest or
-// move to confirm. Silent when the message resolves nothing new (chatter).
+// Resume a gathering session. Runs for EVERY owner/contact message while open
+// (awaitFrom:"any" — the session hears the whole chat), so it must first decide WHAT the
+// message is: an answer, a cancellation, or chatter. It used to infer that from a field
+// diff — "did the missing set shrink?" — which meant every truthful answer the code had
+// no field for ("nobody", "I don't have her email", "forget it") was met with TOTAL
+// SILENCE and the owner could not escape the loop. It now asks, with the same
+// confirm|modify|cancel|unrelated channel the rest of the repo uses (6. Flight Search's
+// resumeInfo is the template).
 async function resumeInfo(ctx, session) {
-  const { sessions, remoteJid } = ctx;
+  const { number, sessions, remoteJid } = ctx;
   const draft = session.data?.draft;
   if (!draft) {
     await sessions.clear(remoteJid);
@@ -605,18 +654,31 @@ async function resumeInfo(ctx, session) {
   const before = missingOf(draft);
   if (isComplete(before)) return advanceCreate(ctx, draft);
 
-  const patch = await inspectMissing(ctx, draft, before);
-  const updated = mergeDraft(ctx, draft, patch);
-  const after = missingOf(updated);
+  const patch = await inspectMissing(ctx, draft, before, { gathering: true });
 
-  if (sameMissing(before, after)) return; // nothing new resolved — ignore silently
-  await advanceCreate(ctx, updated); // progressed → ask for the rest, or confirm
+  // The model refused, or the API failed. This used to be silence too — indistinguishable
+  // from "your message wasn't for me". Say something.
+  if (!patch) {
+    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
+    return;
+  }
+  if (patch.decision === "unrelated") return; // chatter — the ONLY silent exit left
+  if (patch.decision === "cancel") {
+    await sessions.clear(remoteJid); // DISARM: an abandoned draft must not be resurrectable
+    await ctx.send(number, reply(ctx.lang).createCancelled({ title: draft.title }));
+    return;
+  }
+
+  // confirm | modify — an ANSWER. Merge it and move: ask for what is still missing, or
+  // show the confirm draft.
+  return advanceCreate(ctx, mergeDraft(ctx, draft, patch));
 }
 
 // LLM: the focused second pass. Told exactly what's missing, it resolves precisely
-// those fields from the conversation + latest message. Returns the patch, or null
-// on doubt/error (caller then keeps the draft unchanged → stays silent / re-asks).
-async function inspectMissing(ctx, draft, m) {
+// those fields from the conversation + latest message, AND (while gathering) classifies
+// what the message is. Returns the patch, or null on doubt/error — resolveDraft keeps the
+// draft unchanged, resumeInfo now REPORTS the null instead of swallowing it.
+async function inspectMissing(ctx, draft, m, { gathering = false } = {}) {
   const { anthropic, model, owner, transcript, order, nowStr } = ctx;
   try {
     const msg = await anthropic.messages.create({
@@ -630,8 +692,8 @@ async function inspectMissing(ctx, draft, m) {
           content: buildResolveUser({
             draftJson: JSON.stringify(draft),
             needsTime: m.noTime,
-            needsAttendees: m.noAttendees,
             needEmailFor: m.emailNames,
+            gathering,
             transcript,
             latest: order,
             nowStr,

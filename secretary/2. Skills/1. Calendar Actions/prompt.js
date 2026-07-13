@@ -72,15 +72,24 @@ export const REVIEW_SCHEMA = {
   },
 };
 
+// The gathering pass. It carries a DECISION (the same confirm|modify|cancel|unrelated
+// vocabulary every other review in this repo uses — see 6. Flight Search's
+// FLIGHT_REVIEW_SCHEMA) because a message arriving mid-gathering is not always a *fill*:
+// it may call the whole booking off, or be ordinary chatter. It also carries a NEGATIVE
+// channel, `no_email_for` — the names the owner has ANSWERED that he has no email for.
+// A required field is only legitimate if a TRUTHFUL answer can satisfy it, and before this
+// "I don't have her email" was unrepresentable, so the owner could never leave the loop.
 export const RESOLVE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["start_iso", "participants"],
+  required: ["decision", "start_iso", "participants", "no_email_for"],
   properties: {
+    decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
     start_iso: { type: ["string", "null"] },
     participants: {
       anyOf: [{ type: "null" }, { type: "array", items: PARTICIPANT }],
     },
+    no_email_for: { type: "array", items: { type: "string" } },
   },
 };
 
@@ -223,6 +232,7 @@ Choose the "decision" and, for a modify, return the updated draft fields (title,
 For "modify", apply the change on top of the current draft:
 - keep ISO 8601 with the -03:00 offset for start_iso; convert relative times using the current date/time provided;
 - when adding/removing an attendee, keep the others; each participant is {name, email|null};
+- "participants" is the FULL attendee list. An empty array [] means the event has NO outside guests — return [] ONLY when ${OWNER_NAME} says nobody should be invited. NEVER return [] when you are only changing the time, the title or the duration: echo the draft's attendees exactly.
 - change ONLY what the latest message asks to change; echo everything else from the draft.
 For any decision other than "modify", the draft fields are ignored — you may echo the current draft.`;
 }
@@ -246,20 +256,29 @@ Latest message: ${latest}`;
 // it is told exactly what to look for. The latest message may come from the owner
 // OR from an attendee (awaitFrom:"any").
 export function buildResolveSystem(OWNER_NAME) {
-  return `You are ${OWNER_NAME}'s calendar assistant. An event is being prepared and some REQUIRED details are still missing. You are told exactly WHICH details are missing. Inspect the current draft, the recent conversation, and the LATEST message, and resolve PRECISELY those missing details — nothing else. Return the resolved start_iso and/or the full participants list:
+  return `You are ${OWNER_NAME}'s calendar assistant. An event is being prepared and some REQUIRED details are still missing. You are told exactly WHICH details are missing. Inspect the current draft, the recent conversation, and the LATEST message. FIRST decide what the latest message IS, then resolve precisely the missing details it gives you:
+
+"decision":
+- "confirm" / "modify": the latest message ANSWERS the question you asked, or changes the event (a date/time, who is coming, an email, "nobody else", "I don't have her email"). Both are treated the same — resolve the fields below.
+- "cancel": the latest message calls the whole booking off ("esquece", "deixa pra lá", "forget it", "no, drop it").
+- "unrelated": ordinary conversation that is NOT an answer to the pending event. When in doubt, choose "unrelated" — silence is the safe default.
 
 - Resolve ONLY the items marked MISSING in "Still missing" below; leave everything else null.
 - start_iso: ISO 8601 with the -03:00 offset; resolve relative times ("tomorrow 3pm", "next Tuesday") using the current date/time given. null if genuinely not stated anywhere.
-- participants: when attendees or emails are missing, return the FULL attendee list (everyone besides ${OWNER_NAME}), carrying over the people and emails already in the draft and adding any name or email you can now determine. Each is {name, email|null}. Return null if you cannot improve the current list.
-- The latest message may come from ${OWNER_NAME} OR from an attendee. If an attendee gives their OWN email ("it's ana@x.com", "sou eu, ana@x.com"), attach it to them. If EXACTLY ONE person still needs an email and the latest message has a single bare email, attach it to that person.
+- participants: the FULL, AUTHORITATIVE guest list (everyone besides ${OWNER_NAME}), carrying over the people and emails already in the draft and adding any name or email you can now determine. Each is {name, email|null}.
+  - An empty array [] means the event has NO outside guests — return it when ${OWNER_NAME} says "ninguém", "só pra mim", "just me", or "don't invite Laura" and Laura was the only guest. Zero guests is a perfectly ordinary event.
+  - null means "I have no information that improves the list" — the draft's current list is kept.
+  - [] and null are NOT the same: null keeps the list, [] empties it.
+- no_email_for: when ${OWNER_NAME} says he does NOT have someone's email ("não tenho o e-mail dela", "agenda assim mesmo", "book it anyway", "just create it without her"), put that person's NAME here and KEEP them in participants with email: null. This IS an answer — decision "modify", NEVER "unrelated".
+- The latest message may come from ${OWNER_NAME} OR from an attendee. If an attendee gives their OWN email ("it's ana@x.com", "sou eu, ana@x.com"), attach it to them — that is an ANSWER ("modify"), never "unrelated". If EXACTLY ONE person still needs an email and the latest message has a single bare email, attach it to that person.
 - NEVER invent an email or a time. If it is not clearly present, leave it null — a human will be asked.`;
 }
 
 export function buildResolveUser({
   draftJson,
   needsTime,
-  needsAttendees,
   needEmailFor,
+  gathering,
   transcript,
   latest,
   nowStr,
@@ -269,8 +288,9 @@ Current DRAFT: ${draftJson}
 
 Still missing (resolve ONLY these):
 - start_iso (event date/time): ${needsTime ? "MISSING" : "already set"}
-- participants — at least one attendee besides the owner: ${needsAttendees ? "MISSING" : "already set"}
 - email address for these attendees: ${needEmailFor && needEmailFor.length ? needEmailFor.join(", ") : "(none missing)"}
+
+This message is: ${gathering ? "an answer to a question you asked" : "the original order"}
 
 Recent conversation:
 ${transcript || "(none)"}
@@ -467,29 +487,41 @@ const REPLY = {
     thinkingError: () => "I hit an error while thinking. Try again?",
     noAction: ({ summary }) =>
       `I didn't identify a calendar action. ${summary || ""}`.trim(),
-    createConfirm: ({ title, emails, when, duration }) =>
-      `Confirm this event:
+    // An event may legitimately have NO outside guests, and a named guest may be left out
+    // because the owner told us he hasn't got their email. Both are stated OUT LOUD: an
+    // empty "- " bullet says nothing, and a person must NEVER be dropped silently.
+    createConfirm: ({ title, emails, when, duration, uninvited }) => {
+      const guests = emails || "(no guests)";
+      const without = uninvited?.length
+        ? `\n- Without ${joinListEn(uninvited)} — I don't have their email.`
+        : "";
+      return `Confirm this event:
 - ${title}
-- ${emails}
+- ${guests}${without}
 - ${when} (${duration} min)
 
-Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`,
-    createDone: ({ reused, title, emails, when, duration, link }) =>
-      `${
+Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
+    },
+    createDone: ({ reused, title, emails, when, duration, link, uninvited }) => {
+      const guests = emails || "(no guests)";
+      const without = uninvited?.length
+        ? `\n\nI created it without inviting ${joinListEn(uninvited)} — I don't have their email.`
+        : "";
+      return `${
         reused
           ? "That event already exists — here it is (no duplicate created):"
           : "Done! Invite created and sent:"
-      }\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nHere is a link for the event:\n${link}`,
+      }\n\n- ${title}\n- ${guests}\n- ${when} (${duration} min)${without}\n\nHere is a link for the event:\n${link}`;
+    },
     createCancelled: ({ title }) => `Okay, I won't create "${title}".`,
     createGoogleError: () =>
       "I understood the request but failed to create it in Google. Error in the log.",
     inquiry: (m) => {
-      if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
+      if (!m.noTime && m.emailNames.length === 1) {
         return `${m.emailNames[0]}, I'm missing your email. Can you send it so I can add you to the invite?`;
       }
       const asks = [];
       if (m.noTime) asks.push("the date and time");
-      if (m.noAttendees) asks.push("who to invite");
       if (m.emailNames.length === 1) asks.push(`${m.emailNames[0]}'s email`);
       else if (m.emailNames.length > 1)
         asks.push(`emails for ${joinListEn(m.emailNames)}`);
@@ -552,29 +584,38 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     noAction: ({ summary }) =>
       `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
-    createConfirm: ({ title, emails, when, duration }) =>
-      `Confirme este evento:
+    createConfirm: ({ title, emails, when, duration, uninvited }) => {
+      const guests = emails || "(ninguém convidado)";
+      const without = uninvited?.length
+        ? `\n- Sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
+        : "";
+      return `Confirme este evento:
 - ${title}
-- ${emails}
+- ${guests}${without}
 - ${when} (${duration} min)
 
-Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`,
-    createDone: ({ reused, title, emails, when, duration, link }) =>
-      `${
+Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`;
+    },
+    createDone: ({ reused, title, emails, when, duration, link, uninvited }) => {
+      const guests = emails || "(ninguém convidado)";
+      const without = uninvited?.length
+        ? `\n\nCriei sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
+        : "";
+      return `${
         reused
           ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
           : "Pronto! Convite criado e enviado:"
-      }\n\n- ${title}\n- ${emails}\n- ${when} (${duration} min)\n\nAqui está o link do evento:\n${link}`,
+      }\n\n- ${title}\n- ${guests}\n- ${when} (${duration} min)${without}\n\nAqui está o link do evento:\n${link}`;
+    },
     createCancelled: ({ title }) => `Ok, não vou criar "${title}".`,
     createGoogleError: () =>
       "Entendi o pedido, mas não consegui criar no Google. O erro está no log.",
     inquiry: (m) => {
-      if (!m.noTime && !m.noAttendees && m.emailNames.length === 1) {
+      if (!m.noTime && m.emailNames.length === 1) {
         return `${m.emailNames[0]}, estou sem o seu e-mail. Pode me enviar para eu te incluir no convite?`;
       }
       const asks = [];
       if (m.noTime) asks.push("a data e o horário");
-      if (m.noAttendees) asks.push("quem convidar");
       if (m.emailNames.length === 1) asks.push(`o e-mail de ${m.emailNames[0]}`);
       else if (m.emailNames.length > 1)
         asks.push(`os e-mails de ${joinListPt(m.emailNames)}`);
