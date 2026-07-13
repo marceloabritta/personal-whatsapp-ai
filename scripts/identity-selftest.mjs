@@ -148,6 +148,34 @@ const { TAGS: TAGS_ENV } = await import(`${MODULE}?env=1`); // ?env=1 = a distin
 check("8 env override", eq(TAGS_ENV, ["@foo", "@bar"]));
 delete process.env.SECRETARY_TAG;
 
+// ---- 9: the PREFIX TRAP — a standing guard on matchedTag() -------------------
+// The owner can now change his tags at runtime (the `assistant_settings` skill), so a list
+// where one tag is a PREFIX of another is a supported combination, not a hypothetical. Two
+// ways it goes wrong, and both are silent — the order is not rejected, it is MANGLED:
+//   9a  first-match-wins would slice "@assistente marque…" by the shorter "@assist" (7 chars)
+//       and hand the router "ente marque uma reunião". Longest tag first.
+//   9b  length order alone still lets a tag that is NOT in the list through: with "@assist"
+//       live, a RETIRED "@assistant do X" starts with it, so she would answer and hand the
+//       router "ant do X". A tag must END (space/punctuation/end-of-message) to match.
+//   9c  the sort must be on a COPY: TAGS[0] is the primary tag (server.js:306 falls back to
+//       it for ctx.tag), so sorting TAGS itself would silently re-elect it.
+// The full apply→live→persist flow is scripts/settings-tag-selftest.mjs; this is the guard
+// that stays behind in identity's own test.
+process.env.SECRETARY_TAG = "@assist,@assistente";
+const { TAGS: TAGS_PFX, matchedTag: matchPfx } = await import(`${MODULE}?prefix=1`);
+const pt = "@assistente marque uma reuniao";
+const tp = matchPfx(pt);
+check(
+  "9 prefix trap: longest-first, tag must end, TAGS not reordered",
+  tp === "@assistente" &&
+    pt.slice(tp.length).trim() === "marque uma reuniao" && // 9a: not "ente marque…"
+    matchPfx("@assist do X") === "@assist" &&
+    matchPfx("@assistant do X") === null && // 9b: a non-tag that merely EXTENDS a tag
+    eq(TAGS_PFX, ["@assist", "@assistente"]) && // 9c: still the owner's order
+    TAGS_PFX[0] === "@assist"
+);
+delete process.env.SECRETARY_TAG;
+
 // ---- done -------------------------------------------------------------------
 console.log(`\n${failures === 0 ? "PASS" : `FAIL (${failures})`}\n`);
 process.exit(failures === 0 ? 0 : 1);

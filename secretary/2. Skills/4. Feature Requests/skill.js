@@ -44,7 +44,9 @@ export const manifest = {
     "capture and spec out a NEW FEATURE / product idea the owner wants to build: hold a " +
     "clarifying conversation, then produce a Markdown spec document delivered as a file. " +
     "Use for 'I have a feature idea', 'spec this out', 'write up a feature request', " +
-    "'new feature' — NOT for adding a to-do (task_action) or scheduling (calendar_action).",
+    "'new feature' — NOT for adding a to-do (task_action) or scheduling (calendar_action), " +
+    "and NOT for changing how the owner summons the assistant, i.e. her trigger tag " +
+    "(assistant_settings) — that is a setting she can change on the spot, not an idea to spec.",
 };
 
 const SESSION_TTL = 1800; // 30-min clarify window, re-armed each turn

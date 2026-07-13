@@ -26,9 +26,10 @@ import {
   contactName,
 } from "./lib/whatsapp.js";
 import { createSessions } from "./lib/sessions.js";
+import { createSettings } from "./lib/settings.js";
 import { withThinkingDefault } from "./lib/llm.js";
 import { checkPayload } from "./lib/inputs.js";
-import { TAGS, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
+import { TAGS, setTags, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
 import { route } from "./router/router.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
@@ -74,6 +75,10 @@ const REDIS_URL =
     ? "redis://evolution_redis:6379"
     : process.env.REDIS_URL;
 const sessions = createSessions({ url: REDIS_URL });
+// Durable settings on the SAME Redis (no TTL, own key space). Today: the tag list the owner
+// summons her with, which he can change by asking (the `assistant_settings` skill).
+// SECRETARY_TAG is the SEED; a stored value wins — see the boot load below.
+const settings = createSettings({ url: REDIS_URL });
 
 const seen = new Set(); // dedup by messageId
 
@@ -325,6 +330,7 @@ app.post("/webhook", async (req, res) => {
       env: process.env,
       evolution,
       sessions, // store: get/set/clear per-chat state
+      settings, // durable settings: loadTags/saveTags (the tag list he summons her with)
       session: isContinuation ? session : null, // present only on a continuation
       // SELF-LEARNING: one failure report per webhook turn. This is an OBJECT, not a
       // boolean, and that is load-bearing: ctx.callSkill spreads the ctx ({ ...ctx }), so a
@@ -487,6 +493,26 @@ app.post("/webhook", async (req, res) => {
     console.error("Webhook error:", e);
   }
 });
+
+// ---- Boot: the STORED tag list wins over the SECRETARY_TAG seed --------------
+// `await settings.ready` is the load-bearing word here. createSettings() fires its Redis
+// connect without blocking (same shape as sessions.js), so live() is false for the first
+// moments of the process. Reading the stored tags WITHOUT awaiting ready would race the
+// connection, miss them, and fall back to the env seed — she would answer to the changed tag
+// until the first restart and then silently forget it. Top-level await; the package is ESM.
+await settings.ready;
+try {
+  const stored = await settings.loadTags();
+  if (stored?.length && setTags(stored)) {
+    console.log(`tags: ${TAGS.join(", ")} (source: stored setting)`);
+  } else {
+    console.log(`tags: ${TAGS.join(", ")} (source: SECRETARY_TAG seed)`);
+  }
+} catch (e) {
+  // A settings store that cannot be read is a degraded store, not a failed boot: she still
+  // answers to the seed.
+  console.error("tags: could not read the stored setting, using the seed:", e.message);
+}
 
 app.listen(process.env.PORT || 3000, () =>
   console.log("Secretary v2.0 (orchestrator) listening on port 3000")

@@ -276,11 +276,23 @@ default `@default`; Skill: `task_action`),
 language — the transcription follows the detected `ctx.lang` first; it does **not** set the
 reply language, which follows `ctx.lang`), `FLIGHT_CURRENCY` (optional, default `BRL`; Skill:
 `flight_search` — the currency asked of Kiwi. **There is no flight-provider API key**: the Kiwi
-endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
-`redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
+endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store **and** the durable settings
+store; defaults to `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
 `EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tags —
 **comma-separated**, default `@secretaria,@secretary`; both trigger the secretary. The old
 `@brain` tag is **retired** — a message using it is silently ignored).
+
+`SECRETARY_TAG` is now the **SEED, not the last word**. The owner can change the tags by asking
+her (`assistant_settings`); the confirmed list is stored in Redis under
+`secretary:settings:tags` (**no TTL**, `lib/settings.js`) and **wins over the env var at boot**
+— `server.js` awaits the store's `ready` before reading it (an un-awaited read would race the
+Redis connect and silently fall back to the seed) and logs which source won. **A restart does
+not revert a changed tag**; the store outlives it. The recovery path — a tag the owner cannot
+type, or has forgotten — is to clear the key and restart, which falls back to the seed:
+
+```bash
+docker exec evolution_redis redis-cli DEL secretary:settings:tags
+```
 
 **Evolution (`/opt/evolution/.env`)** — `AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`,
 `DATABASE_CONNECTION_URI`, `CACHE_REDIS_URI`, etc.

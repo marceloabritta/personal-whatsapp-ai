@@ -25,7 +25,7 @@ state, shared with Evolution's cache) + per-skill external APIs (Google Calendar
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
-Six skills exist today:
+Seven skills exist today:
 - `calendar_action` — **creates**, **edits/reschedules**, **cancels/deletes**, and
   **reads/lists** Google Calendar events. Create and cancel are confirm-first (the owner
   types `yes`); edit is a reply-driven change (move/relength/rename/add-remove attendee),
@@ -52,6 +52,11 @@ Six skills exist today:
   cheapest-first list, **before** the sort. One follow-up turn hands over the booking link
   (`link for option 2`, tagged or not). It **never buys**. Provider: Kiwi's keyless MCP
   endpoint. See `secretary/2. Skills/6. Flight Search/SKILL.md`.
+- `assistant_settings` — **change how you summon her, by asking her.** `@assistant, change your
+  tag to @assist`: she deduces whether the other language's call should change too, says the
+  reasoning in prose, shows the **complete** new tag list, and applies it only on a `yes`. The
+  confirmed list is **persisted** (Redis, no TTL) and **wins over `SECRETARY_TAG`**, which is now
+  only the seed. See `secretary/2. Skills/7. Assistant Settings/SKILL.md`.
 
 ---
 
@@ -459,6 +464,37 @@ purpose — this list went stale once already by counting.*
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-13 — the owner can change the tag he summons her with, by asking her (BUILT, not yet
+  deployed — expedited card 793566bd).** `@assistant, change your tag to @assist` → she **deduces**
+  whether the other language's call should change too, **states the reasoning in prose** and the
+  **complete** new tag list, and asks. On `yes` it is applied live and persisted; the old tags stop
+  working. New skill `assistant_settings` (`2. Skills/7. Assistant Settings/`), new durable store
+  `lib/settings.js` (Redis, key `secretary:settings:tags`, **no TTL**), `TAGS` made live in
+  `lib/identity.js` (`setTags()` mutates in place; `normalizeTags()` is the shared validator).
+
+  **`SECRETARY_TAG` is now the SEED, not the last word** — a stored list wins at boot, and the boot
+  log names the source. So **a restart no longer reverts a tag change**: the store outlives it. The
+  recovery path, if the owner ever locks himself out, is
+  `docker exec evolution_redis redis-cli DEL secretary:settings:tags` + restart.
+
+  **The prefix landmine, fixed on the way through.** `matchedTag()` was `TAGS.find(t =>
+  low.startsWith(t))` — *first* match wins — and `server.js` slices the order by the matched tag's
+  **length**. The moment the owner lands on `@assist` + `@assistente` (which this feature makes an
+  ordinary thing to land on), `"@assistente marque uma reunião"` matched `@assist`, 7 chars came
+  off, and the router was handed **`"ente marque uma reunião"`** — every Portuguese command silently
+  corrupted, no error, no log line. `matchedTag()` now matches the **longest tag first** (sorting a
+  **copy** — `TAGS[0]` is the primary tag `ctx.tag` falls back to) **and requires the tag to end at
+  a word boundary**. The boundary half is not decoration: without it a *retired* tag that merely
+  extends a live one keeps working — with `@assist` live, `"@assistant do X"` still starts with it
+  and the router gets `"ant do X"`. A retired tag has to be gone, not half-working.
+
+  **Two things she will never do.** She will not report a save she did not get: `saveTags()` returns
+  true only on a real write, and the success message is sent **only** from that branch — if the
+  store was unreachable she says the change is live but unsaved and will not survive a restart. And
+  she will not apply anything on a maybe: `lib/confirm.js` returns `"unrelated"` on any doubt, which
+  is a no-op. Guarded by `scripts/settings-tag-selftest.mjs` (apply→live→persist, offline) and
+  assertion 9 of `scripts/identity-selftest.mjs` (the prefix trap).
 
 - **2026-07-13 — The secretary got slow: a fresh calendar order took 16–23s to reply, as unbroken
   silence (SHIPPED, DEPLOYED — maintenance card 9af6967a).** It used to be ~6.5s. **Two causes,
