@@ -25,7 +25,7 @@ state, shared with Evolution's cache) + per-skill external APIs (Google Calendar
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
-Five skills exist today:
+Six skills exist today:
 - `calendar_action` — **creates**, **edits/reschedules**, **cancels/deletes**, and
   **reads/lists** Google Calendar events. Create and cancel are confirm-first (the owner
   types `yes`); edit is a reply-driven change (move/relength/rename/add-remove attendee),
@@ -46,6 +46,12 @@ Five skills exist today:
   `scripts/self-learning-pull.sh` + `/triage-failures` turn into an implementation plan. The
   only way a **false positive** or a confidently-wrong answer ever gets caught — the code has
   no idea it failed. Part of **self-learning** (see `ARCHITECTURE.md`).
+- `flight_search` — search flights from a sentence, **confirm-first**, then the **3 cheapest
+  options a human would actually pick**: a mandatory client-side filter throws away the
+  multi-stop and carrier-chained (self-transfer) itineraries Kiwi floats to the top of a
+  cheapest-first list, **before** the sort. One follow-up turn hands over the booking link
+  (`link for option 2`, tagged or not). It **never buys**. Provider: Kiwi's keyless MCP
+  endpoint. See `secretary/2. Skills/6. Flight Search/SKILL.md`.
 
 ---
 
@@ -155,7 +161,9 @@ ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v
 │       ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete; exports capabilities.startCreate
 │       ├── 2. Audio transcriptions/{skill,prompt}.js
 │       ├── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
-│       └── 4. Feature Requests/{skill,prompt}.js   # clarify conversation → Markdown spec sent as a .md document
+│       ├── 4. Feature Requests/{skill,prompt}.js   # clarify conversation → Markdown spec sent as a .md document
+│       ├── 5. Feedback/{skill,prompt}.js           # "you got this wrong" → a self-learning failure report
+│       └── 6. Flight Search/{skill,prompt}.js      # confirm-first flight search (Kiwi); 3 cheapest AFTER the junk filter
 └── evolution/
     ├── docker-compose.yml # Evolution API + Postgres + Redis + secretary
     └── .env.example
@@ -315,6 +323,31 @@ conflate them. The webhook URL still uses the *container* hostname `http://secre
   is **date-only** (stored at UTC midnight). Without the scope, calls 401 and the skill
   replies `failed()`. A to-do assigned to another person is created as a Calendar invite
   instead (via the capability registry) — Tasks itself notifies no one.
+- **Kiwi (flight search) — `https://mcp.kiwi.com`, verified live 2026-07-12.** Used by
+  `flight_search` via a plain `fetch` (no SDK, no new dependency). JSON-RPC `tools/call`, tool
+  name `search-flight`. **No API key, no account, no billing** — and **no `initialize` handshake
+  and no `Mcp-Session-Id`**: a cold `tools/call` works. `Accept` **must** list BOTH
+  `application/json` **and** `text/event-stream` (json alone → **HTTP 406**). The response is
+  **always SSE-framed, with CRLF line terminators** (`event: message\r\ndata: {…}\r\n\r\n`); the
+  payload is `result.structuredContent`. **A bad argument comes back on an HTTP 200** with
+  `isError: true`, **no `structuredContent`**, and `content[0].text` as a **plain, non-JSON
+  string** — so `isError` is checked *before* anything is parsed (a naive
+  `JSON.parse(content[0].text)` throws). Wire types: **`departureDate`/`returnDate` are
+  `dd/mm/yyyy`, NOT ISO** (an ISO date returns `isError: true`); `cabinClass` is the enum
+  `M|W|C|F`; on a one-way, `inbound` is **present and `null`**; a past date or an unresolvable
+  city returns a cheerful `resultsCount: 0`. The `kiwi.com/u/…` booking links do not expire.
+  `currency` comes from `FLIGHT_CURRENCY` (default `BRL`); `locale` is fixed at `pt` (it drives
+  Kiwi's booking page, not our reply). Latency measured across four probes: 9723 / 4179 / 1564 /
+  1659 ms — timeout 20s, no interim ack.
+  **Two warnings, both learned the hard way:**
+  (a) **Kiwi is a self-described prototype with no SLA** — the shape can change or the endpoint
+  can vanish. Every unreadable answer lands on `ctx.sendFailure` → the Bugs board, rather than
+  masquerading as "no flights today".
+  (b) **ITS RESULTS ARE VOLATILE.** The identical query, run four times, returned **four disjoint
+  result sets** — 11 of 15 itineraries surviving the skill's filter on one, **15 of 15** on
+  another. *"The filter dropped everything today and nothing yesterday"* is **expected, not a
+  bug**, and it is why `scripts/flights-selftest.mjs`'s fixture is **frozen and hand-built**: a
+  fixture regenerated from a live call would stop discriminating and silently gut the suite.
 - **Redis (secretary session state):** in addition to being Evolution's cache, the secretary
   stores per-chat conversation state in Redis (`lib/sessions.js`, key prefix
   `secretary:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
@@ -367,8 +400,17 @@ routing, both skill flows, and every guardrail without network or real keys. Wor
 formalizing into a `test/` folder with `node --test`. Boot + skill-discovery is the
 cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
-**Two committed self-tests** (the first of the `test/` folder above, in spirit):
+**Committed self-tests** (the first of the `test/` folder above, in spirit):
 
+- `node scripts/flights-selftest.mjs` — **offline** (no network, no keys: `fetch` and
+  `ctx.anthropic` are stubbed, `createSessions()` runs on its in-memory Map). 65 assertions over
+  `flight_search`. The two it exists for: **the result filter runs BEFORE the sort** (a
+  sort-then-filter build shows the owner self-transfer junk — on a real capture the four cheapest
+  results were all carrier chains), and **the options tombstone is written at FLOW START** (or a
+  search that finds nothing leaves the *previous* search's booking links addressable). Its Kiwi
+  fixtures are **frozen and hand-built — never regenerate them from a live call** (Kiwi's results
+  are volatile; a refreshed fixture stops discriminating and the suite passes on the very bug it
+  exists to catch — test `#4a` guards this).
 - `node scripts/selflearning-selftest.mjs` — the self-learning capture invariants, fully
   offline (fake `ctx`, stub `anthropic`, reports redirected to a temp dir via
   `SELF_LEARNING_DIR`). Asserts redaction, machine dedupe, the `{ ...ctx }`-spread guard, that
@@ -384,6 +426,50 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-13 — Flight search via chat (`flight_search`) — the sixth skill (SHIPPED — committed
+  2026-07-13; NOT yet deployed to the droplet).** Ask in a sentence (`@secretary find me a flight from São Paulo to Lisbon on the
+  14th, back on the 22nd`); it asks for anything missing one field at a time, **confirms before it
+  searches**, then shows the **3 cheapest options** and, on a follow-up turn (`link for option 2`,
+  tagged or untagged), sends that option's booking link. **It never buys** — "book it" gets the
+  link *and* a plain statement that the purchase is the owner's to make.
+  **Provider: Kiwi's keyless MCP endpoint** (`https://mcp.kiwi.com` — no API key, no account, no
+  handshake; a plain `fetch`, no new npm dependency). Full wire contract in §8: **CRLF-framed SSE**,
+  `dd/mm/yyyy` dates, `cabinClass M|W|C|F`, and `isError: true` arriving on an **HTTP 200** with a
+  plain non-JSON body.
+  **Why there is a client-side result filter, and why it is the point of the card.** Kiwi is a
+  virtual-interlining OTA and its API has **no max-stops and no self-transfer parameter** — so the
+  filter cannot live at the API. On a real SAO→LIS capture, **the four cheapest results were all
+  self-transfer carrier chains** (separate tickets; a missed connection is the passenger's problem).
+  A naive "3 cheapest" would have put exactly that in front of the owner. So the skill **drops
+  >1-stop and carrier-chained itineraries — judging BOTH legs — and only THEN sorts and takes 3**.
+  The filter is deliberately over-strict (it also drops legitimate single-ticket alliance
+  connections): **when in doubt, drop.** It shows fewer than three options when that is the truth,
+  and says why. **Kiwi's results are VOLATILE** (four identical queries → four disjoint sets), so
+  the filter's bite varies wildly between identical searches — that is expected, not a bug (§8).
+  **The options live in a sidecar session key** (`` `${remoteJid}|flights` ``), because a *tagged*
+  follow-up makes the orchestrator clear the chat session (`server.js:402`) before the router has
+  decided whose order it is. Three states, three different facts: **options** → the link;
+  **tombstone** → *"I dropped those when the new search started"*; **absent** → *"I have no options
+  on hand"*. **A new search writes the tombstone at FLOW START** — before the slot chase, before the
+  confirm, before any Kiwi call — so a search that finds nothing can never leave the *previous*
+  search's booking links addressable. **No reply ever claims a search "expired"**: the skill cannot
+  distinguish an expiry from "already sent" or "never searched", so it says only what it knows.
+  New: `secretary/2. Skills/6. Flight Search/{skill,prompt}.js` + `SKILL.md`, and
+  `scripts/flights-selftest.mjs` (65 offline assertions; **its Kiwi fixtures are frozen — never
+  regenerate them**). `scripts/router-selftest.mjs` gained a per-case `transcript` and the four
+  flight cases. One new env var, **`FLIGHT_CURRENCY`** (default `BRL`; there is no provider key).
+  **Zero rails changes** — no `server.js`, no `router/`, no `lib/`, no `package.json`.
+  **Shipped over a `DO NOT SHIP` review verdict, by explicit owner override.** The build review's
+  only blocker was that the **mandatory live router check** (`CONVENTIONS.md` §1: any new/changed
+  `manifest.description` requires `ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs`) **was
+  never run** — there was no usable API key. The owner overrode it (*"ship this into production, I
+  will test it live"*) and accepted the risk: **if the new manifest makes the router misroute, the
+  owner gets a wrong reply AND a false bug ticket is filed on his own Bugs board** — `server.js:420-428`
+  answers `notUnderstood` *and* calls `fireCapture(phase:"unrouted")`. The riskiest case is
+  `link for option 2` → `other`. **The check is still owed**: the four flight cases are already in
+  `scripts/router-selftest.mjs` and it costs real money to run. Offline: 65/65 green.
+  Plan archived to `Shipped Features/2026-07-13 - flight-search-via-chat.md`.
 
 - **2026-07-12 — Self-learning: the secretary reports its own failures (SHIPPED, DEPLOYED).**
   Deployed 2026-07-12 (git pull + `docker compose restart secretary`; boot clean, Redis connected,

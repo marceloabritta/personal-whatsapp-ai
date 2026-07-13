@@ -222,6 +222,31 @@ localizes (see the localization note below). `evolution.sendMedia` was added for
 `.txt` document (`mimetype: "text/plain"`) instead of a wall of inline text — same shape as
 above, same caller-frames-the-caption rule.
 
+### 8c. skill → Kiwi (search flights) — flight_search
+
+The `flight_search` skill confirms the trip with the owner first, then makes **one** call to
+Kiwi's public MCP endpoint. It is **keyless** — no API key, no `initialize` handshake, no
+`Mcp-Session-Id`:
+```
+POST https://mcp.kiwi.com
+Content-Type: application/json
+Accept: application/json, text/event-stream        <-- BOTH (json alone -> HTTP 406)
+Body: {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+         "name":"search-flight",
+         "arguments":{"flyFrom":"SAO","flyTo":"LIS","departureDate":"14/08/2026",
+                      "returnDate":"22/08/2026","adults":1,"cabinClass":"M",
+                      "currency":"BRL","locale":"pt"}}}
+```
+The answer is an **SSE frame with CRLF terminators** (`event: message\r\ndata: {…}\r\n\r\n`);
+the payload is `result.structuredContent`. **Dates on the wire are `dd/mm/yyyy`, not ISO**, and
+`cabinClass` is the enum `M|W|C|F`. A bad argument comes back on an **HTTP 200** with
+`isError: true` and a plain, non-JSON body — checked before anything is parsed. Timeout 20s;
+no interim ack (the search lands in ~1.5–4s). Only the trip's parameters leave for Kiwi — no
+conversation, no personal data. `locale` is fixed at `pt` (it drives Kiwi's booking page) and is
+deliberately **not** tied to `ctx.lang`, which controls only our reply. Full contract, including
+the volatility warning, in `PROJECT_LOG.md` §8; the mandatory client-side result filter — Kiwi
+has no max-stops or self-transfer parameter — in the skill's `SKILL.md`.
+
 ## Environment variables
 
 **secretary (`/opt/secretary/.env`)** — `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `TRANSLATE_MODEL`
@@ -231,7 +256,9 @@ above, same caller-frames-the-caption rule.
 default `@default`; Skill: `task_action`),
 `ASSEMBLYAI_API_KEY`, `ASSEMBLYAI_LANGUAGE` (now only a *fallback* for the transcription
 language — the transcription follows the detected `ctx.lang` first; it does **not** set the
-reply language, which follows `ctx.lang`), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
+reply language, which follows `ctx.lang`), `FLIGHT_CURRENCY` (optional, default `BRL`; Skill:
+`flight_search` — the currency asked of Kiwi. **There is no flight-provider API key**: the Kiwi
+endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
 `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
 `EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tags —
 **comma-separated**, default `@secretaria,@secretary`; both trigger the secretary. The old

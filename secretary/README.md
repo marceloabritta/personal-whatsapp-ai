@@ -29,9 +29,15 @@ secretary/
     ├── 3. Tasks/
     │   ├── skill.js         #   export { manifest, run, capabilities } — batch add/list/complete/edit/delete; delegates a task-for-others to Calendar
     │   └── prompt.js        #   list-aware planner prompt + PLAN_SCHEMA, confirm classifier, localized reply() strings
-    └── 4. Feature Requests/
-        ├── skill.js         #   export { manifest, run } — clarify conversation → Markdown spec sent as a .md document
-        └── prompt.js        #   clarify prompt + CLARIFY_SCHEMA, English doc prompt, slugify, localized reply() strings
+    ├── 4. Feature Requests/
+    │   ├── skill.js         #   export { manifest, run } — clarify conversation → Markdown spec sent as a .md document
+    │   └── prompt.js        #   clarify prompt + CLARIFY_SCHEMA, English doc prompt, slugify, localized reply() strings
+    ├── 5. Feedback/
+    │   ├── skill.js         #   export { manifest, run } — "you got this wrong" → a self-learning failure report
+    │   └── prompt.js        #   the complaint prompt + schema, localized reply() strings
+    └── 6. Flight Search/
+        ├── skill.js         #   export { manifest, run } — confirm-first flight search (Kiwi), 3 cheapest AFTER the junk filter, one link turn
+        └── prompt.js        #   3 schemas + prompts, the option/confirm renderers, localized reply() strings
 ```
 
 ## How a skill is discovered

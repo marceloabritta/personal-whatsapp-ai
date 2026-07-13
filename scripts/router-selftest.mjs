@@ -44,7 +44,17 @@ const TRANSCRIPT = `Marcelo: @secretary schedule a call with Ana tomorrow at 5pm
 [Marcelo's AI Secretary]: Event created — "Call with Ana", tomorrow 6:00 PM.
 `;
 
+// A FLIGHT context. "link for option 2" against the calendar transcript above would prove
+// the wrong thing — the case only means anything if the options really are on the table.
+const FLIGHT_TRANSCRIPT = `Marcelo: @secretary find me a flight from São Paulo to Lisbon on the 14th
+[Marcelo's AI Secretary]: 1. 4980 BRL — out Fri, Aug 14, 22:10 GRU → 12:35 LIS (direct, 11h25)
+2. 5210 BRL — out Fri, Aug 14, 18:40 GRU → 14:55 LIS (1 stop via MAD)
+3. 5610 BRL — out Fri, Aug 14, 21:20 VCP → 11:00 LIS (direct, 9h40)
+Want the link for one? Say "link for option 2".
+`;
+
 // exact: the tasks must match, in order. contains: the task must be present.
+// Per-case `transcript` overrides the shared calendar one (default below).
 const CASES = [
   { order: "you made a mistake here", exact: ["feedback"] },
   { order: "that's wrong", exact: ["feedback"] },
@@ -58,6 +68,16 @@ const CASES = [
   { order: "schedule lunch with Ana tomorrow at noon", exact: ["calendar_action"] },
   { order: "I have a feature idea: let me snooze a task", exact: ["feature_request"] },
   { order: "add buy milk to my tasks", exact: ["task_action"] },
+  // flight_search (added with the skill — a new manifest.description changes the
+  // classification problem for EVERY skill, so this file is the only place that proves it).
+  { order: "find me a flight from São Paulo to Lisbon on the 14th", exact: ["flight_search"] },
+  { order: "me acha um voo de Sao Paulo pra Lisboa dia 14", exact: ["flight_search"] },
+  // THE mandated utterance. The router never sees the tag (server.js:271 slices it off), so
+  // the case is the bare string. A misroute to `other` makes server.js:420-428 reply "I didn't
+  // understand" AND file a FALSE self-learning bug ticket — the nastiest risk on the card.
+  { order: "link for option 2", transcript: FLIGHT_TRANSCRIPT, exact: ["flight_search"] },
+  // Regression: the new manifest must NOT steal a to-do that happens to mention a flight.
+  { order: "add buy flight tickets to my tasks", exact: ["task_action"] },
 ];
 
 let failures = 0;
@@ -67,7 +87,7 @@ for (const c of CASES) {
     anthropic,
     model: MODEL,
     order: c.order,
-    transcript: TRANSCRIPT,
+    transcript: c.transcript || TRANSCRIPT,
     hasQuotedAudio: false,
     quoted: null,
     catalog,
