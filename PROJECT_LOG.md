@@ -518,6 +518,20 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   `scripts/router-selftest.mjs` and it costs real money to run. Offline: 65/65 green.
   Plan archived to `Shipped Features/2026-07-13 - flight-search-via-chat.md`.
 
+- **2026-07-12 — Kanban: the open card is lit on the board.**
+  Opening a card's chat now gives that card an accent-blue **background** on the board (not just an
+  outline), so you can see at a glance which card you are talking about. The card's drawer carries a
+  **matching** title block — and the two hexes are deliberately **different**: the card sits *under*
+  the `.4` scrim and the drawer *above* it, so the drawer takes the **pre-composited** value
+  (`--card-open-seen` = `0.6 × --card-open`) in order to *look* like the same colour. They are a
+  **pair**: change one and you must recompute the other. The chips inside `#d-card .dh` were
+  restyled — scoped to that drawer only — because accent-blue text on an accent-blue field is
+  unreadable; the other four drawers are visually untouched. The highlight is **derived at render
+  time** (`renderBoards()` rebuilds every card) and repainted directly on open/close, because
+  `closeAll()` does not re-render. New `scripts/card-highlight-selftest.mjs` guards the hex pairing,
+  the `#d-card` scoping and the four JS touchpoints; `AI Coding-kanban/tests/ui_test.py` proves in
+  real Chrome that exactly one card is lit and that the tint actually applied.
+
 - **2026-07-12 — Tasks: the planner now knows whether it was addressed (BUGFIX).**
   The engaged window keeps listening for 10 minutes after a task exchange, and a continuation is
   **never** tagged — so the planner read *"amanha vou tentar implementar o tenente dentro do

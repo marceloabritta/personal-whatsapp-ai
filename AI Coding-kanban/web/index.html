@@ -6,228 +6,867 @@
 <title>manager-kanban</title>
 <style>
   :root{
-    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --panel3:#252a35; --line:#2a2f3a;
     --text:#e6e9ef; --muted:#8b93a3; --accent:#5b8cff; --accent2:#7c5bff;
-    --ok:#3fb950; --warn:#d29922; --gate:#f0883e;
-    --user:#22303f; --mgr:#1d2530; --sys:#191b22;
+    --ok:#3fb950; --warn:#d29922; --gate:#f0883e; --danger:#f85149;
+    --user:#22303f; --mgr:#1d2530; --wrk:#1b2420;
+    /* the open card is UNDER the .4 scrim, its drawer title is ABOVE it -> seen = 0.6 x raw.
+       These two are a PAIR: if you change --card-open, recompute --card-open-seen = 0.6 x it.
+       scripts/card-highlight-selftest.mjs fails if they drift apart. */
+    --card-open:#2d3d63; --card-open-seen:#1b253b; --card-open-line:#4a6bb0;
+    /* Maintenance cards. Amber, deliberately far from the blues used for selection/accent —
+       the whole point is telling a fix from a feature at a glance, INCLUDING once both are
+       sitting in the build pipeline together. */
+    --maint:#e0a03a; --maint-bg:#2a2318; --maint-line:#5c4620;
   }
   *{box-sizing:border-box}
   body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-       background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
-  header{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+       background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  button{font:inherit}
+
+  /* ---- header ---- */
+  header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
   header h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
-  header .mode{font-size:11px;padding:3px 8px;border-radius:20px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
-  header .mode.live{color:var(--ok);border-color:#204a2b}
-  header .repo{font-size:11px;color:var(--muted);margin-left:auto;font-family:ui-monospace,monospace}
-  #conn{width:8px;height:8px;border-radius:50%;background:var(--warn)}
+  #conn{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:0 0 auto}
   #conn.on{background:var(--ok)}
-  .board{flex:1;display:flex;gap:14px;padding:16px;overflow-x:auto;align-items:flex-start}
-  .col{flex:0 0 280px;background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;max-height:100%}
-  .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0;padding:12px 14px 8px;display:flex;justify-content:space-between}
-  .col h2 .count{background:var(--panel2);border-radius:20px;padding:0 8px;font-size:11px}
-  .col .drop{padding:6px 10px 12px;overflow-y:auto;flex:1;min-height:40px}
-  .col.dragover{outline:2px dashed var(--accent);outline-offset:-4px}
-  .card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 11px;margin-bottom:9px;cursor:pointer;transition:border-color .12s}
+  .managers{display:flex;align-items:center;gap:6px;margin-left:8px;padding-left:12px;border-left:1px solid var(--line)}
+  .mgr-chip{display:flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);
+            border-radius:20px;padding:4px 11px 4px 8px;cursor:pointer;font-size:12.5px;color:var(--text)}
+  .mgr-chip:hover{border-color:var(--accent)}
+  .mgr-chip .n{font-size:10px;color:var(--muted);background:var(--panel3);border-radius:10px;padding:0 5px}
+  .mgr-chip.busy{border-color:var(--ok)}
+  .icon-btn{background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:8px;
+            padding:5px 9px;cursor:pointer;font-size:12.5px}
+  .icon-btn:hover{border-color:var(--accent);color:var(--text)}
+  header .right{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .mode{font-size:11px;padding:3px 8px;border-radius:20px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+  .mode.live{color:var(--ok);border-color:#204a2b}
+  .repo{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
+
+  /* ---- boards ---- */
+  /* NEVER scrolls sideways. The board is a thing you look at, not a thing you drive. */
+  .boards{flex:1;overflow-y:auto;overflow-x:hidden;padding:14px 16px 24px}
+  /* --pipe-bg is set per-pipeline from the board data (state, editable per pipeline). */
+  .pipe{margin-bottom:18px;background:var(--pipe-bg,transparent);border:1px solid var(--line);
+        border-radius:14px;padding:11px 12px 12px}
+  .pipe-h{display:flex;align-items:center;gap:10px;margin:0 0 9px}
+  .pipe-h .name{font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:var(--text);font-weight:650;opacity:.85}
+  .pipe-h .rule{flex:1;height:1px;background:rgba(255,255,255,.09)}
+  .pipe-h .edit{font-size:11px;padding:3px 10px;border-radius:20px;cursor:pointer;color:var(--text);
+                background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.14);opacity:.75}
+  .pipe-h .edit:hover{opacity:1;border-color:var(--accent)}
+  /* EVERY pipeline uses the same track count — that of the longest one — so a column is the
+     same width on every row and the whole board fits the screen. --cols is set in JS. */
+  .row{display:grid;grid-template-columns:repeat(var(--cols,5),minmax(0,1fr));gap:10px;align-items:start}
+  .col{min-width:0;background:rgba(0,0,0,.26);border:1px solid rgba(255,255,255,.07);border-radius:12px;
+       display:flex;flex-direction:column}
+  .col.gate{border-color:#5a381a}
+  .col.dragover{outline:2px dashed var(--accent);outline-offset:-3px}
+  .col-h{padding:10px 11px 8px;display:flex;align-items:center;gap:6px}
+  .col-h .t{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:650;flex:1;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .col.gate .col-h .t{color:var(--gate)}
+  .col-h .count{background:var(--panel2);border-radius:20px;padding:0 7px;font-size:11px;color:var(--muted)}
+  .col-h .tool{opacity:0;cursor:pointer;color:var(--muted);font-size:12px;padding:1px 3px;border-radius:4px}
+  .col:hover .col-h .tool{opacity:1}
+  .col-h .tool:hover{color:var(--text);background:var(--panel2)}
+  .drop{padding:2px 9px 10px;min-height:44px;flex:1}
+  /* A card is painted from the pipeline it BELONGS to (its kind), not the column it is
+     parked in — so a fix stays yellow after it is promoted into the red build pipeline,
+     and you can still read the build columns at a glance. --c-* are set per card in JS.
+     They are custom properties, not inline background/border, for one specific reason:
+     inline styles beat stylesheet rules, and that would kill the .open-chat highlight.
+     As a var, .open-chat is simply a later rule of equal weight — and still wins. */
+  .card{background:var(--c-bg,var(--panel2));border:1px solid var(--c-line,var(--line));
+        box-shadow:inset 3px 0 0 var(--c-accent,transparent);
+        border-radius:9px;padding:9px 10px;margin-bottom:8px;cursor:pointer}
   .card:hover{border-color:var(--accent)}
-  .card .t{font-weight:600;margin-bottom:6px}
-  .card .meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  .badge{font-size:10.5px;padding:2px 7px;border-radius:6px;background:#232833;color:var(--muted);border:1px solid var(--line)}
+  .card.open-chat{background:var(--card-open);border-color:var(--card-open-line)}
+  .badge.maint{background:#2e2415;color:var(--maint);border-color:var(--maint-line)}
+  .card .t{font-weight:600;margin-bottom:6px;line-height:1.35}
+  .card .meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+  .badge{font-size:10px;padding:2px 6px;border-radius:6px;background:#232833;color:var(--muted);border:1px solid var(--line)}
   .badge.gate{background:#3a2410;color:var(--gate);border-color:#5a381a}
   .badge.busy{background:#132c1a;color:var(--ok);border-color:#204a2b}
   .badge.err{background:#3a1414;color:#ff6b6b;border-color:#5a1f1f}
-  .add{margin:0 10px 12px;padding:8px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);
-       text-align:center;cursor:pointer;font-size:12.5px}
-  .add:hover{border-color:var(--accent);color:var(--text)}
-  /* drawer */
-  .drawer{position:fixed;top:0;right:0;height:100%;width:min(480px,92vw);background:var(--panel);
-          border-left:1px solid var(--line);transform:translateX(100%);transition:transform .18s ease;
-          display:flex;flex-direction:column;z-index:20;box-shadow:-16px 0 40px rgba(0,0,0,.35)}
+  .badge.mgr{background:var(--panel3)}
+  /* The "+ column" tile is gone. It sat at the end of every row and was what forced the
+     board to scroll sideways; adding a column now lives in the pipeline's edit panel. */
+  .pipe-edit .crow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
+  .pipe-edit .crow input[type=text]{flex:1;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+                                    border-radius:7px;padding:6px 9px;font:inherit}
+  .pipe-edit .crow .g{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;white-space:nowrap}
+  .pipe-edit .crow .mini{background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:6px;
+                         padding:4px 7px;font-size:12px;cursor:pointer}
+  .pipe-edit .crow .mini:hover{border-color:var(--accent);color:var(--text)}
+  .pipe-edit .swatch{display:flex;align-items:center;gap:10px}
+  .pipe-edit input[type=color]{width:52px;height:32px;padding:0;background:var(--panel2);
+                               border:1px solid var(--line);border-radius:7px;cursor:pointer}
+  .add-card{margin:0 9px 10px;padding:7px;border:1px dashed rgba(255,255,255,.16);border-radius:8px;color:var(--muted);
+            text-align:center;cursor:pointer;font-size:12.5px}
+  .add-card:hover{border-color:var(--accent);color:var(--text)}
+
+  /* ---- drawer ---- */
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,94vw);background:var(--panel);
+          border-left:1px solid var(--line);transform:translateX(101%);transition:transform .18s ease;
+          display:flex;flex-direction:column;z-index:20;box-shadow:-16px 0 40px rgba(0,0,0,.4)}
   .drawer.open{transform:translateX(0)}
-  .drawer .dh{padding:14px 16px;border-bottom:1px solid var(--line)}
-  .drawer .dh .row{display:flex;align-items:center;gap:8px}
-  .drawer .dh h3{margin:0;font-size:15px;flex:1}
-  .drawer .dh .close{cursor:pointer;color:var(--muted);font-size:20px;line-height:1;padding:2px 6px}
-  .drawer .dh .sub{color:var(--muted);font-size:12px;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .drawer .arts a{color:var(--accent);font-size:11.5px;text-decoration:none;font-family:ui-monospace,monospace}
-  .thread{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
-  .msg{padding:9px 12px;border-radius:10px;max-width:92%;white-space:pre-wrap;word-wrap:break-word}
+  .dh{padding:13px 15px;border-bottom:1px solid var(--line)}
+  .dh .row1{display:flex;align-items:center;gap:8px}
+  .dh h3{margin:0;font-size:15px;flex:1;line-height:1.3}
+  .dh .close{cursor:pointer;color:var(--muted);font-size:22px;line-height:1;padding:0 5px}
+  .dh .close:hover{color:var(--text)}
+  .dh .sub{color:var(--muted);font-size:11.5px;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .dh .path{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted);word-break:break-all}
+  .arts a{color:var(--accent);font-size:11px;text-decoration:none;font-family:ui-monospace,monospace;
+          background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:4px;cursor:pointer}
+  .arts a:hover{border-color:var(--accent)}
+  select.mini{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;font-size:11px;padding:2px 5px}
+  /* ---- the open card's drawer: same SEEN colour as the card (see --card-open) ---- */
+  /* Scoped to #d-card ONLY. The other four drawers share .dh/.badge/select.mini/.arts a
+     and must be visually untouched. Never move any of these up to a bare selector. */
+  #d-card .dh{background:var(--card-open-seen)}
+  #d-card .dh .badge{background:#2e3852;border-color:#46506a;color:#aab3c6}
+  #d-card .dh .badge.busy{background:#17402a;border-color:#2f7a4a}
+  #d-card .dh .badge.gate{background:#4a2e12;border-color:#8a5326}
+  #d-card .dh select.mini{background:#2e3852;border-color:#46506a}
+  #d-card .dh .arts a{background:#2e3852;border-color:#46506a;color:#b9cdff}
+  #d-card .dh .arts a:hover{border-color:#8fb0ff}
+  .thread{flex:1;overflow-y:auto;padding:14px 15px;display:flex;flex-direction:column;gap:9px}
+  .msg{padding:9px 12px;border-radius:10px;max-width:94%;white-space:pre-wrap;word-wrap:break-word;line-height:1.5}
   .msg.user{background:var(--user);align-self:flex-end;border:1px solid #2b3d4f}
   .msg.manager{background:var(--mgr);align-self:flex-start;border:1px solid var(--line)}
-  .msg.system{background:transparent;color:var(--muted);font-size:12px;align-self:center;text-align:center;padding:2px}
-  .msg .who{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:3px}
-  .quick{display:flex;gap:6px;padding:8px 16px 0;flex-wrap:wrap}
-  .quick button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:7px;
-                 padding:5px 10px;font-size:12px;cursor:pointer}
+  .msg.worker{background:var(--wrk);align-self:flex-start;border:1px solid #2c4032;font-size:12.5px;
+              font-family:ui-monospace,SFMono-Regular,monospace;max-width:100%}
+  .msg.system{background:transparent;color:var(--muted);font-size:11.5px;align-self:center;text-align:center;padding:1px}
+  .msg .who{font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px}
+  /* a message you typed, rendered immediately, until the server echoes it back */
+  .msg.pending{opacity:.5}
+  .msg.failed{border-color:var(--danger);opacity:1}
+  .msg .undelivered{display:block;margin-top:5px;font-size:10.5px;color:var(--danger)}
+  .quick{display:flex;gap:6px;padding:9px 15px 0;flex-wrap:wrap}
+  .quick button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer}
   .quick button:hover{border-color:var(--accent)}
-  .composer{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+  .quick button.danger:hover{border-color:var(--danger);color:var(--danger)}
+  .composer{display:flex;gap:8px;padding:11px 15px;border-top:1px solid var(--line)}
   .composer textarea{flex:1;background:var(--panel2);color:var(--text);border:1px solid var(--line);
-                      border-radius:9px;padding:9px 11px;resize:none;font:inherit;max-height:120px}
+                     border-radius:9px;padding:9px 11px;resize:none;font:inherit;max-height:140px}
   .composer button{background:var(--accent);color:#fff;border:0;border-radius:9px;padding:0 16px;cursor:pointer;font-weight:600}
-  .composer button:disabled{opacity:.5;cursor:default}
-  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .18s;z-index:15}
+  .body{flex:1;overflow-y:auto;padding:14px 15px}
+  .body label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:12px 0 5px}
+  .body input[type=text],.body textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+                                        border-radius:8px;padding:8px 10px;font:inherit;resize:vertical}
+  .body textarea.code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;line-height:1.55;min-height:420px}
+  /* ---- the worker drawer: file on top, chat underneath ----
+     Once the chat starts, the FILE collapses to make room for the conversation. It is the
+     conversation you are working in at that point; the file is there to glance at. */
+  #d-worker .body{display:flex;flex-direction:column}
+  #d-worker textarea.code{flex:0 0 auto;transition:min-height .18s ease,height .18s ease}
+  #d-worker.chatting textarea.code{min-height:0;height:104px}
+  #d-worker.chatting #w-hint,#d-worker.chatting #w-savehint{display:none}
+  .wchat{display:flex;flex-direction:column;flex:1;min-height:0;margin-top:14px;
+         border-top:1px solid var(--line);padding-top:10px}
+  .wchat-h{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
+           font-weight:650;margin-bottom:6px}
+  #d-worker .wchat .thread{flex:1;min-height:0;padding:0}
+  #d-worker.chatting .wchat .thread{min-height:220px}
+  .wchat .composer{padding:9px 0 0}
+  .wchat .composer textarea{min-height:38px}
+  .body .hint{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.5}
+  .body .chk{display:flex;align-items:center;gap:7px;margin-top:14px;font-size:13px}
+  .dfoot{padding:11px 15px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 15px;cursor:pointer;font-weight:600}
+  .btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--text);font-weight:500}
+  .btn.danger{background:transparent;border:1px solid var(--line);color:var(--danger)}
+  .btn.danger:hover{border-color:var(--danger)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .saved{color:var(--ok);font-size:12px;opacity:0;transition:opacity .2s}
+  .saved.on{opacity:1}
+  .trash-item{display:flex;align-items:center;gap:8px;padding:9px 10px;background:var(--panel2);
+              border:1px solid var(--line);border-radius:9px;margin-bottom:8px}
+  .trash-item .t{flex:1}
+  .trash-item .p{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--muted)}
+  .empty{color:var(--muted);text-align:center;padding:30px 0;font-size:13px}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:opacity .18s;z-index:15}
   .scrim.open{opacity:1;pointer-events:auto}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block;animation:pulse 1s infinite}
   @keyframes pulse{50%{opacity:.3}}
+  code{background:var(--panel3);padding:1px 4px;border-radius:4px;font-size:12px}
 </style>
 </head>
 <body>
 <header>
   <span id="conn" title="connection"></span>
   <h1>manager-kanban</h1>
-  <span class="mode" id="mode">…</span>
-  <span class="repo" id="repo"></span>
+  <div class="managers" id="managers"></div>
+  <div class="right">
+    <button class="icon-btn" id="trash-btn">🗑 Trash <span id="trash-n"></span></button>
+    <span class="mode" id="mode">…</span>
+    <span class="repo" id="repo"></span>
+  </div>
 </header>
-<div class="board" id="board"></div>
+
+<div class="boards" id="boards"></div>
 
 <div class="scrim" id="scrim"></div>
-<aside class="drawer" id="drawer">
+
+<!-- card chat -->
+<aside class="drawer" id="d-card">
   <div class="dh">
-    <div class="row">
-      <h3 id="d-title">—</h3>
-      <span class="close" id="d-close">×</span>
-    </div>
+    <div class="row1"><h3 id="c-title">—</h3><span class="close" data-close>×</span></div>
     <div class="sub">
-      <span id="d-stage" class="badge"></span>
-      <span id="d-busy"></span>
-      <span class="arts" id="d-arts"></span>
+      <span class="badge" id="c-where"></span>
+      <span id="c-busy"></span>
+      <select class="mini" id="c-mgr" title="assigned manager"></select>
     </div>
+    <div class="sub"><span class="path" id="c-dir"></span></div>
+    <div class="sub arts" id="c-arts"></div>
   </div>
-  <div class="quick" id="d-quick"></div>
-  <div class="thread" id="thread"></div>
+  <div class="quick" id="c-quick"></div>
+  <div class="thread" id="c-thread"></div>
   <div class="composer">
-    <textarea id="input" rows="1" placeholder="Message the manager…"></textarea>
-    <button id="send">Send</button>
+    <textarea id="c-input" rows="1" placeholder="Message the manager about this card…"></textarea>
+    <button id="c-send">Send</button>
   </div>
 </aside>
 
-<script>
-const TITLES = {
-  ideas:"Ideas", planning:"Planning", plans_ready:"Plans Ready",
-  building:"Building", build_review:"Build ready for review", shipped:"Shipped"
-};
-let COLUMNS = Object.keys(TITLES);
-let cards = [];           // latest board snapshot
-let openId = null;        // currently open card
-let openThreadTs = 0;     // last rendered msg ts (dedupe)
-let ws = null;
+<!-- manager chat (board-level) -->
+<aside class="drawer" id="d-mgr">
+  <div class="dh">
+    <div class="row1"><h3 id="m-title">Manager</h3><span class="close" data-close>×</span></div>
+    <div class="sub">
+      <span class="badge">board-level chat</span>
+      <span class="badge" id="m-cards"></span>
+      <span id="m-busy"></span>
+    </div>
+    <div class="sub" style="color:var(--muted)">
+      Shape the pipelines, write the column workers, ask what's in flight. Card work happens in the card.
+    </div>
+  </div>
+  <div class="quick" id="m-quick"></div>
+  <div class="thread" id="m-thread"></div>
+  <div class="composer">
+    <textarea id="m-input" rows="1" placeholder="Talk to the manager about the board…"></textarea>
+    <button id="m-send">Send</button>
+  </div>
+</aside>
 
+<!-- worker editor -->
+<aside class="drawer" id="d-worker">
+  <div class="dh">
+    <div class="row1"><h3 id="w-title">Worker</h3><span class="close" id="w-close">×</span></div>
+    <div class="sub"><span class="badge" id="w-agent"></span><span class="badge" id="w-gate"></span><span id="w-busy"></span></div>
+    <div class="sub"><span class="path" id="w-path"></span></div>
+  </div>
+  <div class="body">
+    <div class="hint" id="w-hint">
+      This column's contract. <b>Entry criteria</b> = what a card must have to be worked here.
+      <b>Exit criteria</b> = what must be true to leave. The worker checks both and reports to the
+      manager, who decides what happens next.
+    </div>
+    <label>worker file</label>
+    <textarea class="code" id="w-md" spellcheck="false"></textarea>
+    <div class="hint" id="w-savehint">Saved to disk. Takes effect on the next delegation.</div>
+
+    <!-- Talking to the manager about THIS worker. Its own conversation, its own session:
+         "make this reviewer stop inventing work" is not the same subject as "what's in
+         flight?", and pouring both into the board chat would bury each in the other. -->
+    <div class="wchat">
+      <div class="wchat-h">Talk to the manager about this worker</div>
+      <div class="thread" id="w-thread"></div>
+      <div class="composer">
+        <textarea id="w-input" rows="1" placeholder="e.g. this reviewer invents problems — make it stick to the card's scope"></textarea>
+        <button id="w-chat-send">Send</button>
+      </div>
+    </div>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="w-save">Save worker</button>
+    <span class="saved" id="w-saved">saved ✓</span>
+  </div>
+</aside>
+
+<!-- column editor / creator -->
+<aside class="drawer" id="d-col">
+  <div class="dh">
+    <div class="row1"><h3 id="col-title">Column</h3><span class="close" data-close>×</span></div>
+    <div class="sub"><span class="badge" id="col-pipe"></span></div>
+  </div>
+  <div class="body">
+    <label>column name</label>
+    <input type="text" id="col-name" placeholder="e.g. Research" />
+    <div class="chk"><input type="checkbox" id="col-gate" /> <label for="col-gate" style="margin:0;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)">Gate — the manager stops here and waits for me</label></div>
+
+    <div id="col-new-fields">
+      <label>entry criteria — what a card must have to enter</label>
+      <textarea id="col-entry" rows="4" placeholder="e.g. SCOPE.md exists and its review says SOLID."></textarea>
+      <label>work — what this column's worker does</label>
+      <textarea id="col-work" rows="4" placeholder="e.g. Research 3 competitors and how they solve this."></textarea>
+      <label>exit criteria — what must be true to leave</label>
+      <textarea id="col-exit" rows="4" placeholder="e.g. RESEARCH.md names 3 products with a link and a verdict for each."></textarea>
+      <label>output — the file it writes into the card folder</label>
+      <textarea id="col-output" rows="3" placeholder="e.g. `RESEARCH.md` — one section per competitor."></textarea>
+      <div class="hint">
+        Leave these blank and the column gets a scaffold worker — then ask the manager
+        <i>"write the worker for the X column"</i> and it'll fill in the contract for you.
+      </div>
+    </div>
+    <div id="col-edit-note" class="hint" style="display:none">
+      To change this column's entry/exit contract, open its worker (🧠 on the column header).
+    </div>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="col-save">Save</button>
+    <button class="btn ghost" id="col-left">← move</button>
+    <button class="btn ghost" id="col-right">move →</button>
+    <button class="btn danger" id="col-del" style="margin-left:auto">Delete</button>
+  </div>
+</aside>
+
+<!-- pipeline editor: the columns of one pipeline, their workers, and its colour -->
+<aside class="drawer pipe-edit" id="d-pipe">
+  <div class="dh">
+    <div class="row1"><h3 id="p-title">Pipeline</h3><span class="close" data-close>×</span></div>
+    <div class="sub"><span class="badge" id="p-count"></span></div>
+  </div>
+  <div class="body">
+    <label>colour</label>
+    <div class="swatch">
+      <input type="color" id="p-color" />
+      <div class="hint" style="margin:0">
+        The pipeline's background. Cards that <b>belong</b> to it are painted a darker shade of
+        the same colour — and keep it after they are promoted into build, which is how you can
+        still tell a new feature from a fix once they are queued together.
+      </div>
+    </div>
+
+    <label>columns</label>
+    <div id="p-cols"></div>
+    <div class="add-card" id="p-add" style="margin:10px 0 0">+ add a column</div>
+    <div class="hint">
+      A column is a contract: what a card must HAVE to enter, and what must be TRUE to leave.
+      🧠 opens the worker that enforces it.
+    </div>
+  </div>
+</aside>
+
+<!-- trash -->
+<aside class="drawer" id="d-trash">
+  <div class="dh">
+    <div class="row1"><h3>Trash</h3><span class="close" data-close>×</span></div>
+    <div class="sub"><span style="color:var(--muted)">Archived cards. The folder is kept — restore puts it back where it was.</span></div>
+  </div>
+  <div class="body" id="t-list"></div>
+</aside>
+
+<script>
+let BOARD = {pipelines:[], cards:[], managers:[], trash_count:0};
+let ws=null, openCard=null, openMgr=null, seenTs=0, colCtx=null;
+
+/* ---------- socket ---------- */
 function connect(){
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = ()=>document.getElementById('conn').classList.add('on');
-  ws.onclose = ()=>{document.getElementById('conn').classList.remove('on'); setTimeout(connect,1200);};
-  ws.onmessage = (e)=>handle(JSON.parse(e.data));
+  ws.onopen  = ()=>$('conn').classList.add('on');
+  ws.onclose = ()=>{$('conn').classList.remove('on'); setTimeout(connect,1200);};
+  ws.onmessage = e=>handle(JSON.parse(e.data));
 }
-function send(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+/* Returns whether the frame actually went out — a caller that dropped a message must say so. */
+const send = o => {
+  if(!ws || ws.readyState!==1) return false;
+  ws.send(JSON.stringify(o));
+  return true;
+};
+const $ = id => document.getElementById(id);
 
 function handle(m){
-  if(m.type==='board'){ COLUMNS=m.columns||COLUMNS; cards=m.cards; renderBoard();
-    if(openId){ const c=cards.find(x=>x.id===openId); if(c) refreshDrawerHeader(c); } }
-  else if(m.type==='card'){ if(m.id===openId) renderThread(m); }
-  else if(m.type==='message'){ if(m.card_id===openId) appendMsg(m.message); }
+  if(m.type==='board'){
+    BOARD=m; renderHeader(); renderBoards();
+    if(openCard){ const c=BOARD.cards.find(x=>x.id===openCard); c ? cardHeader(c) : closeAll(); }
+  }
+  else if(m.type==='card'){ if(m.id===openCard){ cardHeader(m); renderThread('c-thread', m.thread); } }
+  else if(m.type==='manager'){ if(m.id===openMgr){ mgrHeader(m); renderThread('m-thread', m.thread); } }
+  else if(m.type==='message'){ if(m.card_id===openCard) appendMsg('c-thread', m.message); }
+  else if(m.type==='manager_message'){ if(m.manager_id===openMgr) appendMsg('m-thread', m.message); }
+  else if(m.type==='worker_chat'){
+    if(m.key===wKey){
+      renderThread('w-thread', m.thread);
+      setChatting((m.thread||[]).length>0);   // reopening a worker you've talked to lands you in the chat
+      $('w-busy').innerHTML=m.busy?'<span class="badge busy">thinking <span class="dot"></span></span>':'';
+    }
+  }
+  else if(m.type==='worker_message'){
+    if(m.key===wKey){
+      appendMsg('w-thread', m.message);
+      setChatting(true);
+      if(m.message.role==='manager') refreshWorkerFile();  // he may have just rewritten it
+    }
+  }
+  else if(m.type==='trash'){ renderTrash(m.cards); }
 }
 
-function renderBoard(){
-  const board=document.getElementById('board');
-  board.innerHTML='';
-  for(const col of COLUMNS){
-    const list=cards.filter(c=>c.column===col);
-    const el=document.createElement('div');
-    el.className='col'; el.dataset.col=col;
-    el.innerHTML=`<h2>${TITLES[col]||col}<span class="count">${list.length}</span></h2>`;
-    const drop=document.createElement('div'); drop.className='drop';
-    for(const c of list) drop.appendChild(cardEl(c));
-    el.appendChild(drop);
-    if(col===COLUMNS[0]){
-      const add=document.createElement('div'); add.className='add'; add.textContent='+ New idea';
-      add.onclick=()=>{ const t=prompt('New card title:'); if(t&&t.trim()) send({type:'create',title:t.trim()}); };
-      el.appendChild(add);
-    }
-    // drag targets
-    el.ondragover=(ev)=>{ev.preventDefault(); el.classList.add('dragover');};
-    el.ondragleave=()=>el.classList.remove('dragover');
-    el.ondrop=(ev)=>{ev.preventDefault(); el.classList.remove('dragover');
-      const id=ev.dataTransfer.getData('text/plain'); if(id) send({type:'move',card_id:id,column:col});};
-    board.appendChild(el);
+/* ---------- header ---------- */
+function renderHeader(){
+  const box=$('managers'); box.innerHTML='';
+  for(const m of BOARD.managers){
+    const n = BOARD.cards.filter(c=>c.manager_id===m.id).length;
+    const b=document.createElement('button');
+    b.className='mgr-chip'+(m.busy?' busy':'');
+    b.innerHTML=`<span>${m.emoji}</span><span>${esc(m.name)}</span><span class="n">${n}</span>`
+                + (m.busy?' <span class="dot"></span>':'');
+    b.title=`Talk to ${m.name} about the board`;
+    b.onclick=()=>openManager(m.id);
+    box.appendChild(b);
+  }
+  const add=document.createElement('button');
+  add.className='icon-btn'; add.textContent='+'; add.title='Add a manager';
+  add.onclick=async()=>{
+    const name=prompt('Manager name:'); if(!name) return;
+    const emoji=prompt('Emoji for this manager:','🧭')||'🧭';
+    await fetch('/api/manager',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({name,emoji})});
+  };
+  box.appendChild(add);
+  $('trash-n').textContent = BOARD.trash_count ? `(${BOARD.trash_count})` : '';
+}
+
+/* ---------- colour ----------
+   A card is a darker shade of the pipeline it BELONGS to. `shade(hex, f)` multiplies each
+   channel — f<1 darkens, f>1 lightens — which keeps the hue and only moves the brightness,
+   so "a slightly darker tone of the same colour" is literally what comes out. */
+function shade(hex,f){
+  const h=(hex||'#000').replace('#','');
+  const n=h.length===3 ? h.split('').map(c=>c+c).join('') : h;
+  const v=parseInt(n,16);
+  const cl=x=>Math.max(0,Math.min(255,Math.round(x)));
+  const r=cl(((v>>16)&255)*f), g=cl(((v>>8)&255)*f), b=cl((v&255)*f);
+  return '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+/* The pipeline a card BELONGS to — its kind — NOT the one it is sitting in. This is the
+   whole reason a promoted fix stays yellow in the red build pipeline. */
+function homePipe(c){
+  const id = c.kind==='maintenance' ? 'maint' : 'plan';
+  return BOARD.pipelines.find(p=>p.id===id) || BOARD.pipelines[0];
+}
+
+/* ---------- boards ---------- */
+function renderBoards(){
+  const root=$('boards'); root.innerHTML='';
+  // Every pipeline is laid out on the SAME number of tracks — the longest pipeline's — so a
+  // column is the same width everywhere and the board never scrolls sideways.
+  const cols=Math.max(1,...BOARD.pipelines.map(p=>p.columns.length));
+  for(const p of BOARD.pipelines){
+    const sec=document.createElement('div'); sec.className='pipe';
+    sec.style.setProperty('--pipe-bg',p.color||'transparent');
+    const h=document.createElement('div'); h.className='pipe-h';
+    h.innerHTML=`<span class="name">${esc(p.title)} pipeline</span><span class="rule"></span>`;
+    const edit=document.createElement('span'); edit.className='edit'; edit.textContent='edit';
+    edit.title='Columns, workers and colour for this pipeline';
+    edit.onclick=()=>openPipe(p.id);
+    h.appendChild(edit);
+    sec.appendChild(h);
+    const row=document.createElement('div'); row.className='row';
+    row.style.setProperty('--cols',cols);
+    p.columns.forEach((col,i)=>row.appendChild(colEl(p,col,i)));
+    sec.appendChild(row); root.appendChild(sec);
   }
 }
 
+function colEl(pipe,col,i){
+  const el=document.createElement('div');
+  el.className='col'+(col.gate?' gate':'');
+  const list=BOARD.cards.filter(c=>c.column===col.id);
+
+  const h=document.createElement('div'); h.className='col-h';
+  h.innerHTML=`<span class="t">${esc(col.title)}${col.gate?' ⏸':''}</span><span class="count">${list.length}</span>`;
+  const brain=document.createElement('span'); brain.className='tool'; brain.textContent='🧠';
+  brain.title='Edit this column’s worker'; brain.onclick=e=>{e.stopPropagation();openWorker(pipe.id,col);};
+  const gear=document.createElement('span'); gear.className='tool'; gear.textContent='⚙';
+  gear.title='Column settings'; gear.onclick=e=>{e.stopPropagation();openColumn(pipe.id,col,i);};
+  h.append(brain,gear);
+  el.appendChild(h);
+
+  const drop=document.createElement('div'); drop.className='drop';
+  for(const c of list) drop.appendChild(cardEl(c));
+  el.appendChild(drop);
+
+  // Cards are born in an ORIGIN pipeline — an idea, or a bug report. Never in build.
+  const ORIGINS={plan:'+ New idea', maint:'+ New report'};
+  if(i===0 && ORIGINS[pipe.id]){
+    const a=document.createElement('div'); a.className='add-card'; a.textContent=ORIGINS[pipe.id];
+    a.onclick=()=>{const t=prompt(pipe.id==='maint'?'What is broken?':'New card title:');
+      if(t&&t.trim()) send({type:'create',title:t.trim(),pipeline:pipe.id});};
+    el.appendChild(a);
+  }
+  el.ondragover=e=>{e.preventDefault();el.classList.add('dragover');};
+  el.ondragleave=()=>el.classList.remove('dragover');
+  el.ondrop=e=>{e.preventDefault();el.classList.remove('dragover');
+    const id=e.dataTransfer.getData('text/plain'); if(id) send({type:'move',card_id:id,column:col.id});};
+  return el;
+}
+
 function cardEl(c){
-  const d=document.createElement('div'); d.className='card'; d.draggable=true;
-  let badges=`<span class="badge">${c.stage||''}</span>`;
-  if(c.busy) badges+=`<span class="badge busy">working <span class="dot"></span></span>`;
-  if(c.gate) badges+=`<span class="badge gate">gate: ${c.gate.replace('_',' ')}</span>`;
-  if(c.error) badges+=`<span class="badge err">error</span>`;
-  d.innerHTML=`<div class="t">${esc(c.title)}</div><div class="meta">${badges}</div>`;
-  d.onclick=()=>openCard(c.id);
-  d.ondragstart=(ev)=>ev.dataTransfer.setData('text/plain',c.id);
+  const d=document.createElement('div');
+  // renderBoards() does root.innerHTML='' and rebuilds every card, so the highlight is
+  // RE-DERIVED here on every frame — never stamped on once. data-id lets paintOpenCard()
+  // find this node without a re-render.
+  // The colour comes from the card's HOME pipeline, so it travels with the card: a fix that
+  // has been promoted is still yellow sitting in the red build pipeline. That is the point.
+  d.className='card'+(c.kind==='maintenance'?' maint':'')+(c.id===openCard?' open-chat':'');
+  const home=homePipe(c).color;
+  d.style.setProperty('--c-bg',shade(home,.62));      // "a slightly darker tone" of the pipeline
+  d.style.setProperty('--c-line',shade(home,1.15));
+  d.style.setProperty('--c-accent',shade(home,1.9));  // the stripe: survives the open-card highlight
+  d.dataset.id=c.id; d.dataset.kind=c.kind||'feature'; d.draggable=true;
+  const m=BOARD.managers.find(x=>x.id===c.manager_id);
+  let b='';
+  if(c.kind==='maintenance') b+=`<span class="badge maint">🛠 fix</span>`;
+  if(c.busy) b+=`<span class="badge busy">working <span class="dot"></span></span>`;
+  if(c.gate) b+=`<span class="badge gate">awaiting you</span>`;
+  if(c.error) b+=`<span class="badge err">error</span>`;
+  if(BOARD.managers.length>1 && m) b+=`<span class="badge mgr">${m.emoji} ${esc(m.name)}</span>`;
+  const n=Object.keys(c.artifacts||{}).length;
+  if(n) b+=`<span class="badge">📄 ${n}</span>`;
+  d.innerHTML=`<div class="t">${esc(c.title)}</div>`+(b?`<div class="meta">${b}</div>`:'');
+  d.onclick=()=>openCardDrawer(c.id);
+  d.ondragstart=e=>e.dataTransfer.setData('text/plain',c.id);
   return d;
 }
 
-function openCard(id){
-  openId=id; openThreadTs=0;
-  document.getElementById('drawer').classList.add('open');
-  document.getElementById('scrim').classList.add('open');
-  const c=cards.find(x=>x.id===id); if(c) refreshDrawerHeader(c);
+/* ---------- drawers ---------- */
+function show(id){ closeAll(true); $(id).classList.add('open'); $('scrim').classList.add('open'); }
+/* Sync the board's highlight to `openCard`, WITHOUT a re-render. closeAll() never calls
+   renderBoards(), so a highlight cleared "on the next frame" would sit lit for minutes. */
+function paintOpenCard(){
+  document.querySelectorAll('.card').forEach(el=>
+    el.classList.toggle('open-chat', !!openCard && el.dataset.id===openCard));
+}
+function closeAll(keepScrim){
+  // ASK THE DOM which drawers exist. This was a hardcoded id list, and the day a new drawer
+  // was added and not added to it, that drawer became impossible to close: closeAll() left
+  // it open, so the ✕ did nothing, the scrim did nothing, and it also sat on top of whatever
+  // show() opened next — which looked like "the button is broken". Refreshing was the only
+  // way out. A list that has to be kept in sync by hand will eventually not be.
+  document.querySelectorAll('.drawer').forEach(d=>d.classList.remove('open'));
+  if(!keepScrim) $('scrim').classList.remove('open');
+  openCard=null; openMgr=null; wKey=null;   // openWorker sets wKey AFTER show(), so this is safe
+  paintOpenCard();          // clear the board highlight NOW — closeAll() does not re-render.
+}
+document.querySelectorAll('[data-close]').forEach(x=>x.onclick=()=>closeAll());
+$('scrim').onclick=()=>closeAll();
+
+/* --- card --- */
+function openCardDrawer(id){
+  show('d-card');            // show() → closeAll(), which clears openCard: set it AFTER.
+  openCard=id; seenTs=0;
+  paintOpenCard();           // ...and repaint AFTER that, or closeAll()'s clear wins.
+  const c=BOARD.cards.find(x=>x.id===id); if(c) cardHeader(c);
   send({type:'open',card_id:id});
 }
-function closeDrawer(){ openId=null;
-  document.getElementById('drawer').classList.remove('open');
-  document.getElementById('scrim').classList.remove('open'); }
+function colTitle(colId){
+  for(const p of BOARD.pipelines){ const c=p.columns.find(x=>x.id===colId); if(c) return `${p.title} → ${c.title}`; }
+  return '—';
+}
+const KIND_TITLES={feature:'New feature', maintenance:'Maintenance'};
+/* The card's TYPE, in the drawer header, painted the same colour as the card itself — and
+   clicking it flips it. The type is the human's field: it is what the card IS, which is a
+   different question from which column it happens to be sitting in. */
+function paintKind(c){
+  const el=$('c-where');
+  const other = c.kind==='maintenance' ? 'feature' : 'maintenance';
+  const home=homePipe(c).color;
+  el.textContent=KIND_TITLES[c.kind]||KIND_TITLES.feature;
+  el.style.background=shade(home,.62);          // the card's own colour
+  el.style.borderColor=shade(home,1.25);
+  el.style.color='#fff';
+  el.style.cursor='pointer';
+  el.title=`This is a ${KIND_TITLES[c.kind]||'New feature'} card. Click to make it ${KIND_TITLES[other]}.`;
+  el.onclick=()=>send({type:'set_kind',card_id:c.id,kind:other});
+}
+function cardHeader(c){
+  $('c-title').textContent=c.title;
+  paintKind(c);
+  $('c-busy').innerHTML=c.busy?'<span class="badge busy">working <span class="dot"></span></span>'
+                              :(c.gate?'<span class="badge gate">awaiting you</span>':'');
+  $('c-dir').textContent='📁 '+(c.abs_dir||c.dir||'');
+  const sel=$('c-mgr'); sel.innerHTML='';
+  for(const m of BOARD.managers){
+    const o=document.createElement('option'); o.value=m.id; o.textContent=`${m.emoji} ${m.name}`;
+    if(m.id===c.manager_id) o.selected=true; sel.appendChild(o);
+  }
+  sel.onchange=()=>send({type:'assign',card_id:c.id,manager_id:sel.value});
+  $('c-arts').innerHTML=Object.keys(c.artifacts||{}).map(n=>`<a data-f="${esc(n)}">📄 ${esc(n)}</a>`).join('');
+  $('c-arts').querySelectorAll('a').forEach(a=>a.onclick=()=>viewFile(c.id,a.dataset.f));
+  const q=$('c-quick'); q.innerHTML='';
+  const btn=(label,fn,cls)=>{const b=document.createElement('button'); b.textContent=label; if(cls)b.className=cls; b.onclick=fn; q.appendChild(b);};
+  if(c.gate) btn('✓ Approve', ()=>sendCard('approve'));
+  else       btn('▶ Run this column', ()=>sendCard('start'));
+  btn('🗑 Trash', ()=>{ if(confirm(`Move "${c.title}" to the trash? The folder is kept and can be restored.`)) send({type:'trash',card_id:c.id}); }, 'danger');
+}
+async function viewFile(cardId,name){
+  const r=await fetch(`/api/card/${cardId}/file/${encodeURIComponent(name)}`);
+  const w=window.open('','_blank');
+  w.document.write(`<title>${name}</title><pre style="font:13px/1.6 ui-monospace,monospace;padding:24px;background:#0f1115;color:#e6e9ef;margin:0;white-space:pre-wrap">${esc(await r.text())}</pre>`);
+}
+const sendCard = t => {
+  const text=(t||'').trim();
+  if(!openCard || !text) return;
+  echoLocal('c-thread', text, send({type:'message',card_id:openCard,text}));
+};
 
-function refreshDrawerHeader(c){
-  document.getElementById('d-title').textContent=c.title;
-  document.getElementById('d-stage').textContent=`${TITLES[c.column]||c.column} · ${c.stage||''}`;
-  document.getElementById('d-busy').innerHTML=c.busy?'<span class="badge busy">working <span class="dot"></span></span>':(c.gate?`<span class="badge gate">awaiting you</span>`:'');
-  const arts=document.getElementById('d-arts');
-  arts.innerHTML=Object.entries(c.artifacts||{}).map(([n,p])=>`<a title="${esc(p)}">📄 ${esc(n)}</a>`).join(' ');
-  renderQuick(c);
+/* --- manager --- */
+function openManager(id){
+  show('d-mgr');             // show() → closeAll(), which clears openMgr: set it AFTER.
+  openMgr=id; seenTs=0;
+  const m=BOARD.managers.find(x=>x.id===id); if(m) mgrHeader(m);
+  send({type:'manager_open',manager_id:id});
 }
-function renderQuick(c){
-  const q=document.getElementById('d-quick'); q.innerHTML='';
-  const add=(label,text)=>{ const b=document.createElement('button'); b.textContent=label;
-    b.onclick=()=>sendMsg(text); q.appendChild(b); };
-  if(c.column==='ideas') add('▶ Start planning','start');
-  if(c.column==='plans_ready') add('✓ Approve plan','approve');
-  if(c.column==='build_review') add('🚢 Ship it','ship it');
+const sendMgr = t => {
+  const text=(t||'').trim();
+  if(!openMgr || !text) return;
+  echoLocal('m-thread', text, send({type:'manager_message',manager_id:openMgr,text}));
+};
+function mgrHeader(m){
+  $('m-title').textContent=`${m.emoji} ${m.name}`;
+  $('m-cards').textContent=`${BOARD.cards.filter(c=>c.manager_id===m.id).length} cards`;
+  $('m-busy').innerHTML=m.busy?'<span class="badge busy">thinking <span class="dot"></span></span>':'';
+  const q=$('m-quick'); q.innerHTML='';
+  for(const [label,text] of [
+    ["What's in flight?","Give me a short status of every card on the board — what's moving, what's stuck, what's waiting on me."],
+    ["Review my pipelines","Look at both pipelines' columns and their entry/exit criteria. Where are they vague, redundant, or missing a step?"],
+  ]){ const b=document.createElement('button'); b.textContent=label;
+       b.onclick=()=>sendMgr(text); q.appendChild(b); }
+  if(BOARD.managers.length>1){
+    const b=document.createElement('button'); b.className='danger'; b.textContent='Delete manager';
+    b.onclick=async()=>{ if(!confirm(`Delete ${m.name}? Their cards move to another manager.`)) return;
+      await fetch('/api/manager/'+m.id,{method:'DELETE'}); closeAll(); };
+    q.appendChild(b);
+  }
 }
 
-function renderThread(card){
-  const t=document.getElementById('thread'); t.innerHTML=''; openThreadTs=0;
-  for(const m of (card.thread||[])) appendMsg(m);
-}
-function appendMsg(m){
-  if(m.ts && m.ts<=openThreadTs) return; if(m.ts) openThreadTs=m.ts;
-  const t=document.getElementById('thread');
-  const el=document.createElement('div'); el.className='msg '+m.role;
-  const who=m.role==='manager'?'Manager':(m.role==='user'?'You':'');
+/* --- threads --- */
+function renderThread(id,msgs){ $(id).innerHTML=''; seenTs=0; for(const m of (msgs||[])) appendMsg(id,m); }
+function appendMsg(id,m){
+  if(m.ts && m.ts<=seenTs) return; if(m.ts) seenTs=m.ts;
+  // If this is the server echoing back something we already drew optimistically,
+  // don't draw it twice — just confirm the bubble we already have.
+  if(m.role==='user' && confirmPending(id,m.text)) return;
+  const t=$(id); const el=document.createElement('div'); el.className='msg '+m.role;
+  const who={manager:'Manager',user:'You',worker:'Worker'}[m.role]||'';
   el.innerHTML=(who?`<div class="who">${who}</div>`:'')+fmt(m.text);
   t.appendChild(el); t.scrollTop=t.scrollHeight;
 }
 
-function sendMsg(text){
-  if(!openId||!text.trim()) return;
-  send({type:'message',card_id:openId,text:text.trim()});
+/* Optimistic echo. A message you type is drawn the moment you send it, greyed out until
+   the server echoes it back. If the socket was not open, it stays and says so — a dropped
+   message must never silently eat what you typed. */
+function echoLocal(id,text,delivered){
+  const t=$(id); const el=document.createElement('div');
+  el.className='msg user '+(delivered?'pending':'failed');
+  el.dataset.pending=text;
+  el.innerHTML=`<div class="who">You</div>`+fmt(text)
+    +(delivered?'':'<span class="undelivered">not delivered — no connection to the server. Reconnecting…</span>');
+  t.appendChild(el); t.scrollTop=t.scrollHeight;
 }
-document.getElementById('send').onclick=()=>{
-  const i=document.getElementById('input'); sendMsg(i.value); i.value=''; i.style.height='auto';
-};
-document.getElementById('input').addEventListener('keydown',(e)=>{
-  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('send').click();}
-});
-document.getElementById('input').addEventListener('input',(e)=>{
-  e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,120)+'px';
-});
-document.getElementById('d-close').onclick=closeDrawer;
-document.getElementById('scrim').onclick=closeDrawer;
+function confirmPending(id,text){
+  for(const el of $(id).querySelectorAll('.msg.pending')){
+    if(el.dataset.pending!==text) continue;
+    el.classList.remove('pending'); delete el.dataset.pending;
+    return true;
+  }
+  return false;
+}
 
-function esc(s){return (s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+/* --- worker editor --- */
+let wCtx=null, wKey=null, wFrom=null, wDirty=false;
+/* `fromPipe` — the ✕ must put you back where you came from: the pipeline panel if you
+   opened the worker from there, the board otherwise. Anything else is a trapdoor. */
+async function openWorker(pipeId,col,fromPipe){
+  show('d-worker');
+  wCtx={pipeline:pipeId,slug:col.slug};
+  wKey=`${pipeId}/${col.slug}`; wFrom=fromPipe||null; wDirty=false;
+  setChatting(false);
+  $('w-thread').innerHTML='';
+  $('w-title').textContent=col.title+' — worker';
+  $('w-md').value='loading…';
+  send({type:'worker_open',key:wKey});     // the conversation about THIS worker
+  const r=await fetch(`/api/worker/${pipeId}/${col.slug}`); const w=await r.json();
+  $('w-agent').textContent=w.agent_name;
+  $('w-gate').textContent=w.gate?'⏸ gate column':'';
+  $('w-path').textContent=w.path;
+  $('w-md').value=w.markdown;
+}
+$('w-close').onclick=()=>{ wFrom ? openPipe(wFrom) : closeAll(); };
+$('w-md').addEventListener('input',()=>{wDirty=true;});
+function setChatting(on){ $('d-worker').classList.toggle('chatting',!!on); }
+
+$('w-save').onclick=async()=>{
+  if(!wCtx) return;
+  await fetch(`/api/worker/${wCtx.pipeline}/${wCtx.slug}`,{method:'PUT',
+    headers:{'content-type':'application/json'},body:JSON.stringify({markdown:$('w-md').value})});
+  wDirty=false;
+  const s=$('w-saved'); s.classList.add('on'); setTimeout(()=>s.classList.remove('on'),1400);
+};
+
+/* The manager EDITS this file when you ask him to, so pull it back in when he replies —
+   but never over unsaved edits of your own. Losing what the human typed to show them what
+   the manager typed is not a trade worth making. */
+async function refreshWorkerFile(){
+  if(!wCtx || wDirty) return;
+  const r=await fetch(`/api/worker/${wCtx.pipeline}/${wCtx.slug}`); const w=await r.json();
+  if(w && typeof w.markdown==='string' && w.markdown!==$('w-md').value) $('w-md').value=w.markdown;
+}
+const sendWorker = t => {
+  const text=(t||'').trim();
+  if(!wKey || !text) return;
+  setChatting(true);
+  echoLocal('w-thread', text, send({type:'worker_message',key:wKey,text}));
+};
+
+/* --- pipeline editor: columns, their workers, and the pipeline's colour --- */
+let pCtx=null;
+function openPipe(pipeId){
+  const p=BOARD.pipelines.find(x=>x.id===pipeId); if(!p) return;
+  show('d-pipe'); pCtx=pipeId;
+  $('p-title').textContent=p.title+' — pipeline';
+  $('p-count').textContent=`${p.columns.length} column${p.columns.length===1?'':'s'}`;
+  $('p-color').value=p.color||'#222222';
+  $('p-add').onclick=()=>openColumn(p.id,null);
+
+  const box=$('p-cols'); box.innerHTML='';
+  p.columns.forEach((col,i)=>{
+    const row=document.createElement('div'); row.className='crow';
+
+    const name=document.createElement('input'); name.type='text'; name.value=col.title;
+    // Renaming a column renames its worker file and moves its card folders, so only commit
+    // on blur — not on every keystroke.
+    name.onblur=()=>{ const t=name.value.trim();
+      if(t && t!==col.title) patchCol(col.id,{title:t}); };
+
+    const gate=document.createElement('label'); gate.className='g';
+    const gk=document.createElement('input'); gk.type='checkbox'; gk.checked=!!col.gate;
+    gk.onchange=()=>patchCol(col.id,{gate:gk.checked});
+    gate.append(gk,document.createTextNode('gate'));
+
+    const up=document.createElement('span'); up.className='mini'; up.textContent='↑'; up.title='Move earlier';
+    up.onclick=()=>{ if(i>0) patchCol(col.id,{index:i-1}); };
+    const dn=document.createElement('span'); dn.className='mini'; dn.textContent='↓'; dn.title='Move later';
+    dn.onclick=()=>{ if(i<p.columns.length-1) patchCol(col.id,{index:i+1}); };
+
+    const brain=document.createElement('span'); brain.className='mini'; brain.textContent='🧠';
+    brain.title='Edit this column’s worker prompt';
+    brain.onclick=()=>openWorker(p.id,col,p.id);
+
+    const del=document.createElement('span'); del.className='mini'; del.textContent='🗑';
+    del.title='Delete this column';
+    del.onclick=async()=>{
+      if(!confirm(`Delete "${col.title}"?\n\nAny cards in it move to the previous column. Its worker file is archived, not deleted.`)) return;
+      const r=await fetch('/api/column/'+col.id,{method:'DELETE'});
+      const j=await r.json();
+      if(j.error){ alert(j.error); return; }
+      if(j.moved_cards) alert(`${j.moved_cards} card(s) moved out of "${j.title}".`);
+      reopenPipe();
+    };
+
+    row.append(name,gate,up,dn,brain,del);
+    box.appendChild(row);
+  });
+}
+async function patchCol(id,body){
+  await fetch('/api/column/'+id,{method:'PATCH',headers:{'content-type':'application/json'},
+    body:JSON.stringify(body)});
+  reopenPipe();
+}
+/* The board arrives fresh over the websocket after any change, so repaint the panel from it
+   rather than from the stale `p` we closed over. */
+function reopenPipe(){ if(pCtx && $('d-pipe').classList.contains('open')) setTimeout(()=>openPipe(pCtx),60); }
+
+$('p-color').oninput=async e=>{
+  if(!pCtx) return;
+  await fetch('/api/pipeline/'+pCtx,{method:'PATCH',headers:{'content-type':'application/json'},
+    body:JSON.stringify({color:e.target.value})});
+};
+
+/* --- column editor --- */
+function openColumn(pipeId,col,index){
+  show('d-col');
+  colCtx={pipeline:pipeId,col,index};
+  const isNew=!col;
+  $('col-title').textContent=isNew?'New column':`${col.title} — settings`;
+  $('col-pipe').textContent=`${pipeId} pipeline`;
+  $('col-name').value=isNew?'':col.title;
+  $('col-gate').checked=isNew?false:col.gate;
+  $('col-new-fields').style.display=isNew?'block':'none';
+  $('col-edit-note').style.display=isNew?'none':'block';
+  for(const id of ['col-entry','col-work','col-exit','col-output']) $(id).value='';
+  for(const id of ['col-left','col-right','col-del']) $(id).style.display=isNew?'none':'inline-block';
+}
+$('col-save').onclick=async()=>{
+  const {pipeline,col}=colCtx;
+  const title=$('col-name').value.trim(); if(!title) return;
+  const gate=$('col-gate').checked;
+  if(!col){
+    await fetch('/api/column',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({pipeline,title,gate,entry:$('col-entry').value,work:$('col-work').value,
+                           exit:$('col-exit').value,output:$('col-output').value})});
+  }else{
+    await fetch('/api/column/'+col.id,{method:'PATCH',headers:{'content-type':'application/json'},
+      body:JSON.stringify({title,gate})});
+  }
+  closeAll();
+};
+const nudge = async d => {
+  const {col,index}=colCtx; if(!col) return;
+  await fetch('/api/column/'+col.id,{method:'PATCH',headers:{'content-type':'application/json'},
+    body:JSON.stringify({index:Math.max(0,index+d)})});
+  closeAll();
+};
+$('col-left').onclick=()=>nudge(-1);
+$('col-right').onclick=()=>nudge(1);
+$('col-del').onclick=async()=>{
+  const {col}=colCtx; if(!col) return;
+  if(!confirm(`Delete "${col.title}"?\n\nAny cards in it move to the previous column. Its worker file is archived, not deleted.`)) return;
+  const r=await fetch('/api/column/'+col.id,{method:'DELETE'});
+  const j=await r.json();
+  if(j.error) alert(j.error); else if(j.moved_cards) alert(`${j.moved_cards} card(s) moved out of "${j.title}".`);
+  closeAll();
+};
+
+/* --- trash --- */
+$('trash-btn').onclick=()=>{ show('d-trash'); send({type:'trash_open'}); };
+function renderTrash(items){
+  const box=$('t-list');
+  if(!items || !items.length){ box.innerHTML='<div class="empty">Nothing in the trash.</div>'; return; }
+  box.innerHTML='';
+  for(const c of items){
+    const el=document.createElement('div'); el.className='trash-item';
+    el.innerHTML=`<div class="t">${esc(c.title)}<div class="p">📁 ${esc(c.dir)}</div></div>`;
+    const r=document.createElement('button'); r.className='btn ghost'; r.textContent='Restore';
+    r.onclick=()=>send({type:'restore',card_id:c.id});
+    const d=document.createElement('button'); d.className='btn danger'; d.textContent='Delete';
+    d.onclick=()=>{ if(confirm(`Permanently delete "${c.title}" and its folder? This cannot be undone.`)) send({type:'purge',card_id:c.id}); };
+    el.append(r,d); box.appendChild(el);
+  }
+}
+
+/* ---------- composers ---------- */
+function wire(inputId,btnId,fn){
+  $(btnId).onclick=()=>{const i=$(inputId); const v=i.value; i.value=''; i.style.height='auto'; if(v.trim()) fn(v);};
+  $(inputId).addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$(btnId).click();} });
+  $(inputId).addEventListener('input',e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,140)+'px';});
+}
+wire('c-input','c-send',t=>sendCard(t));
+wire('m-input','m-send',t=>sendMgr(t));
+wire('w-input','w-chat-send',t=>sendWorker(t));
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeAll(); });
+
+/* ---------- util ---------- */
+function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function fmt(s){return esc(s).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+?)`/g,'<code>$1</code>');}
 
 fetch('/api/config').then(r=>r.json()).then(cfg=>{
-  const m=document.getElementById('mode');
-  m.textContent=cfg.mock?'mock mode':'live';
+  const m=$('mode'); m.textContent=cfg.mock?'mock mode':'live';
   if(!cfg.mock) m.classList.add('live');
-  document.getElementById('repo').textContent=cfg.repo_dir;
+  $('repo').textContent=cfg.repo_dir;
 });
 connect();
 </script>

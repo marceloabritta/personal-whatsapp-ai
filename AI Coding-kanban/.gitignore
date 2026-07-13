@@ -1,5 +1,15 @@
+# This repo is the SYSTEM. None of the state below belongs in it: it lives in the working
+# folder (default ~/.manager-kanban/<repo-name>/), which is nobody's business but yours.
+# See manager/workspace.py.
 .venv/
 .env
-data/
+.workspace
 __pycache__/
 *.pyc
+
+# The pre-0.2 layout kept state in here. It is adopted into the working folder on first
+# run, and the originals are moved aside rather than deleted. Commit neither.
+data/
+workers/
+data.migrated-*/
+workers.migrated-*/
