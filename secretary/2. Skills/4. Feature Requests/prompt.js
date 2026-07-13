@@ -143,7 +143,7 @@ empty:
 - **Open:** <unresolved question>
 
 ---
-*Drafted by @secretary on WhatsApp. Save to the repo and refine.*
+*Drafted by @assistant on WhatsApp. Save to the repo and refine.*
 
 Keep it concise and concrete. Do not add sections that aren't in the skeleton.`;
 }

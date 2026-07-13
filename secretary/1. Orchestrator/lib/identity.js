@@ -9,7 +9,7 @@
 // Accepted trigger tags (lowercase). SECRETARY_TAG is comma-separated so more than
 // one tag can trigger the secretary (e.g. a PT and an EN spelling). Order is
 // irrelevant — matchedTag() returns whichever the message actually starts with.
-export const TAGS = (process.env.SECRETARY_TAG || "@secretaria,@secretary")
+export const TAGS = (process.env.SECRETARY_TAG || "@assistente,@assistant")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
@@ -19,8 +19,8 @@ const OWNER = process.env.OWNER_NAME || "User";
 // Language-aware reply header. en/pt are written natively; any other language
 // falls back to the English header (the body is still translated by send()).
 const HEADERS = {
-  en: `[${OWNER}'s AI Secretary]:`,
-  pt: `[Secretaria IA do ${OWNER}]:`,
+  en: `[${OWNER}'s AI Assistant]:`,
+  pt: `[Assistente IA do ${OWNER}]:`,
 };
 
 // The header to stamp on an outgoing message for `lang`.
@@ -28,11 +28,16 @@ export function headerFor(lang) {
   return HEADERS[(lang || "en").toLowerCase()] || HEADERS.en;
 }
 
-// Every header the secretary could EVER have emitted — current variants plus the
-// legacy "[AI Brain]:" (so its own older messages, still sitting in fetched
-// history / the in-memory buffer, are recognized as its own and never re-consumed
-// as an owner reply). Keep legacy entries here forever; they cost nothing.
-const LEGACY_HEADERS = ["[AI Brain]:"];
+// Every header the assistant could EVER have emitted — current variants plus every
+// retired one ("[AI Brain]:", and the "AI Secretary"/"Secretaria IA" pair) so its own
+// older messages, still sitting in fetched history / the in-memory buffer, are
+// recognized as its own and never re-consumed as an owner reply.
+// Keep legacy entries here forever; they cost nothing.
+const LEGACY_HEADERS = [
+  "[AI Brain]:",
+  `[${OWNER}'s AI Secretary]:`,
+  `[Secretaria IA do ${OWNER}]:`,
+];
 const ALL_HEADERS = [...Object.values(HEADERS), ...LEGACY_HEADERS];
 
 // Is this text one of the secretary's OWN messages? Since its replies arrive with

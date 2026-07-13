@@ -62,7 +62,7 @@ services:
       EVOLUTION_INSTANCE: secretaria
       # Trigger tags (comma-separated, lowercase). This is the single source of
       # truth for what starts the secretary. @brain is intentionally retired.
-      SECRETARY_TAG: "@secretaria,@secretary"
+      SECRETARY_TAG: "@assistente,@assistant"
     networks:
       - evolution-net
 

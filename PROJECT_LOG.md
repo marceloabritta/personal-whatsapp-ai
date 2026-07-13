@@ -419,6 +419,14 @@ purpose — this list went stale once already by counting.*
 - `node scripts/history-selftest.mjs` — offline. Fails if anyone drops the **dual-JID** history
   query (`remoteJid` + `remoteJidAlt`): WhatsApp addresses the same 1:1 chat under both a phone
   JID and a LID, and reading only one of them made the secretary blind to half the conversation.
+- `node scripts/identity-selftest.mjs` — offline. Asserts the trigger tag and reply header values
+  in `lib/identity.js` (`TAGS` defaults to `@assistente,@assistant`; `headerFor()` returns the
+  Assistant pair; the old tags no longer match) **and** — the one that protects something — that
+  `isOwnMessage()` still recognises the **retired** headers (`[Marcelo's AI Secretary]:` /
+  `[Secretaria IA do Marcelo]:` / `[AI Brain]:`), bolded and unbolded. Those `LEGACY_HEADERS`
+  entries look like dead code and are not: they are what keeps the feedback skill able to see the
+  bot's own back-catalogue of messages as its own. Delete them and every quoted old bot message is
+  silently reclassified as "context only".
 - `ANTHROPIC_API_KEY=… node scripts/tasks-addressed-selftest.mjs` — the Tasks planner's
   **addressed** bit. Two halves: a **live** half (16 planner calls, a few cents) proving the
   overheard chatter produces an empty plan *and* that genuine untagged follow-ups still act, and
@@ -437,6 +445,35 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-13 — Name change: "secretária" → "assistente" (SHIPPED — committed 2026-07-13;
+  NOT yet deployed to the droplet).** The trigger tag is now **`@assistente`/`@assistant`**. The old
+  `@secretaria`/`@secretary` pair **stops working — no alias, no grace period**: `matchedTag()`
+  returns `null` for it and nothing starts. The reply header is now **`[Assistente IA do Marcelo]:`
+  / `[Marcelo's AI Assistant]:`**. Six value edits, one new self-test; no signature changed, no
+  caller edited.
+  **Both old headers live on in `LEGACY_HEADERS` forever**, as `${OWNER}`-interpolated template
+  literals, not hardcoded strings. This is the safety line and it is not optional: every bot message
+  already sitting in WhatsApp history carries an old header, and `5. Feedback/skill.js:94` uses
+  `isOwnMessage()` on the *quoted* message to tell "the bot did this wrong" from "here is some
+  context". Drop those entries and the feedback skill goes **silently** blind to the entire
+  back-catalogue. **The tag is retired from matching; the header is retired from *sending* but kept
+  forever in *recognition* — two lists, opposite answers.** `scripts/identity-selftest.mjs`
+  assertion `4a` is what stands between them and a future "tidy-up".
+  **THE DEPLOY TRAP — read before deploying.** The value production actually runs is baked into
+  **`/opt/evolution/docker-compose.yml:58`** on the droplet — a hand-maintained file that is **not
+  in git**, so `git pull` does not touch it. Compose's `environment:` beats `env_file`, and
+  `identity.js` reads `process.env.SECRETARY_TAG || "<default>"` — so **the live value wins and the
+  new code default is never reached**. A deploy that only pulls the repo ships a bot that **replies
+  as "Assistente" but still answers only to "@secretaria"**. It will look like the build is broken;
+  it isn't. The deploy is: `git pull`, then **hand-edit** that line to
+  `SECRETARY_TAG: "@assistente,@assistant"`, then from `/opt/evolution` run
+  `docker compose up -d --force-recreate secretary` — **`--force-recreate`, NOT `restart`**: the
+  `environment:` block is baked in at container *creation* and `restart` will not pick up the new
+  value. Verify with `docker exec secretary printenv SECRETARY_TAG`. `EVOLUTION_INSTANCE: secretaria`
+  (line 57) **stays as it is** — renaming the instance means re-scanning the QR and re-registering
+  the webhook. The `SECRETARY_TAG` variable *name*, the container, `/opt/secretary` and the Redis
+  prefix are all likewise unchanged: this card renames what the owner types and what the bot signs
+  itself, nothing infrastructural.
 - **2026-07-13 — Flight search via chat (`flight_search`) — the sixth skill (SHIPPED — committed
   2026-07-13; NOT yet deployed to the droplet).** Ask in a sentence (`@secretary find me a flight from São Paulo to Lisbon on the
   14th, back on the 22nd`); it asks for anything missing one field at a time, **confirms before it

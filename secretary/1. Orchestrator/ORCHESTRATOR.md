@@ -8,12 +8,12 @@
 >
 > **What it does:**
 > - Receives every message from WhatsApp (via the Evolution API webhook).
-> - **Starts** a task only when *you* (the owner) write a trigger tag (`@secretaria`/`@secretary`).
+> - **Starts** a task only when *you* (the owner) write a trigger tag (`@assistente`/`@assistant`).
 > - Once a task is mid-conversation (e.g. a cancel awaiting your "yes"), it lets the
 >   follow-up through **without** the tag — and can even pick up the *other person's*
 >   reply — while ignoring normal chatter.
 > - Figures out the intent (the **router**) and runs the matching skill.
-> - Adds the language-aware header (`[Marcelo's AI Secretary]:` / `[Secretaria IA do Marcelo]:`) to every reply it or a skill sends.
+> - Adds the language-aware header (`[Marcelo's AI Assistant]:` / `[Assistente IA do Marcelo]:`) to every reply it or a skill sends.
 >
 > You never call the orchestrator directly — you call skills, and it routes you there.
 
@@ -40,9 +40,9 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    `claude-sonnet-5`), `OWNER_NAME`, `ANTHROPIC_API_KEY`, `REDIS_URL` (default
    `redis://evolution_redis:6379`; set empty to force in-memory). The trigger tags and reply
    header live in `lib/identity.js`: `TAGS` is parsed from `SECRETARY_TAG` (**comma-separated**,
-   lowercased, default `@secretaria,@secretary`; the old `@brain` is retired), and the header
-   is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Secretary]:`, pt →
-   `[Secretaria IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
+   lowercased, default `@assistente,@assistant`; the old `@brain` is retired), and the header
+   is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Assistant]:`, pt →
+   `[Assistente IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
 2. **Clients:** `anthropic` (SDK), `evolution` (`createEvolution`), `sessions`
    (`createSessions` — Redis or in-memory fallback).
 3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
