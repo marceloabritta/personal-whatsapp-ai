@@ -81,10 +81,16 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     → `transcript` via `buildTranscript` (`ME:` / `OTHER:`, last ~30); `contact` =
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
-    transcript, nowStr, contact, remoteJid, number, fromMe, quoted, hasQuotedAudio,
+    transcript, nowStr, contact, remoteJid, number, fromMe, isTagged, quoted, hasQuotedAudio,
     catalog, env, evolution, send, sendFailure, sessions, session, lang, hasSkill,
     callSkill, _turn`.
-    `session` is set **only** on a continuation (else `null`). `ctx.lang` is the
+    `session` is set **only** on a continuation (else `null`).
+    `isTagged` — did **THIS** message carry a tag? `true` on a fresh command, and **always
+    `false` on a continuation** (a tagged message is never a continuation — see the gate at
+    step 7). It is the only honest source of that bit: **`ctx.tag` is not a substitute**, it
+    falls back to `TAGS[0]` and is therefore always truthy. A skill reads it to tell an order
+    *addressed to it* from talk it merely overheard while a window was open (Tasks does —
+    `2. Skills/3. Tasks/SKILL.md`). `ctx.lang` is the
     conversation language — from the session on a continuation, from the router on a fresh
     command (set after `route()` returns), default `"en"`; `ctx.send` is bound to it (see
     the localizing `send` above). `ctx.hasSkill`/`ctx.callSkill` are the capability-registry

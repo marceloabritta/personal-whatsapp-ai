@@ -400,7 +400,8 @@ routing, both skill flows, and every guardrail without network or real keys. Wor
 formalizing into a `test/` folder with `node --test`. Boot + skill-discovery is the
 cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 
-**Committed self-tests** (the first of the `test/` folder above, in spirit):
+**Committed self-tests** (the first of the `test/` folder above, in spirit). *No numeral here on
+purpose — this list went stale once already by counting.*
 
 - `node scripts/flights-selftest.mjs` — **offline** (no network, no keys: `fetch` and
   `ctx.anthropic` are stubbed, `createSessions()` runs on its in-memory Map). 65 assertions over
@@ -415,6 +416,15 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
   offline (fake `ctx`, stub `anthropic`, reports redirected to a temp dir via
   `SELF_LEARNING_DIR`). Asserts redaction, machine dedupe, the `{ ...ctx }`-spread guard, that
   an **owner-reported note is never deduped or dropped**, and that capture never throws.
+- `node scripts/history-selftest.mjs` — offline. Fails if anyone drops the **dual-JID** history
+  query (`remoteJid` + `remoteJidAlt`): WhatsApp addresses the same 1:1 chat under both a phone
+  JID and a LID, and reading only one of them made the secretary blind to half the conversation.
+- `ANTHROPIC_API_KEY=… node scripts/tasks-addressed-selftest.mjs` — the Tasks planner's
+  **addressed** bit. Two halves: a **live** half (16 planner calls, a few cents) proving the
+  overheard chatter produces an empty plan *and* that genuine untagged follow-ups still act, and
+  an **offline** half linting the wiring (all three `planTaskOps` call sites pass `ctx.isTagged`,
+  never a literal). The lint alone: `TASKS_SELFTEST_OFFLINE=1 node scripts/tasks-addressed-selftest.mjs`.
+  The acceptance run is `RUNS=3` — the fix is probabilistic.
 - `ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs` — calls the **live** router against
   the real catalog and asserts that a *complaint* ("you scheduled that at the wrong time") is
   **filed as feedback, not executed as a calendar order**. Costs a few cents. Run it after any
@@ -470,6 +480,34 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   `link for option 2` → `other`. **The check is still owed**: the four flight cases are already in
   `scripts/router-selftest.mjs` and it costs real money to run. Offline: 65/65 green.
   Plan archived to `Shipped Features/2026-07-13 - flight-search-via-chat.md`.
+
+- **2026-07-12 — Tasks: the planner now knows whether it was addressed (BUGFIX).**
+  The engaged window keeps listening for 10 minutes after a task exchange, and a continuation is
+  **never** tagged — so the planner read *"amanha vou tentar implementar o tenente dentro do
+  VsCode"* (the owner talking **to Tony, about Tony's project**) as an order, and silently wrote a
+  phantom task to the owner's real Google Tasks list. Thirteen seconds later *"e mandar ele ter
+  workers"* was read as an **edit** to the phantom. The planner had no way to know it had not been
+  addressed: `ctx.tag` falls back to `TAGS[0]` and is always truthy.
+  (`Bugs and Malfunctions/bugfix-task-false-positive.md`.)
+  **The fix, in three parts.** (1) **Rails, additive:** `server.js` puts **`isTagged`** on `ctx` —
+  the bit was computed and then thrown away before any skill could see it. (2) `planTaskOps` takes
+  a **required** `{ addressed }`, and **all three** call sites (`run`, `resumeConfirm`'s
+  "unrelated" re-plan, `resumeEngaged`) pass **`ctx.isTagged`** — never a literal, which the
+  selftest lints for: a hardcoded `addressed: true` would sail through the live half and silently
+  restore the bug. (3) The planner gains a **second posture** for the untagged case. It **asks**
+  whether the message was aimed at the secretary — it never **asserts** that it wasn't, because
+  *every genuine in-window follow-up is untagged too*, and an asserting prompt would quietly gut
+  the shipped window. The bar is uniform across `ops` **and** `list_requested` (reading the list
+  aloud would print the owner's to-dos into a third party's chat), with **`owner_done` exempt** —
+  it only closes the window. Overheard talk now produces **silence**: no ops, no reply, no re-arm.
+  **New self-test:** `scripts/tasks-addressed-selftest.mjs` — a live half (the real logged
+  transcript; the two directions) plus an offline wiring lint.
+  **Residual risk:** the fix is **probabilistic** — a prompt, not a guarantee. It cannot make a
+  false positive impossible. If one recurs, the escalation is **confirm-first on untagged
+  creates**, accepting that a confirmation interrupts the owner's conversation with a third party
+  (which is why it was not chosen now). **Not fixed here, on purpose:** a *read-only* "what tasks
+  do I have?" still arms a 10-minute **write** window — its own card, because un-arming it would
+  break "what's on my list? … ok, add milk".
 
 - **2026-07-12 — Self-learning: the secretary reports its own failures (SHIPPED, DEPLOYED).**
   Deployed 2026-07-12 (git pull + `docker compose restart secretary`; boot clean, Redis connected,

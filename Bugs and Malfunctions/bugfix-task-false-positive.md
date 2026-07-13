@@ -172,9 +172,18 @@ The fact already exists at every layer — it just never reaches the prompt. Thr
   isTagged,   // did THIS message address the secretary by tag, or is it a continuation?
   ```
 - **`3. Tasks/skill.js`** — `planTaskOps(ctx, open, { addressed })`, where `addressed` is
-  `ctx.isTagged`. `run()` passes `addressed: true` (it is only reached on a tagged message);
-  `resumeEngaged()` passes `addressed: ctx.isTagged` — which is `false` for an untagged
-  continuation, but correctly `true` if the owner re-tags mid-window.
+  `ctx.isTagged`.
+  > **CORRECTED AS SHIPPED (2026-07-12).** This bullet originally said `run()` passes
+  > `addressed: true`, and that `resumeEngaged()` would be "correctly `true` if the owner
+  > re-tags mid-window". **Both were wrong.**
+  > (1) **A hardcoded literal is forbidden**, and the shipped self-test lints for it: a
+  > `{ addressed: true }` at a call site would leave the new rails field with **zero readers**
+  > and could silently restore this very bug while the live test stayed green. **All three**
+  > call sites pass `ctx.isTagged` and nothing else.
+  > (2) `resumeEngaged` **can never see a tagged message**: a tagged message is not a
+  > continuation (`server.js` gate), so `ctx.session` is `null` and it takes the fresh `run`
+  > path instead. "Re-tag mid-window" is handled there, not here.
+  > (3) There are **three** call sites, not two — see "Files to touch" below.
 - **`3. Tasks/prompt.js`** — `buildPlanSystem(OWNER_NAME, { addressed })` and surface it in
   `buildPlanUser` as an explicit header line, so it is impossible to miss:
   ```
@@ -289,7 +298,74 @@ it.
 - `secretary/1. Orchestrator/server.js` — add `isTagged` to `ctx` (~1 line).
 - `secretary/2. Skills/3. Tasks/skill.js` — thread `addressed` into `planTaskOps`; pass from
   `run` and `resumeEngaged` (~5 lines).
+  > **CORRECTED AS SHIPPED (2026-07-12).** There are **three** call sites, not two. This list
+  > missed `resumeConfirm`'s **"unrelated" re-plan** — the branch that catches a new task
+  > mentioned while a confirmation is pending. Missing it would have left the phantom-create
+  > path wide open on exactly the flow where the owner is most likely to be mid-conversation.
 - `secretary/2. Skills/3. Tasks/prompt.js` — `buildPlanSystem(OWNER_NAME, { addressed })`:
   branch the posture, add the examples (the bulk of the change).
 - `secretary/2. Skills/3. Tasks/SKILL.md` — document that untagged follow-ups only act on
   imperatives, and that statements of intent are ignored by design.
+
+---
+
+## Outcome — what was actually done (2026-07-12)
+
+Built as planned above, with the three corrections marked in place. **The acceptance test is
+green — the live half has now been run: 48/48, three runs out of three** (16 cases × 3 runs),
+plus the 11/11 offline wiring lint. **Not yet deployed to the droplet** — that remains the
+owner's call (see "Still open" below).
+
+**What shipped.**
+
+1. **The rails field.** `secretary/1. Orchestrator/server.js` — one **additive** field on the
+   `ctx` literal: `isTagged`. The bit was already computed there and then thrown away before any
+   skill could see it; `ctx.tag` is useless as a signal because it falls back to `TAGS[0]` and is
+   always truthy. Nothing else in the file changed, and no existing caller needed an edit.
+2. **The wiring — three call sites, no literals.** `planTaskOps(ctx, open, { addressed })` is now
+   **required** (it throws a `TypeError` if omitted), and **all three** call sites — `run`,
+   `resumeConfirm`'s "unrelated" re-plan, and `resumeEngaged` — pass **`ctx.isTagged`**. A
+   hardcoded `addressed: true` is **forbidden and linted against**: it would be behaviourally
+   correct today, pass the live test (which never sees the wiring), leave the rails field with
+   zero readers, and silently restore this bug the day the continuation gate changes.
+3. **The two postures.** The planner's core instructions are unchanged **byte-for-byte** for a
+   tagged order (verified: the tagged prompt is the identical 3391-character string it was before).
+   The untagged case **appends** a posture that **asks** whether the message was aimed at the
+   secretary. It deliberately does **not** assert "you were not addressed" — the wording proposed
+   at §2 of this document above was **vetoed during planning**, because *every genuine in-window
+   follow-up is untagged too*, so an asserting prompt would have silently swallowed "na verdade
+   muda essa pra sexta" and quietly gutted the shipped window. The bar splits by op kind: the
+   **referent** governs complete/edit/delete/`list_requested` (it can only rule OUT, never
+   license — which is what keeps "e mandar ele ter workers" dead once the phantom is on the list),
+   and the **form of address** governs `create` (a create has *no* referent by construction, so a
+   referent rule applied to creates would forbid **every** untagged create, silently). The same bar
+   covers `list_requested` — reading the list aloud would print the owner's to-dos into Tony's
+   chat. **`owner_done` stays exempt**: it only closes the window; it writes nothing and says
+   nothing. Overheard talk now produces **silence** — no ops, no reply, no re-arm.
+4. **The test.** `scripts/tasks-addressed-selftest.mjs`, two halves. The **live** half replays the
+   real logged transcript from this report and proves **both directions** — the overheard chatter
+   produces an empty plan, *and* genuine untagged follow-ups still produce the right ops. The
+   **offline** half lints the wiring (the three call sites, the `ctx.isTagged` value, the absent
+   literal, the required parameter, the rails field, and the load-bearing clauses of the posture).
+
+**Deliberately NOT fixed — defect (2), the read-only query that arms a write window.** A
+"what tasks do I have?" still opens a 10-minute *write* window. It gets its own card: un-arming it
+has a real cost ("what's on my list? … ok, add milk", untagged, works today and would stop), and
+with (1) fixed an open window is no longer a loaded gun.
+
+**Residual risk, stated plainly.** This is a **prompt**, not a guarantee. It reduces the false
+positive rate; it cannot make it zero. The escalation, **only** if one recurs, is confirm-first on
+untagged creates — rejected for now because the secretary replies *in the chat the message came
+from*, so a confirmation would interrupt the owner's conversation with a third party to ask about
+his private to-do list. A louder failure is not a safer one.
+
+**Still open.**
+- **Deploying to the droplet.** The acceptance run
+  (`ANTHROPIC_API_KEY=… RUNS=3 node scripts/tasks-addressed-selftest.mjs`) was the **precondition
+  for deploying** this fix — it is the only thing that proves the posture actually works on the
+  model, in both directions — and it has now been met: **48/48 live, 3 runs out of 3**, both
+  directions proved (the two logged sentences that wrote the phantom task produce the empty plan;
+  the genuine untagged follow-ups — edit, delete, complete, create, list — still act). The fix is
+  committed but **not yet on the droplet**; the deploy is the owner's call.
+- **The phantom task itself** is still on the owner's real Google Tasks list. Operational, not
+  code — the owner deletes it.

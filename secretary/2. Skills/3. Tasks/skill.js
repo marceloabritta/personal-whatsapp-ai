@@ -115,7 +115,13 @@ async function fetchOpen(ctx) {
 
 // ---- The one resolver --------------------------------------------------------
 // Reads the conversation + the numbered open list, returns a PLAN (see PLAN_SCHEMA).
-async function planTaskOps(ctx, open) {
+async function planTaskOps(ctx, open, { addressed }) {
+  // `addressed` is REQUIRED and is ALWAYS ctx.isTagged. Omitting it throws on the
+  // destructure above; passing a hardcoded literal is a lint failure
+  // (scripts/tasks-addressed-selftest.mjs, half B). The bug this exists to prevent
+  // was the planner not knowing it had not been addressed.
+  if (typeof addressed !== "boolean")
+    throw new TypeError("planTaskOps: `addressed` is required — pass ctx.isTagged");
   const { anthropic, model, owner, order, transcript, nowStr, contact, quoted } =
     ctx;
   const listText = open
@@ -127,7 +133,7 @@ async function planTaskOps(ctx, open) {
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 1500,
-    system: buildPlanSystem(owner),
+    system: buildPlanSystem(owner, { addressed }),
     output_config: jsonFormat(PLAN_SCHEMA),
     messages: [
       {
@@ -139,6 +145,7 @@ async function planTaskOps(ctx, open) {
           contact,
           quoted,
           listText,
+          addressed,
         }),
       },
     ],
@@ -168,8 +175,11 @@ function openAt(open, idx) {
 
 // ---- Entry point -------------------------------------------------------------
 // ctx (from the orchestrator): { owner, tag, anthropic, model, order, transcript,
-//   nowStr, contact, remoteJid, number, fromMe, quoted, env, evolution, send,
-//   sessions, session, lang, hasSkill, callSkill }
+//   nowStr, contact, remoteJid, number, fromMe, isTagged, quoted, env, evolution,
+//   send, sessions, session, lang, hasSkill, callSkill }
+// ctx.isTagged: did THIS message tag the secretary? It is the ONLY honest source of
+// that bit (ctx.tag falls back to TAGS[0] and is always truthy), and every
+// planTaskOps call passes it — never a literal.
 export async function run(ctx) {
   const { number, send, session } = ctx;
 
@@ -191,7 +201,7 @@ export async function run(ctx) {
 
   let plan;
   try {
-    plan = await planTaskOps(ctx, open);
+    plan = await planTaskOps(ctx, open, { addressed: ctx.isTagged });
   } catch (e) {
     console.error("Tasks/plan error:", e);
     await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
@@ -542,7 +552,7 @@ async function resumeConfirm(ctx, session) {
   }
   let plan;
   try {
-    plan = await planTaskOps(ctx, open);
+    plan = await planTaskOps(ctx, open, { addressed: ctx.isTagged });
   } catch {
     return;
   }
@@ -588,7 +598,7 @@ async function resumeEngaged(ctx, session) {
   }
   let plan;
   try {
-    plan = await planTaskOps(ctx, open);
+    plan = await planTaskOps(ctx, open, { addressed: ctx.isTagged });
   } catch (e) {
     console.error("Tasks/plan error:", e);
     return;

@@ -300,6 +300,11 @@ app.post("/webhook", async (req, res) => {
       remoteJid,
       number,
       fromMe, // who sent this message: owner (true) vs the contact (false)
+      // Did THIS message address the secretary by tag? A continuation is NEVER
+      // tagged (see the gate above), so a skill reading this learns whether the
+      // owner spoke TO it or merely spoke while it was listening. `tag` is not a
+      // substitute — it falls back to TAGS[0] and is always truthy.
+      isTagged,
       quoted,
       hasQuotedAudio: !!quoted?.hasAudio,
       catalog: CATALOG,

@@ -19,6 +19,15 @@
 > another off, just by talking. Off-topic chatter is ignored; say "that's all" (or just
 > wait) to close it.
 >
+> **But it acts only on what is aimed at *her*.** Inside that window she can read everything
+> you type — including what you say to the *other person* in the chat. So she first works out
+> whether a message was addressed to her at all. An overheard statement of intent ("tomorrow
+> I'll try implementing X"), or a question about tasks asked of your friend, is **ignored by
+> design** — it is talk, not an order. And when she is not sure she was addressed, the right
+> answer is **silence, not a confirmation prompt**: she says nothing, and you re-tag. A
+> phantom task on your list is worse than a missed one (and asking would broadcast your
+> to-do list into someone else's chat).
+>
 > **It figures out *which* task you mean.** For a complete/edit/delete it reads the
 > conversation and matches your words to a task on the list by meaning ("the flight one",
 > "the one due Monday"). If two could fit, it asks which — by name — rather than guessing.
@@ -157,8 +166,14 @@ JSON Schemas, and the localized `reply(lang)` string map + `localizeDueDate`).
 ### Contract & flow — one resolver, then routing
 - `manifest = { id: "task_action", description }`, `run(ctx)` — discovered at boot. Also
   exports `capabilities = { list }` (an internal open-list read for other skills).
-- **One list-aware planner.** `planTaskOps(ctx, open)` (schema `PLAN_SCHEMA`) reads the
-  conversation AND the numbered open list, returns `{ list_requested, owner_done, ops[] }`.
+- **One list-aware planner.** `planTaskOps(ctx, open, { addressed })` (schema `PLAN_SCHEMA`)
+  reads the conversation AND the numbered open list, returns
+  `{ list_requested, owner_done, ops[] }`.
+  `addressed` is **required** and is always **`ctx.isTagged`** (never a literal — the offline
+  half of `scripts/tasks-addressed-selftest.mjs` lints for that). It tells the planner whether
+  this message tagged the secretary; when it did **not**, the planner runs a materially
+  **stricter posture** that must first decide whether the message was aimed at her at all, and
+  defaults to the empty plan when it plausibly was not. The tagged prompt is unchanged.
   Each op is one distinct task: `{ kind: create|complete|edit|delete, target_index,
   candidate_indices, ref_text, title, due_iso, assignee }`. This *replaces* the old
   single-item `interpret` + `resolveTaskRef` — enumeration and list-aware matching happen
@@ -184,7 +199,22 @@ JSON Schemas, and the localized `reply(lang)` string map + `localizeDueDate`).
   stage) routes the next **untagged** owner message back here; `resumeEngaged` re-runs the
   planner against the fresh list. `owner_done` (or the TTL) closes it; unrelated chatter is
   a silent no-op. A pending confirm short-circuits to yes/no, but a clearly-new self task
-  re-plans and is created while the confirmation stays pending.
+  re-plans and is created while the confirmation stays pending — **only if it is aimed at the
+  secretary**; an overheard one is not created (`resumeConfirm`'s "unrelated" re-plan passes
+  `addressed: ctx.isTagged` like every other call site).
+- **Addressed-only action, inside the window.** Every continuation is untagged by construction
+  (`server.js`: a tagged message is not a continuation), so "untagged" alone can never mean
+  "not for me" — a genuine follow-up is untagged too. The planner is therefore given
+  `ctx.isTagged` and asked to **decide** whether the owner was speaking to *her* or to the
+  other person in the chat, using the referent for complete/edit/delete/`list_requested` and
+  the form of address for `create`. Overheard talk yields **silence**: no ops, no
+  `list_requested`, no reply, no re-arm (`owner_done` stays permitted — it only closes the
+  window). Silence, **not** a confirmation prompt, is the correct response to a message she
+  was not addressed in: a confirm would interrupt the owner's conversation with a third party.
+  This is why the 2026-07-11 phantom task happened
+  (`Bugs and Malfunctions/bugfix-task-false-positive.md`); `scripts/tasks-addressed-selftest.mjs`
+  guards **both** directions — the overheard chatter *and* the genuine follow-ups, whose silent
+  loss would be the worse regression.
 - **Localization:** every reply comes from `reply(ctx.lang)` (en + pt), a single render
   layer (`makeReply`) driven by a per-language vocabulary so list/confirm/applied views are
   written once; dates via `localizeDueDate`; sessions persist `lang`. Titles are verbatim.
