@@ -240,6 +240,8 @@ the order (`order` + `transcript` + `contact`), so a terse "schedule this" works
   "title": string|null,                              // inferred subject heading, or null
   "participants": [{ "name": string|null, "email": string|null }],
   "start_iso": string|null, "duration_min": number|null, "summary": string,
+  "all_day": boolean|null,                           // "o dia inteiro" / "all day"
+  "all_day_end_iso": string|null,                    // a RANGE: the LAST day COVERED, inclusive
   "list_mode": "window"|"next"|null,                 // action="list" only; null otherwise
   "range_start_iso": string|null, "range_end_iso": string|null }  // the list window
 ```
@@ -256,6 +258,46 @@ Required to create (everything else has a fallback and never blocks): a **date/t
 complete, ordinary event** — an event has 0–n outside guests. `missingOf(draft)` /
 `isComplete(m)` compute this; `draftFromInfo` normalizes and applies fallbacks
 (title → inferred or `Owner & names`; `duration_min` → 45).
+
+#### ALL-DAY events
+"o dia inteiro" / "o dia todo" / "all day" produces a **real Google all-day event** — the one
+in the strip at the top of the day — not a 24h timed block. Two fields carry it from
+`interpret` through the draft, the confirm bubble and the "sim", to `events.insert`:
+
+- **`all_day`** (bool). `start_iso` is **still required and still filled** (the FIRST day at
+  00:00 -03:00): the DAY is *derived* from it in `CAL_TZ` (`localDayStr`), which is why
+  `missingOf().noTime` still guards the null-start → 1970 write. `duration_min` is ignored.
+- **`all_day_end_iso`** — a multi-day RANGE ("segunda a quarta"): the **LAST day the event
+  still COVERS, INCLUSIVE**, at 00:00 -03:00. `null` = a single day. Never required, so
+  gathering never chases it (`RESOLVE_SCHEMA` does not carry it; `mergeDraft` carries it
+  over from the previous draft instead).
+
+> ⚠️ **Google's `end.date` is EXCLUSIVE.** The draft, the model, the confirm bubble and this
+> doc all speak **inclusive** days; the conversion happens in **exactly one place**,
+> `createFromDraft` (`end_date = addDays(last_date, 1)`). A single day on 2026-07-14 is
+> `start.date 2026-07-14` / `end.date 2026-07-15`. **Mon 13 → Wed 15 is `start.date
+> 2026-07-13` / `end.date 2026-07-16` — a THURSDAY.** Off by one is a 2-day event, or a
+> zero-day one Google rejects.
+
+Two sanity clamps, both in `draftFromInfo` (the one normalizer every merge path funnels
+through), both **silent** — the owner SEES the result in the confirm bubble before anything is
+written, and confirm-first is the safety net: an end day **before** the start day is dropped
+(→ a single-day event), and a span longer than `MAX_ALL_DAY_DAYS` (31) is **clamped** to it.
+
+The when-line is rendered by **`localizeWhen(lang, draft)`** (prompt.js): timed →
+`localizeDate`; all-day single → `14 de jul. de 2026 · Dia todo`; all-day range → both
+endpoints **inclusive** plus the **DAY COUNT** — `13 de jul. de 2026 – 15 de jul. de 2026 ·
+Dia todo (3 dias)`. The count is the owner's sanity check: a wrong range that *reads* like a
+right one is the real danger. `createConfirm`/`createDone` are passed `duration: null` for an
+all-day event, so the `(N min)` suffix disappears entirely. The words "All day"/"Dia todo"
+are the ones the READ side (`eventBlock`) already prints.
+
+**EDITING an all-day event is NOT supported** (its own card). `editDraftFromEvent` carries
+`all_day` (`!ev.start?.dateTime && !!ev.start?.date`) purely so `applyEditDraft`'s guard
+(`if (draft.start_iso && !draft.all_day)`) can **refuse the start/end patch**: without it,
+"move a biópsia pra quarta" would write a `dateTime` start over an all-day event and silently
+convert it into a 45-minute block. The event is still renamed/re-invited — it is simply not
+**moved**.
 
 **The rule the predicate encodes:** *a required field is legitimate only if a TRUTHFUL answer
 can satisfy it.* The old **≥1-attendee** invariant failed that test ("nobody, it's just me" was
@@ -309,6 +351,9 @@ classifies and, for a change, re-drafts → `confirm | modify | cancel | unrelat
   `.length`: an **emptied** guest list is an *answer* ("don't invite anyone") and sticks; only an
   absent list falls back to the draft's. It carries each person's known email and `noEmail`
   across, so a title-only change never resurrects an email question already answered.
+  `REVIEW_SCHEMA` also carries **`all_day` / `all_day_end_iso`** (so *"na verdade, o dia todo"* /
+  *"só até terça"* work at the confirm step), folded with `??` — a modify that says nothing about
+  them (a rename) **keeps** them; an explicit `false` turns all-day off.
 - `cancel` → clear + "Okay, I won't create …".
 - `unrelated` → return silently.
 
@@ -325,6 +370,17 @@ confirmed event instead of inserting a duplicate; otherwise `events.insert` with
 `sendUpdates:"all"` (Google emails the invite). `draftEmails` drops null emails, so a guest
 with no address is simply not on the invite. Success → confirmation with `htmlLink`
 (reworded when reused).
+
+`createEvent` branches **only the request body**: an all-day event is
+`start:{date}/end:{date}` (the shape `toListItem` already recognises on the read side); a timed
+one is `start:{dateTime}/end:{dateTime}` + `timeZone`, unchanged. `summary` / `description` /
+`attendees` / `sendUpdates:"all"` are the same for both. `findConfirmedDuplicates` had to learn
+the all-day case too — it filters on `e.start?.dateTime`, so it was **blind** to an all-day
+event, and dedupe-on-create would have silently stopped working for exactly these events: it
+now queries the **start day's** window and matches `start.date` **and** `end.date` (both, so a
+Mon–Wed order does not dedupe against a Monday-only event). The timed branch keeps its ±60s
+window and `dateTime` equality byte for byte, and the delete sweep — its other caller — passes
+no all-day flag, so its behaviour is unchanged.
 
 ### Task: DELETE — `handleDelete` + `resumeDelete`
 **Unchanged.** The target is found by **matching the event's captured identity against the
@@ -352,7 +408,9 @@ link) works too. **Confirm-first and stays open** (reuses
 create's confirm/modify machinery): the change is folded into a **draft** of the event's
 target state, shown for confirmation, and written to Google only on `yes`. While the confirm
 session is open the owner can keep refining the same event tagless. **The draft** — seeded by
-`editDraftFromEvent(ev)` — is `{ title, start_iso, duration_min, summary, emails[] }`;
+`editDraftFromEvent(ev)` — is `{ title, start_iso, duration_min, all_day, summary, emails[] }`
+(`all_day` exists only to make `applyEditDraft` refuse the start/end patch on an all-day event
+— see ALL-DAY under CREATE; an all-day event is renamed/re-invited but **not moved**);
 `applyPatchToDraft(draft, patch)` folds a change onto it (overwrite touched fields; merge
 attendees: case-insensitive remove then dedup add).
 

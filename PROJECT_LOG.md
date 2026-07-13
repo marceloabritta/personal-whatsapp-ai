@@ -445,6 +445,49 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-13 — All-day events on the calendar skill, single day AND multi-day ranges (SHIPPED,
+  DEPLOYED — card 0822a8e0).** *"agendar amanhã o dia inteiro biópsia laura"* now produces a **real
+  Google all-day event** — the one in the strip at the top of the day — instead of a **24-hour timed
+  block starting at midnight**. Ranges work too: *"de segunda a quarta o dia todo"* is ONE all-day
+  event covering all three days.
+  **The intent layer had no field for it.** `CAL_SCHEMA` (and `REVIEW_SCHEMA`, so *"na verdade, o dia
+  todo"* works at the confirm step) gains **`all_day`** and **`all_day_end_iso`** — the latter being
+  the **LAST day the event still COVERS, INCLUSIVE**. The model, the draft, the confirm bubble and
+  `SKILL.md` all speak **inclusive** days.
+  **⚠️ Google's `end.date` is EXCLUSIVE, and that conversion lives in EXACTLY ONE place** —
+  `createFromDraft` (`end_date = addDays(last_date, 1)`). A single day on 2026-07-14 is `start.date
+  2026-07-14` / `end.date 2026-07-15`; **Mon 13 → Wed 15 is `start.date 2026-07-13` / `end.date
+  2026-07-16` — a THURSDAY.** Off by one is a 2-day event, or a zero-day one Google rejects. Both
+  shapes are pinned by assertions on the exact payload Google receives, not by a comment.
+  **`start_iso` stays REQUIRED** — the day is *derived* from it in `CAL_TZ` — so `missingOf().noTime`
+  still guards the null-start → 1970 write, and gathering is untouched (`RESOLVE_SCHEMA` gains
+  nothing; the flags are carried across a merge by `mergeDraft`, without which they would be silently
+  dropped). The confirm bubble reads **"13 de jul. de 2026 – 15 de jul. de 2026 · Dia todo (3 dias)"**
+  — both endpoints **plus the day count**, which is the owner's sanity check against an off-by-one
+  range *before* he says "sim". Two clamps, both silent and both visible in that bubble: a backwards
+  range collapses to a single day, and a span over `MAX_ALL_DAY_DAYS` (31) is clamped.
+  **`findConfirmedDuplicates` was blind to all-day events** (it filters on `e.start?.dateTime`), so
+  dedupe-on-create would have silently stopped working for exactly the events this card adds. It now
+  matches **both** `start.date` and `end.date` — matching only the start would dedupe a Mon–Wed order
+  against a Monday-only event. The delete sweep (its other caller) passes no flag → falsy → today's
+  exact behaviour.
+  **The edit guard (corruption prevention — it does NOT make all-day events editable).**
+  `applyEditDraft` was guarded only by `if (draft.start_iso)`, so *"move a biópsia pra quarta"* would
+  patch a `dateTime` start over an all-day event and **silently convert it into a 45-minute block**.
+  The guard is now `if (draft.start_iso && !draft.all_day)`: the event is still renamed / re-invited,
+  it is simply **not MOVED**. **Rescheduling an all-day event remains an OPEN GAP, deliberately — a
+  separate card.**
+  Skill-local: **no rails, no orchestrator, no `manifest.description`, no router change** — so no
+  live router check was owed and no money was spent. `scripts/calendar-create-selftest.mjs` gains
+  scenario **`g`** (g1–g6, two drives: single day + range) and the **`a7` tripwire** (a timed event
+  stays TIMED — `start.dateTime` present, `start.date` absent), 40 assertions green, Google never
+  contacted.
+  **STILL OWED — the live check.** The suite pins the model's outputs, so it proves the CODE writes a
+  real all-day event when told `all_day: true`. It **cannot** prove a live Claude *says* `all_day:
+  true` for "o dia inteiro", nor that it picks the correct **inclusive last day** for "de segunda a
+  quarta" — that off-by-one is the single most likely thing for the model to get wrong, and it is
+  invisible offline.
+
 - **2026-07-13 — Calendar create: "nobody", "I don't have their email" and "forget it" are now
   ANSWERS (card 33bb6637).** The create flow had three required states that a truthful answer could
   not satisfy. `missingOf`'s **`noAttendees` invariant is gone** — a calendar event has **0–n outside

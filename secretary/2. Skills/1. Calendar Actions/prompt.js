@@ -31,6 +31,8 @@ export const CAL_SCHEMA = {
     "participants",
     "start_iso",
     "duration_min",
+    "all_day",
+    "all_day_end_iso",
     "summary",
     "list_mode",
     "range_start_iso",
@@ -42,6 +44,15 @@ export const CAL_SCHEMA = {
     participants: { type: "array", items: PARTICIPANT },
     start_iso: { type: ["string", "null"] },
     duration_min: { type: ["number", "null"] },
+    // The event takes the WHOLE day ("o dia inteiro", "all day") — a real Google all-day
+    // event, not a 24h timed block. start_iso is STILL filled (the day is derived from it);
+    // duration_min is ignored.
+    all_day: { type: ["boolean", "null"] },
+    // A multi-day all-day RANGE ("segunda a quarta"): the LAST day the event still COVERS,
+    // INCLUSIVE, at 00:00 -03:00. null = a single day. Google's end.date is exclusive, but
+    // that conversion happens in exactly ONE place (createFromDraft) — everything else in
+    // this skill, the model included, speaks inclusive days.
+    all_day_end_iso: { type: ["string", "null"] },
     summary: { type: "string" },
     // action="list" only (null for every other action): the read-only query window.
     // list_mode "next" = forward-scan for the soonest event; "window" = a bounded span.
@@ -61,13 +72,27 @@ export const CAL_SCHEMA = {
 export const REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["decision", "title", "participants", "start_iso", "duration_min", "summary"],
+  required: [
+    "decision",
+    "title",
+    "participants",
+    "start_iso",
+    "duration_min",
+    "all_day",
+    "all_day_end_iso",
+    "summary",
+  ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
     title: { type: ["string", "null"] },
     participants: { type: "array", items: PARTICIPANT },
     start_iso: { type: ["string", "null"] },
     duration_min: { type: ["number", "null"] },
+    // Same two fields as CAL_SCHEMA, same meaning. They are HERE so that "na verdade, o dia
+    // todo" / "só até terça" works at the confirm step — and so an unrelated modify (a
+    // rename) cannot silently drop either one.
+    all_day: { type: ["boolean", "null"] },
+    all_day_end_iso: { type: ["string", "null"] },
     summary: { type: "string" },
   },
 };
@@ -178,6 +203,8 @@ For action="create", fill these (for action="delete", ALSO fill participants and
 - You will receive the name of the contact ${OWNER_NAME} is currently talking to; use it when it makes sense.
 - start_iso in ISO 8601 with the -03:00 offset; convert relative dates using the current date/time provided.
 - duration_min = minutes if stated; otherwise null.
+- all_day = true when the order says the event takes the WHOLE DAY ("o dia inteiro", "o dia todo", "all day") rather than starting at a time. STILL fill start_iso — with the FIRST day of the event at 00:00, -03:00 offset (the day is read from it); duration_min is ignored. If the order states a TIME ("amanhã 10h", "at 3pm"), all_day = false.
+- all_day_end_iso: ONLY for an all-day RANGE spanning several days ("de segunda a quarta", "a semana toda", "Mon to Wed", "os dois dias"). Set it to the LAST day the event STILL COVERS, at 00:00 with the -03:00 offset — INCLUSIVE: for "segunda a quarta" it is WEDNESDAY, not Thursday. Do NOT add a day. For a single all-day event, and whenever all_day is false, set all_day_end_iso = null.
 - "summary": a longer one-line agenda/description for the event BODY — distinct from the short title above; may be "" when there's nothing to add.
 
 For action="delete", also identify WHICH event to cancel so it can be matched on the calendar (the decoded link is only one signal):
@@ -222,7 +249,7 @@ range_end_iso=null.`;
 // (one call keeps the correlated fields consistent — same reasoning as create).
 export function buildCreateReviewSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. You already PROPOSED an event and asked ${OWNER_NAME} to confirm it. Read the current DRAFT, the recent conversation, and ${OWNER_NAME}'s LATEST message, then decide what that latest message means for the pending event.
-Choose the "decision" and, for a modify, return the updated draft fields (title, participants, start_iso, duration_min, summary):
+Choose the "decision" and, for a modify, return the updated draft fields (title, participants, start_iso, duration_min, all_day, all_day_end_iso, summary):
 
 - "confirm": the latest message clearly approves the event as proposed (e.g. yes, confirm, go ahead, send it, sim, pode, isso).
 - "modify": the latest message asks to CHANGE something (time, date, title, duration, attendees, emails, agenda). Return the FULL updated draft with the change applied, carrying over EVERY unchanged field from the current draft exactly.
@@ -231,6 +258,7 @@ Choose the "decision" and, for a modify, return the updated draft fields (title,
 
 For "modify", apply the change on top of the current draft:
 - keep ISO 8601 with the -03:00 offset for start_iso; convert relative times using the current date/time provided;
+- all_day / all_day_end_iso: CARRY THEM OVER FROM THE DRAFT UNCHANGED unless the latest message asks to change them. Set all_day=true if ${OWNER_NAME} now says it is the whole day ("na verdade, o dia todo"), and false if he gives it a time ("na verdade às 10h") — in which case all_day_end_iso becomes null. all_day_end_iso is the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when it spans several days ("só até terça" → TUESDAY), and null for a single day. Changing only the title, the duration or the attendees changes NEITHER field;
 - when adding/removing an attendee, keep the others; each participant is {name, email|null};
 - "participants" is the FULL attendee list. An empty array [] means the event has NO outside guests — return [] ONLY when ${OWNER_NAME} says nobody should be invited. NEVER return [] when you are only changing the time, the title or the duration: echo the draft's attendees exactly.
 - change ONLY what the latest message asks to change; echo everything else from the draft.
@@ -403,6 +431,29 @@ export function localizeDate(lang, dateTime) {
   });
 }
 
+// The WHEN-line of a create draft, from the draft itself. Three shapes:
+//   timed          -> "14 de jul. de 2026, 10:00 AM"        (localizeDate, unchanged)
+//   all-day, 1 day -> "14 de jul. de 2026 · Dia todo"
+//   all-day range  -> "13 de jul. de 2026 – 15 de jul. de 2026 · Dia todo (3 dias)"
+// Both endpoints are INCLUSIVE (the last day the event still covers) and the DAY COUNT is
+// printed. The count is the owner's sanity check: a wrong range that READS like a right one
+// is the real danger here, and "(3 dias)" is what catches it before he says "sim". The words
+// are the ones the READ side already prints (eventBlock): "All day" / "Dia todo".
+export function localizeWhen(lang, draft) {
+  if (!draft?.all_day) return localizeDate(lang, draft?.start_iso);
+  const startMs = Date.parse(draft.start_iso || "");
+  if (!Number.isFinite(startMs)) return localizeDate(lang, null);
+  const allDay = lang === "pt" ? "Dia todo" : "All day";
+  const endMs = Date.parse(draft.all_day_end_iso || "");
+  if (!Number.isFinite(endMs) || endMs <= startMs) {
+    return `${localizeDay(lang, startMs)} · ${allDay}`;
+  }
+  const days = Math.round((endMs - startMs) / 86400000) + 1;
+  const unit =
+    lang === "pt" ? (days === 1 ? "dia" : "dias") : days === 1 ? "day" : "days";
+  return `${localizeDay(lang, startMs)} – ${localizeDay(lang, endMs)} · ${allDay} (${days} ${unit})`;
+}
+
 // List grammar, per language. EN: "A", "A and B", "A, B, and C".
 function joinListEn(items) {
   if (items.length === 1) return items[0];
@@ -490,6 +541,8 @@ const REPLY = {
     // An event may legitimately have NO outside guests, and a named guest may be left out
     // because the owner told us he hasn't got their email. Both are stated OUT LOUD: an
     // empty "- " bullet says nothing, and a person must NEVER be dropped silently.
+    // `duration` is null for an all-day event (the caller passes null) — `when` already
+    // says "All day", and "(1440 min)" is exactly the thing the owner should never see.
     createConfirm: ({ title, emails, when, duration, uninvited }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
@@ -498,7 +551,7 @@ const REPLY = {
       return `Confirm this event:
 - ${title}
 - ${guests}${without}
-- ${when} (${duration} min)
+- ${when}${duration ? ` (${duration} min)` : ""}
 
 Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
     },
@@ -511,7 +564,7 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
         reused
           ? "That event already exists — here it is (no duplicate created):"
           : "Done! Invite created and sent:"
-      }\n\n- ${title}\n- ${guests}\n- ${when} (${duration} min)${without}\n\nHere is a link for the event:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${without}\n\nHere is a link for the event:\n${link}`;
     },
     createCancelled: ({ title }) => `Okay, I won't create "${title}".`,
     createGoogleError: () =>
@@ -592,7 +645,7 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
       return `Confirme este evento:
 - ${title}
 - ${guests}${without}
-- ${when} (${duration} min)
+- ${when}${duration ? ` (${duration} min)` : ""}
 
 Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`;
     },
@@ -605,7 +658,7 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
         reused
           ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
           : "Pronto! Convite criado e enviado:"
-      }\n\n- ${title}\n- ${guests}\n- ${when} (${duration} min)${without}\n\nAqui está o link do evento:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${without}\n\nAqui está o link do evento:\n${link}`;
     },
     createCancelled: ({ title }) => `Ok, não vou criar "${title}".`,
     createGoogleError: () =>

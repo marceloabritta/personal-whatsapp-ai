@@ -51,6 +51,8 @@
 //    d.  CANCEL works — "esquece, deixa pra la" ends the booking, says so, and DISARMS it
 //    e.  GUARD: genuine chatter is still met with silence (no parrot, no nag)
 //    f.  GUARD: a bare email sent by the GUEST is still understood as an answer
+//    g.  ALL-DAY create (card 0822a8e0) — "o dia inteiro" / "de segunda a quarta o dia todo"
+//        produce a REAL Google all-day event: start:{date} / end:{date}, the end EXCLUSIVE
 //    h.  harness integrity (runtime) — nothing unrecognised, nothing unscripted
 //  (a)-(d) MUST FAIL before the fix and pass after it. (e)-(f) MUST PASS BOTH BEFORE AND
 //  AFTER: they are the over-correction guards. A red guard means the TEST is wrong.
@@ -424,6 +426,12 @@ const cal = (o) =>
     start_iso: null,
     duration_min: null,
     summary: "",
+    // Card 0822a8e0. Both default to the TIMED shape (all_day falsy), so every scenario
+    // above is untouched; scenario g overrides them. Today's code ignores fields it does
+    // not know — readReply is a plain JSON.parse — so ONE fixture set drives both the
+    // pre-change and post-change product, exactly as `decision`/`no_email_for` did.
+    all_day: null,
+    all_day_end_iso: null,
     list_mode: null,
     range_start_iso: null,
     range_end_iso: null,
@@ -445,6 +453,9 @@ const review = (o) =>
     start_iso: null,
     duration_min: null,
     summary: "",
+    // null = "the review says nothing about these" -> the draft's values are carried over.
+    all_day: null,
+    all_day_end_iso: null,
     ...o,
   });
 
@@ -509,6 +520,18 @@ check(
 check(
   "a6  and the owner is told it is done",
   out.length === 1 && /Convite criado/i.test(body(out[0]))
+);
+// THE TRIPWIRE (card 0822a8e0). Scenario g adds an all-day branch to the insert payload.
+// If that branch ever inverts — or leaks into the ordinary path — a TIMED event silently
+// becomes a date-only one, which is the same class of harm the card exists to fix, pointed
+// the other way. a-f all drive the timed path end to end; this is the byte that pins it.
+check(
+  "a7  TRIPWIRE — a timed event stays TIMED: start.dateTime present, start.date ABSENT",
+  inserts().length === 1 &&
+    !!inserts()[0].args?.requestBody?.start?.dateTime &&
+    !inserts()[0].args?.requestBody?.start?.date &&
+    !!inserts()[0].args?.requestBody?.end?.dateTime &&
+    !inserts()[0].args?.requestBody?.end?.date
 );
 
 // ============================================================================
@@ -778,6 +801,122 @@ check(
   out.length === 1 &&
     /Confirme este evento/i.test(body(out[0])) &&
     /laura@example\.com/i.test(body(out[0]))
+);
+
+// ============================================================================
+//  g. ALL-DAY CREATE.  Card 0822a8e0.
+//     "o dia inteiro" today produces a TIMED block from 00:00 to 00:00 the next day
+//     (start + duration_min 1440) — a different thing, and it looks wrong on the calendar.
+//     It must produce a REAL Google all-day event: start:{date} / end:{date}.
+//
+//     TWO DRIVES, one name. A range needs a different PINNED model output — a second
+//     FIXTURE, not a second flow. Same assertions, same code path.
+//
+//     ⚠ THE ONE THAT LOOKS FINE WHILE BEING WRONG: Google's `end.date` is EXCLUSIVE.
+//     A single day on 2026-07-14 is start 07-14 / end 07-15. Mon 13 -> Wed 15 (inclusive,
+//     3 days) is start 07-13 / end 07-16 — a THURSDAY. Off by one is a 2-day event, or a
+//     zero-day one Google rejects. g3 and g6 pin both shapes.
+// ============================================================================
+console.log("\n=== g. all-day create ===\n");
+
+// ---- g1-g3: a SINGLE all-day day --------------------------------------------
+reset("5577777777777@s.whatsapp.net");
+
+scripted = [
+  ROUTE_CAL,
+  {
+    kind: "calendar",
+    json: cal({
+      title: "Biópsia Laura",
+      participants: [],
+      all_day: true,
+      // start_iso stays REQUIRED — the DAY is derived from it in CAL_TZ, so missingOf().noTime
+      // still guards the null-start -> 1970 write. all_day is not a way around it.
+      start_iso: "2026-07-14T00:00:00-03:00",
+      all_day_end_iso: null, // single day
+      duration_min: null,
+    }),
+  },
+];
+out = await say("@secretaria agendar amanha o dia inteiro biopsia laura");
+console.log(`   owner    : @secretaria agendar amanha o dia inteiro biopsia laura`);
+console.log(`   assistant: ${shown(out)}`);
+
+const gBubble = out.length === 1 ? body(out[0]) : "";
+check(
+  "g1  the confirm draft says the event is ALL DAY ('Dia todo') — the READ side's own words",
+  /Confirme este evento/i.test(gBubble) && /dia todo/i.test(gBubble)
+);
+check(
+  "g2  and it shows NO duration — '12:00 AM (1440 min)' is exactly the bug",
+  gBubble !== "" && !/min\)/i.test(gBubble)
+);
+
+scripted = [{ kind: "create_review", json: review({ decision: "confirm" }) }];
+out = await say("sim");
+console.log(`   owner    : sim                                        <- UNTAGGED`);
+console.log(`   assistant: ${shown(out)}`);
+
+const gReq = inserts()[0]?.args?.requestBody || {};
+console.log(`   -> google : ${JSON.stringify({ start: gReq.start, end: gReq.end })}`);
+check(
+  "g3  Google receives a REAL all-day event: start.date=2026-07-14, end.date=2026-07-15 (EXCLUSIVE), NO dateTime",
+  inserts().length === 1 &&
+    gReq.start?.date === "2026-07-14" &&
+    gReq.end?.date === "2026-07-15" &&
+    !gReq.start?.dateTime &&
+    !gReq.end?.dateTime
+);
+
+// ---- g4-g6: a multi-day RANGE ("de segunda a quarta") ------------------------
+// all_day_end_iso is the LAST day the event still COVERS — inclusive. The
+// inclusive -> exclusive conversion happens in exactly one place (createFromDraft).
+reset("5588888888888@s.whatsapp.net");
+
+scripted = [
+  ROUTE_CAL,
+  {
+    kind: "calendar",
+    json: cal({
+      title: "Biópsia Laura",
+      participants: [],
+      all_day: true,
+      start_iso: "2026-07-13T00:00:00-03:00", // Monday
+      all_day_end_iso: "2026-07-15T00:00:00-03:00", // Wednesday — INCLUSIVE, the last day covered
+      duration_min: null,
+    }),
+  },
+];
+out = await say("@secretaria agendar de segunda a quarta o dia todo biopsia laura");
+console.log(`   owner    : @secretaria agendar de segunda a quarta o dia todo biopsia laura`);
+console.log(`   assistant: ${shown(out)}`);
+
+const gRange = out.length === 1 ? body(out[0]) : "";
+// The DAY COUNT is the owner's sanity check: a wrong range that READS like a right one is
+// the real danger, and "(3 dias)" is what catches it before he says "sim".
+check(
+  "g4  the draft shows BOTH endpoints (13 jul, 15 jul) and the DAY COUNT '(3 dias)'",
+  /13 de jul/i.test(gRange) && /15 de jul/i.test(gRange) && /\(3 dias\)/i.test(gRange)
+);
+check(
+  "g5  and still no duration on a range",
+  gRange !== "" && !/min\)/i.test(gRange)
+);
+
+scripted = [{ kind: "create_review", json: review({ decision: "confirm" }) }];
+out = await say("sim");
+console.log(`   owner    : sim                                        <- UNTAGGED`);
+console.log(`   assistant: ${shown(out)}`);
+
+const gReq2 = inserts()[0]?.args?.requestBody || {};
+console.log(`   -> google : ${JSON.stringify({ start: gReq2.start, end: gReq2.end })}`);
+check(
+  "g6  the EXCLUSIVE end: start.date=2026-07-13, end.date=2026-07-16 (THURSDAY — Mon..Wed inclusive)",
+  inserts().length === 1 &&
+    gReq2.start?.date === "2026-07-13" &&
+    gReq2.end?.date === "2026-07-16" &&
+    !gReq2.start?.dateTime &&
+    !gReq2.end?.dateTime
 );
 
 // ============================================================================
