@@ -465,6 +465,46 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-13 — Editing an all-day event: move it, change its range, flip it to timed and back
+  (SHIPPED, DEPLOYED — expedited card 64ff1f1d).** Closes the OPEN GAP card 0822a8e0 left behind.
+  Reply to a biópsia invite with *"move a biópsia para quarta"* and the bubble reads **"15 de jul. de
+  2026 · Dia todo"**; on `sim` the event lands on Wednesday, **still all-day**. *"na verdade vai até
+  sexta"* → **"15 – 17 de jul. de 2026 · Dia todo (3 dias)"**. *"na verdade é o dia todo"* converts a
+  timed event; *"na verdade é às 10h"* converts it back. **No more `(sem horário)`, no more
+  `(1440 min)`.** Confirm-first is untouched: nothing reaches Google until he says "sim".
+  **The edit path used to REFUSE the write** — the guard 0822a8e0 installed. An all-day event has no
+  `start.dateTime`, so the draft had no day, and the only start shape `applyEditDraft` knew how to
+  write was a `dateTime` one. The guard's **intent is honoured, not deleted**: an all-day draft is now
+  written in the **all-day wire shape** (`start:{date}`/`end:{date}`, the end EXCLUSIVE), so there is
+  nothing left to refuse.
+  **⚠️ `events.UPDATE`, not `patch` — deliberately.** Clearing a nested `start.dateTime` through
+  `patch` rests on Google's patch semantics, **which no offline test can prove** — a green suite would
+  have meant nothing. A **full-resource replace** makes the half-converted event *structurally
+  impossible*. Its one real cost: **what the body does not carry, Google CLEARS** — so the caller hands
+  over the **freshly fetched** event and `updateEvent` spreads it (`colorId`, reminders, recurrence,
+  sequence ride along). `resumeEditConfirm` already re-fetched the event, so this costs **no extra API
+  call**. A `colorId` tripwire pins it.
+  **⚠️ THE RULE, enforced in code and not in prompt hope: `new_all_day === false` is honoured ONLY
+  alongside a `new_start_iso`.** `EDIT_SCHEMA` *requires* the field, so a model answering an ordinary
+  **rename** can emit `false` rather than `null` — and a naive fold would then silently convert the
+  owner's all-day event into a 45-minute block, *the exact harm the old guard existed to prevent,
+  re-entering through the front door*. Turning all-day OFF means **giving the event a time**. Always.
+  A rename-only tripwire pins it.
+  Three shared helpers keep **exactly ONE place days are converted**: `allDayWireDates` (INCLUSIVE →
+  EXCLUSIVE, now shared by create *and* edit), `normalizeAllDay` (the two clamps — a move that strands
+  the old range end behind the new start now self-heals), and `allDayFromEvent` (the **read** direction
+  — it returns the event's own day as `start_iso`, **without which a RENAME of an all-day event would
+  reach the wire conversion with a null start and land the event in 1970**).
+  New `scripts/calendar-edit-selftest.mjs` (offline, house style, 33 checks) pins the four writes on
+  the wire; `turn-latency-selftest`'s stub gains `events.update` and its T3.3 now watches **the WRITE,
+  not the verb** — same intent, and strictly *stricter*: a premature `events.update` can no longer slip
+  past the "nothing before sim" assertion.
+  **STILL OWED — the live check.** The suite pins the model's outputs, so it proves the **CODE** writes
+  the right shape to Google. It **cannot** prove a live Claude reads *"na verdade é o dia todo"* as a
+  change, nor that it picks the correct **INCLUSIVE** last day for *"até sexta"* (that off-by-one is
+  the likeliest thing for the model to get wrong, and it is invisible offline). **That half is a human
+  check in WhatsApp.**
+
 - **2026-07-13 — the owner can change the tag he summons her with, by asking her (SHIPPED, DEPLOYED
   — expedited card 793566bd).** `@assistant, change your tag to @assist` → she **deduces**
   whether the other language's call should change too, **states the reasoning in prose** and the
@@ -602,7 +642,9 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   patch a `dateTime` start over an all-day event and **silently convert it into a 45-minute block**.
   The guard is now `if (draft.start_iso && !draft.all_day)`: the event is still renamed / re-invited,
   it is simply **not MOVED**. **Rescheduling an all-day event remains an OPEN GAP, deliberately — a
-  separate card.**
+  separate card.** → **CLOSED 2026-07-13 by card 64ff1f1d** (top of this changelog): the guard's write
+  now exists, so the refusal is gone. The `if (draft.start_iso && !draft.all_day)` line described here
+  no longer exists in the code.
   Skill-local: **no rails, no orchestrator, no `manifest.description`, no router change** — so no
   live router check was owed and no money was spent. `scripts/calendar-create-selftest.mjs` gains
   scenario **`g`** (g1–g6, two drives: single day + range) and the **`a7` tripwire** (a timed event
