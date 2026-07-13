@@ -38,10 +38,54 @@ import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
 import { classifyConfirmation } from "../../1. Orchestrator/lib/confirm.js";
 import { googleAuth } from "../../1. Orchestrator/lib/google.js";
 
+// `inputs` — the DECLARED input contract (see 1. Orchestrator/lib/inputs.js). The router's
+// merged call fills it in the same round-trip that classifies the order.
+// ⚠ THIS SKILL DECLARES BUT DOES NOT YET CONSUME `ctx.info` — it still makes its own planning
+// call. That is deliberate scope control: only this skill's ROUTING was measured under the
+// merged prompt, never its payload accuracy, and adopting ctx.info here needs its own accuracy
+// check. The cost of declaring without consuming is a few wasted output tokens on these turns.
 export const manifest = {
   id: "task_action",
   description:
     "add one or more to-dos for the owner OR another person, list open tasks, complete/check off tasks, or edit/rename/reschedule/delete existing tasks",
+  inputs: {
+    discriminator: null,
+    fields: {
+      list_requested: { type: "bool", desc: "did he ask to SEE his tasks" },
+      owner_done: { type: "bool", desc: "did he say he finished something" },
+      ops: {
+        type: "array",
+        of: {
+          kind: { type: "enum", enum: ["create", "complete", "edit", "delete"] },
+          title: { type: "string", nullable: true },
+          due_iso: { type: "iso", nullable: true },
+          assignee: { type: "string", nullable: true },
+          ref_text: { type: "string", nullable: true },
+        },
+        desc: "the task operations to perform",
+      },
+    },
+    requiredWhen: {},
+    consistency: [
+      {
+        name: "create_op_has_a_title",
+        test: (i) =>
+          !Array.isArray(i.ops) ||
+          i.ops.every(
+            (o) => o.kind !== "create" || (o.title && String(o.title).trim() !== "")
+          ),
+      },
+      {
+        // An empty ops list with list_requested=false is a no-op — there is nothing to do.
+        name: "not_empty_and_idle",
+        test: (i) =>
+          i.list_requested === true ||
+          i.owner_done === true ||
+          (Array.isArray(i.ops) && i.ops.length > 0),
+      },
+    ],
+    rulebook: () => "",
+  },
 };
 
 // ---- Google Tasks client -----------------------------------------------------

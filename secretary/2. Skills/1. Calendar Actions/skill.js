@@ -15,6 +15,7 @@
 import { google } from "googleapis";
 import {
   buildSystem,
+  buildExtractionRules,
   buildUserPrompt,
   buildCreateReviewSystem,
   buildCreateReviewUser,
@@ -49,10 +50,123 @@ export const capabilities = {
   startCreate: (ctx, info) => handleCreate(ctx, info),
 };
 
+// `inputs` — THE DECLARED INPUT CONTRACT the orchestrator's merged router+extractor call asks
+// the model to fill (lib/inputs.js). The router never reads a field name in here: it renders
+// this as opaque prompt text and validates whatever comes back AGAINST it. What the skill gets
+// back, through ctx.info, is a drop-in for interpret()'s output — which is why handleCreate,
+// handleDelete, handleEdit and handleList need no changes at all.
+//
+// 🔴 `fields` MUST BE EXACTLY CAL_SCHEMA.required — the SAME ELEVEN NAMES. That identity is
+// what makes the payload a drop-in. It is also a NEW way to break this skill silently: add a
+// field to CAL_SCHEMA and forget it here, and the merged prompt simply stops asking for it,
+// draftFromInfo reads `undefined`, and the feature that field implements dies with no test
+// going red. It has already happened once (6c76dab added all_day / all_day_end_iso).
+// scripts/turn-latency-selftest.mjs T2.10 asserts the two sets are equal. If a future card
+// makes it red, UPDATE THE DECLARATION — never loosen the lint.
+//
+// `requiredWhen` means "must be non-null before we can act". all_day and all_day_end_iso are
+// NOT in it, on purpose: an ordinary timed create legitimately has all_day=false and
+// all_day_end_iso=null, and requiring them would stop every normal create. They are DECLARED
+// and NULLABLE — that is all. What makes the model fill them is the declaration plus the
+// rulebook, not requiredWhen.
 export const manifest = {
   id: "calendar_action",
   description:
     "create, edit/reschedule, or delete/cancel a meeting or event in Google Calendar and notify the participants; also read/list what's on the calendar (answer questions like what's on tomorrow, anything Friday afternoon, or what's my next meeting)",
+  inputs: {
+    discriminator: "action",
+    fields: {
+      action: {
+        type: "enum",
+        enum: ["create", "delete", "edit", "list", "other"],
+        desc: "what to do",
+      },
+      title: { type: "string", nullable: true, desc: "the event's short calendar heading" },
+      participants: {
+        type: "array",
+        of: {
+          name: { type: "string", nullable: true },
+          email: { type: "email", nullable: true },
+        },
+        desc: "attendees besides the owner; email null if it is NOT in the conversation — NEVER invent one",
+      },
+      start_iso: { type: "iso", nullable: true, desc: "ISO-8601 with the -03:00 offset" },
+      duration_min: { type: "number", nullable: true, desc: "minutes; null -> 45 default" },
+      all_day: {
+        type: "bool",
+        nullable: true,
+        desc: 'true ONLY when the order says the event takes the WHOLE DAY ("o dia inteiro", "o dia todo", "all day") instead of starting at a time. STILL fill start_iso — the FIRST day, 00:00, -03:00. duration_min is then ignored. If a TIME is given ("amanhã 10h"), all_day = false.',
+      },
+      all_day_end_iso: {
+        type: "iso",
+        nullable: true,
+        desc: 'ONLY for an all-day RANGE spanning several days ("de segunda a quarta", "a semana toda"). The LAST day the event STILL COVERS — INCLUSIVE: for "segunda a quarta" it is WEDNESDAY, not Thursday. Do NOT add a day. 00:00 with the -03:00 offset. null for a single all-day day, and null whenever all_day is false.',
+      },
+      summary: { type: "string", desc: "a longer one-line agenda for the event body" },
+      list_mode: {
+        type: "enum",
+        enum: ["window", "next"],
+        nullable: true,
+        desc: 'action="list" ONLY, else null',
+      },
+      range_start_iso: { type: "iso", nullable: true, desc: 'action="list" ONLY, else null' },
+      range_end_iso: { type: "iso", nullable: true, desc: 'action="list" ONLY, else null' },
+    },
+    // A faithful transcription of missingOf()/isComplete() below. `participants[].email` means
+    // "every attendee that EXISTS has an email" — an EMPTY list is COMPLETE, not missing (a
+    // zero-guest create is an ordinary event; see missingOf's comment and commit 9eead61).
+    requiredWhen: {
+      create: ["start_iso", "participants[].email"],
+      list: ["list_mode"],
+      delete: [],
+      edit: [],
+      other: [],
+    },
+    // The skill's own plain-code sanity rules. Deliberately NOT here: an
+    // `all_day_end_iso >= start_iso` rule. draftFromInfo() already clamps an inverted range to
+    // a single day, in the one normalizer every path funnels through, and duplicating that
+    // clamp is how the two silently drift apart. (A consistency failure does not withhold the
+    // payload anyway — handover is gated on the VALIDITY tier alone.)
+    consistency: [
+      {
+        name: "attendee_count_matches_email_count",
+        test: (i) =>
+          i.action !== "create" ||
+          !Array.isArray(i.participants) ||
+          i.participants.every(
+            (p) => p && p.email != null && String(p.email).trim() !== ""
+          ),
+      },
+      {
+        name: "create_always_has_a_date",
+        test: (i) => i.action !== "create" || !!i.start_iso,
+      },
+      {
+        name: "list_fields_only_on_list",
+        test: (i) =>
+          i.action === "list"
+            ? !!i.list_mode
+            : i.list_mode == null &&
+              i.range_start_iso == null &&
+              i.range_end_iso == null,
+      },
+      {
+        name: "window_list_has_a_range",
+        test: (i) =>
+          !(i.action === "list" && i.list_mode === "window") || !!i.range_start_iso,
+      },
+      {
+        // The LIST WINDOW, and nothing to do with all-day: a window cannot end before it starts.
+        name: "end_after_start",
+        test: (i) =>
+          !(i.range_start_iso && i.range_end_iso) ||
+          Date.parse(i.range_end_iso) >= Date.parse(i.range_start_iso),
+      },
+    ],
+    // Carried VERBATIM into the merged prompt. Same env + same default as server.js's
+    // OWNER_NAME — the manifest is read at boot, before any ctx exists.
+    rulebook: () => buildExtractionRules(process.env.OWNER_NAME || "User"),
+  },
 };
 
 const CAL_TZ = "America/Sao_Paulo";
@@ -345,13 +459,21 @@ export async function run(ctx) {
     return resumeEditConfirm(ctx, session);
   }
 
-  let info;
-  try {
-    info = await interpret(ctx);
-  } catch (e) {
-    console.error("Calendar/Claude error:", e);
-    await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
-    return;
+  // The orchestrator's merged router+extractor may ALREADY have extracted our declared inputs
+  // (manifest.inputs), and a plain-code check has already said the SHAPE is good. Use it: that
+  // is the whole round-trip this card removes. When it did not — a shape-invalid payload, or a
+  // dual-intent turn where the payload belonged to another skill — fall back to our own
+  // dedicated extraction call, exactly as before. No capability is lost either way; the worst
+  // case is that the turn is as slow as it used to be.
+  let info = ctx.info ?? null;
+  if (!info) {
+    try {
+      info = await interpret(ctx);
+    } catch (e) {
+      console.error("Calendar/Claude error:", e);
+      await ctx.sendFailure(number, reply(ctx.lang).thinkingError());
+      return;
+    }
   }
 
   if (info?.action === "delete") return handleDelete(ctx, info);

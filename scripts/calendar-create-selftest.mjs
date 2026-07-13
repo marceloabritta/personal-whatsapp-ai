@@ -88,17 +88,37 @@ function check(name, cond) {
 }
 
 // ============================================================================
-//  THE SCHEMA SNIFFER — the fake model's router. See THE TRAP above.
-//  Every branch identifies its call POSITIVELY, by a property no other schema in the
-//  flow has. There is no default branch: an unknown schema throws.
+//  THE CALL SNIFFER — the fake model's router. See THE TRAP above.
+//  Every branch identifies its call POSITIVELY, by a property no other call in the
+//  flow has. There is no default branch: an unrecognised call throws.
+//
+//  ⚠ IT TAKES THE WHOLE REQUEST BODY, NOT THE SCHEMA — and it has to (card 9af6967a).
+//  The merged router+extractor call carries NO output_config at all: its reply format is
+//  demanded in the PROMPT, which is what keeps the orchestrator generic. A sniffer handed only
+//  `output_config.format.schema` is handed `undefined` and CANNOT see the absence of one. So
+//  kindOf reads the body itself and identifies the merged call POSITIVELY — no schema, plus
+//  the skill catalog in the system prompt.
+//  🚩 If this suite ever goes red and the tempting fix is "put output_config back on the router
+//  call", STOP: that silently undoes card 9af6967a. The router sends no schema, on purpose.
 // ============================================================================
-function kindOf(schema) {
-  const props = schema?.properties || {};
+function kindOf(body) {
+  const schema = body?.output_config?.format?.schema;
+
+  if (!schema) {
+    const sys = String(body?.system || "");
+    if (/Available tasks/.test(sys)) return "route_extract"; // the merged router+extractor
+    throw new Error(
+      `kindOf: a call with NO output_config that is not the merged router — system="${sys.slice(0, 60)}…"`
+    );
+  }
+
+  const props = schema.properties || {};
   const has = (k) => Object.prototype.hasOwnProperty.call(props, k);
   const keys = Object.keys(props);
 
-  if (has("tasks")) return "router"; // ROUTER_SCHEMA — only it has `tasks`
-  if (has("action")) return "calendar"; // CAL_SCHEMA — only it has `action`
+  // CAL_SCHEMA — only it has `action`. interpret() survives the merge as the FALLBACK (a
+  // shape-invalid payload, or a dual-intent turn), so this kind must stay.
+  if (has("action")) return "calendar";
   if (has("new_start_iso")) return has("decision") ? "edit_review" : "edit"; // EDIT_*
   if (has("decision") && keys.length === 1) return "confirm_classify"; // CONFIRM_SCHEMA
   // REVIEW_SCHEMA (the confirm-step review). `decision` is NOT a usable discriminator —
@@ -115,6 +135,10 @@ function kindOf(schema) {
   throw new Error(`kindOf: UNRECOGNISED SCHEMA — properties=${JSON.stringify(keys)}`);
 }
 
+// The H0 pins below hand kindOf a bare schema; the product hands it a whole request body.
+// This is the adapter, so the pins keep testing the sniffer and not the wrapper.
+const asBody = (schema) => ({ output_config: { format: { type: "json_schema", schema } } });
+
 // ============================================================================
 //  0. HARNESS INTEGRITY (static). Pin the sniffer against the REAL schemas, imported
 //     from the product. This is the assertion that makes a green run mean something:
@@ -127,43 +151,47 @@ console.log("\n=== 0. harness integrity — the fake model routes every real sch
 const P = await import(
   new URL("../secretary/2. Skills/1. Calendar Actions/prompt.js", import.meta.url).href
 );
-const R = await import(
-  new URL("../secretary/1. Orchestrator/router/prompt.js", import.meta.url).href
-);
 const C = await import(
   new URL("../secretary/1. Orchestrator/lib/confirm.js", import.meta.url).href
 );
 
-const safeKind = (schema) => {
+const safeKind = (body) => {
   try {
-    return kindOf(schema);
+    return kindOf(body);
   } catch (e) {
     return `THREW(${e.message})`;
   }
 };
+const kindOfSchema = (schema) => safeKind(asBody(schema));
 
-check(`H0.1  ROUTER_SCHEMA        -> "router"          (got "${safeKind(R.ROUTER_SCHEMA)}")`,
-  safeKind(R.ROUTER_SCHEMA) === "router");
-check(`H0.2  CAL_SCHEMA           -> "calendar"        (got "${safeKind(P.CAL_SCHEMA)}")`,
-  safeKind(P.CAL_SCHEMA) === "calendar");
-check(`H0.3  REVIEW_SCHEMA        -> "create_review"   (got "${safeKind(P.REVIEW_SCHEMA)}")`,
-  safeKind(P.REVIEW_SCHEMA) === "create_review");
+// H0.1 was the ROUTER_SCHEMA pin. It is GONE, with the schema itself: the merged
+// router+extractor call sends no output_config at all, so there is no router schema left to
+// pin. Its replacement is H0.1b, which pins the thing that took its place.
+check(`H0.1b the MERGED call (no output_config, catalog in the system) -> "route_extract"  (got "${safeKind({ system: "You are the ROUTER + EXTRACTOR of Marcelo's secretary.\n\nAvailable tasks:\n  - \"calendar_action\": …" })}")`,
+  safeKind({ system: "Available tasks:" }) === "route_extract");
+check(`H0.2  CAL_SCHEMA           -> "calendar"        (got "${kindOfSchema(P.CAL_SCHEMA)}")`,
+  kindOfSchema(P.CAL_SCHEMA) === "calendar");
+check(`H0.3  REVIEW_SCHEMA        -> "create_review"   (got "${kindOfSchema(P.REVIEW_SCHEMA)}")`,
+  kindOfSchema(P.REVIEW_SCHEMA) === "create_review");
 // THE ONE THAT MATTERS. Today RESOLVE_SCHEMA is { start_iso, participants }; the fix adds
 // `decision` + `no_email_for`. Both must land on "resolve" — never on "create_review".
-check(`H0.4  RESOLVE_SCHEMA       -> "resolve"         (got "${safeKind(P.RESOLVE_SCHEMA)}", props=${JSON.stringify(Object.keys(P.RESOLVE_SCHEMA.properties))})`,
-  safeKind(P.RESOLVE_SCHEMA) === "resolve");
-check(`H0.5  EDIT_SCHEMA          -> "edit"            (got "${safeKind(P.EDIT_SCHEMA)}")`,
-  safeKind(P.EDIT_SCHEMA) === "edit");
-check(`H0.6  EDIT_REVIEW_SCHEMA   -> "edit_review"     (got "${safeKind(P.EDIT_REVIEW_SCHEMA)}")`,
-  safeKind(P.EDIT_REVIEW_SCHEMA) === "edit_review");
-check(`H0.7  CONFIRM_SCHEMA       -> "confirm_classify"(got "${safeKind(C.CONFIRM_SCHEMA)}")`,
-  safeKind(C.CONFIRM_SCHEMA) === "confirm_classify");
+check(`H0.4  RESOLVE_SCHEMA       -> "resolve"         (got "${kindOfSchema(P.RESOLVE_SCHEMA)}", props=${JSON.stringify(Object.keys(P.RESOLVE_SCHEMA.properties))})`,
+  kindOfSchema(P.RESOLVE_SCHEMA) === "resolve");
+check(`H0.5  EDIT_SCHEMA          -> "edit"            (got "${kindOfSchema(P.EDIT_SCHEMA)}")`,
+  kindOfSchema(P.EDIT_SCHEMA) === "edit");
+check(`H0.6  EDIT_REVIEW_SCHEMA   -> "edit_review"     (got "${kindOfSchema(P.EDIT_REVIEW_SCHEMA)}")`,
+  kindOfSchema(P.EDIT_REVIEW_SCHEMA) === "edit_review");
+check(`H0.7  CONFIRM_SCHEMA       -> "confirm_classify"(got "${kindOfSchema(C.CONFIRM_SCHEMA)}")`,
+  kindOfSchema(C.CONFIRM_SCHEMA) === "confirm_classify");
 // The resolve and create-review calls must never be confusable — that IS the trap.
 check("H0.8  resolve and create_review are DISTINCT kinds",
-  safeKind(P.RESOLVE_SCHEMA) !== safeKind(P.REVIEW_SCHEMA));
-// A sniffer that guesses is worse than no sniffer: it must refuse, loudly.
+  kindOfSchema(P.RESOLVE_SCHEMA) !== kindOfSchema(P.REVIEW_SCHEMA));
+// A sniffer that guesses is worse than no sniffer: it must refuse, loudly. Both ways in:
+// an unknown SCHEMA, and a schemaless call that is not the merged router.
 check("H0.9  an unknown schema THROWS — the sniffer has no silent default",
-  safeKind({ properties: { banana: {} } }).startsWith("THREW("));
+  kindOfSchema({ properties: { banana: {} } }).startsWith("THREW("));
+check("H0.9b a schemaless call that is NOT the merged router THROWS too",
+  safeKind({ system: "you are a helpful assistant" }).startsWith("THREW("));
 
 // ============================================================================
 //  The fakes.
@@ -209,9 +237,9 @@ const llm = http.createServer((req, res) => {
     const schema = p?.output_config?.format?.schema;
     let kind;
     try {
-      kind = kindOf(schema);
+      kind = kindOf(p); // the WHOLE body — the merged call has no schema to sniff
     } catch (e) {
-      // Refuse loudly. A fake model that guesses on an unknown schema is how a suite
+      // Refuse loudly. A fake model that guesses on an unknown call is how a suite
       // ends up green and worthless.
       unrecognised.push(Object.keys(schema?.properties || {}));
       console.log(`      !! ${e.message}`);
@@ -414,10 +442,25 @@ const insertedEmails = () =>
 // fields it does not know (`decision`, `no_email_for`) — readReply is a plain JSON.parse —
 // so ONE fixture set drives both the broken and the fixed product. That is deliberate: it
 // means a red assertion below is the PRODUCT's behaviour changing, never the fixture's.
-const ROUTE_CAL = {
-  kind: "router",
-  json: '{"tasks":["calendar_action"],"lang":"pt","reason":"agendar"}',
-};
+// ROUTE_CAL is a FUNCTION now, not a constant (card 9af6967a). The router call and the
+// calendar extraction call used to be two round-trips and are one: a fresh order gets ONE
+// merged reply carrying the routing AND the payload. So each scenario's calendar payload is
+// folded into the routing fixture instead of being scripted separately.
+//   before:  scripted = [ ROUTE_CAL, { kind: "calendar", json: cal({…}) } ]
+//   after:   scripted = [ ROUTE_CAL({…}) ]
+// It goes through cal() ON PURPOSE — cal() is the single place the payload's default shape
+// lives, so a new CAL_SCHEMA field (all_day did exactly this) reaches the merged fixture for
+// free, and scenario g's overrides keep working. Hand-writing `info` here is how g breaks.
+// (Continuations — the "sim", the gathering replies — bypass the router entirely and keep
+// their fixtures unchanged. interpret() is still the fallback, so "calendar" stays a kind.)
+const ROUTE_CAL = (o = {}) => ({
+  kind: "route_extract",
+  json: JSON.stringify({
+    tasks: ["calendar_action"],
+    lang: "pt",
+    info: JSON.parse(cal(o)),
+  }),
+});
 const cal = (o) =>
   JSON.stringify({
     action: "create",
@@ -469,16 +512,12 @@ console.log("\n=== a. zero-guest create ===\n");
 reset("5511111111111@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Pegar os cachorros",
-      participants: [],
-      start_iso: "2026-07-14T16:00:00-03:00",
-      duration_min: 60,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Pegar os cachorros",
+    participants: [],
+    start_iso: "2026-07-14T16:00:00-03:00",
+    duration_min: 60,
+  }),
   // Today the resolver IS called (the draft looks "incomplete"); after the fix it is not
   // called at all (a zero-guest draft is complete). Both fixtures are scripted so that
   // NEITHER run makes an unscripted call — the harness must be silent about the fix.
@@ -544,16 +583,12 @@ console.log("\n=== b. \"nao tenho o email dela, pode agendar assim mesmo\" ===\n
 reset("5522222222222@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Biópsia Laura",
-      participants: [{ name: "Laura", email: null }],
-      start_iso: "2026-07-14T10:00:00-03:00",
-      duration_min: 60,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Biópsia Laura",
+    participants: [{ name: "Laura", email: null }],
+    start_iso: "2026-07-14T10:00:00-03:00",
+    duration_min: 60,
+  }),
   { kind: "resolve", json: resolve_({}) },
 ];
 out = await say("@secretaria agendar biopsia da laura amanha as 10h");
@@ -615,16 +650,12 @@ console.log("\n=== c. untagged correction: \"nao precisa convidar a laura\" ===\
 reset("5533333333333@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Biópsia Laura",
-      participants: [{ name: "Laura", email: null }],
-      start_iso: "2026-07-14T09:00:00-03:00",
-      duration_min: 60,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Biópsia Laura",
+    participants: [{ name: "Laura", email: null }],
+    start_iso: "2026-07-14T09:00:00-03:00",
+    duration_min: 60,
+  }),
   { kind: "resolve", json: resolve_({}) },
 ];
 out = await say("@secretaria agendar amanha 9h biopsia laura");
@@ -660,16 +691,12 @@ console.log("\n=== d. cancel: \"esquece, deixa pra la\" ===\n");
 reset("5544444444444@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Reunião",
-      participants: [{ name: "Laura", email: null }],
-      start_iso: "2026-07-14T15:00:00-03:00",
-      duration_min: 45,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Reunião",
+    participants: [{ name: "Laura", email: null }],
+    start_iso: "2026-07-14T15:00:00-03:00",
+    duration_min: 45,
+  }),
   { kind: "resolve", json: resolve_({}) },
 ];
 out = await say("@secretaria agendar reuniao com a laura amanha 15h");
@@ -729,16 +756,12 @@ console.log("\n=== e. GUARD: genuine chatter is still met with silence ===\n");
 reset("5555555555555@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Reunião",
-      participants: [{ name: "Laura", email: null }],
-      start_iso: "2026-07-14T11:00:00-03:00",
-      duration_min: 45,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Reunião",
+    participants: [{ name: "Laura", email: null }],
+    start_iso: "2026-07-14T11:00:00-03:00",
+    duration_min: 45,
+  }),
   { kind: "resolve", json: resolve_({}) },
 ];
 out = await say("@secretaria agendar reuniao com a laura amanha 11h");
@@ -766,16 +789,12 @@ console.log("\n=== f. GUARD: a bare email, sent by the GUEST, is still an answer
 reset("5566666666666@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Reunião de projeto",
-      participants: [{ name: "Laura", email: null }],
-      start_iso: "2026-07-14T14:00:00-03:00",
-      duration_min: 45,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Reunião de projeto",
+    participants: [{ name: "Laura", email: null }],
+    start_iso: "2026-07-14T14:00:00-03:00",
+    duration_min: 45,
+  }),
   { kind: "resolve", json: resolve_({}) },
 ];
 out = await say("@secretaria agendar reuniao de projeto com a laura amanha 14h");
@@ -823,20 +842,16 @@ console.log("\n=== g. all-day create ===\n");
 reset("5577777777777@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Biópsia Laura",
-      participants: [],
-      all_day: true,
-      // start_iso stays REQUIRED — the DAY is derived from it in CAL_TZ, so missingOf().noTime
-      // still guards the null-start -> 1970 write. all_day is not a way around it.
-      start_iso: "2026-07-14T00:00:00-03:00",
-      all_day_end_iso: null, // single day
-      duration_min: null,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Biópsia Laura",
+    participants: [],
+    all_day: true,
+    // start_iso stays REQUIRED — the DAY is derived from it in CAL_TZ, so missingOf().noTime
+    // still guards the null-start -> 1970 write. all_day is not a way around it.
+    start_iso: "2026-07-14T00:00:00-03:00",
+    all_day_end_iso: null, // single day
+    duration_min: null,
+  }),
 ];
 out = await say("@secretaria agendar amanha o dia inteiro biopsia laura");
 console.log(`   owner    : @secretaria agendar amanha o dia inteiro biopsia laura`);
@@ -874,18 +889,14 @@ check(
 reset("5588888888888@s.whatsapp.net");
 
 scripted = [
-  ROUTE_CAL,
-  {
-    kind: "calendar",
-    json: cal({
-      title: "Biópsia Laura",
-      participants: [],
-      all_day: true,
-      start_iso: "2026-07-13T00:00:00-03:00", // Monday
-      all_day_end_iso: "2026-07-15T00:00:00-03:00", // Wednesday — INCLUSIVE, the last day covered
-      duration_min: null,
-    }),
-  },
+  ROUTE_CAL({
+    title: "Biópsia Laura",
+    participants: [],
+    all_day: true,
+    start_iso: "2026-07-13T00:00:00-03:00", // Monday
+    all_day_end_iso: "2026-07-15T00:00:00-03:00", // Wednesday — INCLUSIVE, the last day covered
+    duration_min: null,
+  }),
 ];
 out = await say("@secretaria agendar de segunda a quarta o dia todo biopsia laura");
 console.log(`   owner    : @secretaria agendar de segunda a quarta o dia todo biopsia laura`);

@@ -215,13 +215,20 @@ Each skill is a folder under `2. Skills/` with a `skill.js`:
 export const manifest = {
   id: "unique_id",                 // the router routes to this id
   description: "what it does",      // the router reads this to classify
+  inputs: { /* … */ } || null,      // the inputs the router pre-extracts for you (or null)
 };
 export async function run(ctx) { /* do the work, reply via ctx.send */ }
 ```
 
 The orchestrator scans `2. Skills/*/skill.js` at boot, builds `{ [id]: run }` and a
-catalog `[{id, description}]` that it passes to the router. **Adding a skill = drop in a
+catalog `[{id, description, inputs}]` that it passes to the router. **Adding a skill = drop in a
 folder. No edits to `server.js` or the router.**
+
+`manifest.inputs` is the skill's **declared input contract** (`lib/inputs.js`). The router asks
+the model to fill it in the SAME call that classifies the order, plain code validates the reply
+against the declaration, and a valid payload arrives as `ctx.info` — so the skill acts without a
+second round-trip. `inputs: null` means "no inputs; I read the conversation myself", and such a
+skill is never handed a payload. A skill that ignores `ctx.info` behaves exactly as before.
 
 `ctx` handed to every skill: `owner, tag, anthropic, model, order, transcript, nowStr,
 contact, number, remoteJid, fromMe, quoted, hasQuotedAudio, catalog, env, evolution,
@@ -257,8 +264,11 @@ a safety net, not a reason to skip `pt`. Never translate the reply header
 classification/system prompts stay English. Full convention: `ARCHITECTURE.md`
 ("Localization convention").
 
-Two-LLM-call design is intentional: the router classifies (call 1), then a skill like
-`calendar_action` extracts details (call 2). `transcribe_audio` makes no LLM call.
+**ONE LLM call on a fresh order** (card 9af6967a, 2026-07-13). The router classifies AND
+extracts the chosen skill's declared inputs in a single round-trip; plain code — no AI — then
+checks the payload, and only if that check fails does the skill run its own clarification call.
+It used to be two calls (three on a create), and per-turn latency is linear in the number of
+round-trips. `transcribe_audio` makes no LLM call.
 
 ---
 
@@ -311,7 +321,12 @@ conflate them. The webhook URL still uses the *container* hostname `http://secre
 ## 8. External services & verified contracts
 
 - **Anthropic (Claude):** `@anthropic-ai/sdk`, `CLAUDE_MODEL` env (default
-  `claude-sonnet-5`). Router uses ~200 max_tokens; scheduling ~700.
+  `claude-sonnet-5`). The merged router+extractor call uses **1024** max_tokens (it returns a
+  payload, not just a classification); the calendar extraction/review calls use **4096**.
+  **Every call sends `thinking: {type:"disabled"}`** — the single client is wrapped once, in
+  `server.js`, by `withThinkingDefault()` (`lib/llm.js`). Extended thinking is ON by default on
+  `claude-sonnet-5` and we discard every thinking block, so we were waiting for and paying for
+  output nobody read. A call site that genuinely wants reasoning passes its own `thinking`.
 - **Google Calendar:** OAuth (Client ID + Secret + Refresh Token). `sendUpdates=all`
   makes Google email the invite / the cancellation. Used by `calendar_action`
   (`events.insert` to create, `events.get` + `events.delete` to cancel; the event id
@@ -444,6 +459,69 @@ purpose — this list went stale once already by counting.*
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-13 — The secretary got slow: a fresh calendar order took 16–23s to reply, as unbroken
+  silence (BUILT, NOT YET DEPLOYED — maintenance card 9af6967a).** It used to be ~6.5s. **Two causes,
+  both in the SHARED request path** — which is why every skill regressed at once, and why the fix is
+  a rails fix. This is a **cure**: both steps remove a cause. There is no retry, no timeout bump, no
+  special case anywhere in it.
+
+  **Cause 1 — nobody ever set `thinking`, and we threw the results away.** `claude-sonnet-5` runs
+  extended thinking **on by default**, adaptively sized. None of the product's 16 `messages.create`
+  call sites passed a `thinking` parameter, and both `readText()` and the router's inline reader
+  keep only `text` blocks — so the model reasoned, we waited for it, we paid for it, and we deleted
+  it. Measured: **~4.6s of every 16s turn.**
+  **Fix:** `lib/llm.js` gains **`withThinkingDefault(client)`**, and `server.js` wraps its **one**
+  Anthropic client in it (a `Proxy`, not a spread — the SDK client is a class instance). All 16 call
+  sites inherit `thinking: {type:"disabled"}`, **and so does a skill written next month.** A caller
+  that genuinely wants reasoning passes its own `thinking` and is left alone. Putting it at the one
+  shared door is the whole point: a skill cannot forget to opt in.
+
+  **Cause 2 — the router call and the extraction call were two round-trips reading the same
+  transcript.** Per-turn latency is linear in the number of round-trips, and each is 4–8s. A create
+  cost three (router → extract → clarify).
+  **Fix:** they are now **ONE call**. Every skill **declares its inputs** (`manifest.inputs`); the
+  router asks for the chosen skill's inputs in the same call that classifies the order; **plain code
+  — no AI** — then validates the payload against the declaration (`lib/inputs.js`), and only if that
+  check fails does the skill run its own clarification call. A valid payload reaches the skill as
+  **`ctx.info`**. A fresh create is **1 call** (2 if something is genuinely missing), down from 3.
+
+  **The reply format is demanded in the PROMPT, never via `output_config` — and that is a hard
+  product constraint, not an optimization.** With `output_config` the orchestrator would have to
+  import each skill's JSON Schema to build the merged one: **the router would then know what a
+  calendar IS.** It must not. It concatenates each skill's declared inputs as opaque text and
+  validates the reply against the declaration. Dropping `output_config` is worth ~0 seconds — it is
+  an architectural choice and it costs us the API's shape guarantee (see the risk below).
+
+  **Measured before/after** (median / p90 to first reply): today **19.7s / 28.3s** → thinking-off
+  alone **12.0s / 15.8s** → both **8.5s / 11.3s**. **The order is safety-critical:** the merge with
+  thinking still ON measures a **p90 of 41.5s — worse than the bug**, because the merged prompt
+  looks harder and the model spends its thinking budget on it.
+  **The tail is provider-side and this fix does not bound it.** The provider draws 10–44s on a single
+  HTTP request, with zero retries, and nothing in our control removes that. Taking ~1.8 draws per turn
+  instead of 3 shrinks our exposure to it; it does not cap it. No bounded worst case is promised.
+
+  **The risk this creates, stated out loud:** `manifest.inputs` and `CAL_SCHEMA` are two hand-written
+  lists that must stay in lockstep, and nothing in the language enforces it. Add a field to the schema
+  and forget the declaration, and the merged prompt silently stops asking for it. **It already happened
+  once** (`all_day`, one commit before this card). The mitigation is a static set-equality lint —
+  `scripts/turn-latency-selftest.mjs` **T2.10**. **If a future card makes it red, update the
+  declaration; never loosen the lint.** Deriving one list from the other is a follow-up card.
+  Secondary risk: nothing but a prompt instruction now enforces the reply shape (0/132 unparseable
+  when measured; ~4% leak prose and are recovered by the router's brace-scanner, which is therefore
+  load-bearing). An unparseable reply degrades to "I didn't understand" **plus a self-learning
+  report** — that existing path is the alarm. Watch `Bugs and Malfunctions/inbox/` for a week.
+
+  **New:** `scripts/turn-latency-selftest.mjs` (offline, free — boots the real server and counts the
+  round-trips before the first reply), `scripts/calendar-extraction-livetest.mjs` (live, opt-in — the
+  accuracy bar, three arms, with a pre-declared STOP rule: *a faster, dumber assistant is a worse
+  product*), `scripts/calendar-editdelete-livetest.mjs` (live, human-gated, zero attendees).
+  **Not fixed here, and it is a different card:** the wrong-recipient bug (the contact's own email
+  attached to a *different* person). **No improvement is claimed.** An earlier draft of this entry
+  claimed "7/8 → 0/8" — that number came from a card-folder experiment and **did not reproduce at
+  HEAD** under the build review's live probe. It has been removed rather than qualified, because a
+  bogus improvement figure is exactly how the open wrong-recipient card gets closed without a fix.
+  **The bug stays open and unmeasured by this card.**
 
 - **2026-07-13 — All-day events on the calendar skill, single day AND multi-day ranges (SHIPPED,
   DEPLOYED — card 0822a8e0).** *"agendar amanhã o dia inteiro biópsia laura"* now produces a **real

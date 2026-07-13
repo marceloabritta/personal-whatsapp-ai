@@ -62,6 +62,11 @@ sent). If you go quiet, the session expires quietly after ~30 minutes.
 
 ## For AI / maintainers — detailed
 
+**`manifest.inputs: null`** — this skill declares **no inputs** for the orchestrator's merged
+router+extractor call (`1. Orchestrator/lib/inputs.js`). It opens its own clarifying conversation
+rather than extracting a payload up front, so there is nothing to pre-extract and it is never
+handed a `ctx.info` payload.
+
 Files: `skill.js` (dialogue logic + doc render + delivery), `prompt.js` (the clarify
 prompt + `CLARIFY_SCHEMA`, the English doc prompt, `slugify`, and the localized
 `reply(lang)` scaffolding-string map).

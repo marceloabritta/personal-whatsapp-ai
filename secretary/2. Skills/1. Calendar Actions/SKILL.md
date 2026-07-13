@@ -232,9 +232,42 @@ Continuation checks first (each reads `ctx.session`):
    was ambiguous; roll into confirm once resolved).
 5. `intent:"edit"` + `stage:"await_confirmation"` → `resumeEditConfirm` (yes/modify/cancel).
 
-Otherwise **`interpret(ctx)`** — one Claude call (`buildSystem`/`buildUserPrompt`,
+Otherwise the skill needs an extracted `info` — and **usually it already has one**:
+
+```js
+let info = ctx.info ?? null;          // the router already extracted it — no second call
+if (!info) info = await interpret(ctx);   // …or it didn't: our own extraction call
+```
+
+**`ctx.info` — the pre-extracted payload (card 9af6967a).** The skill DECLARES its inputs in
+`manifest.inputs`, and the orchestrator's router asks the model to fill them **in the same call
+that classifies the order**. Plain code (`1. Orchestrator/lib/inputs.js`) validates the reply
+against the declaration; a shape-valid payload arrives as `ctx.info`, in **exactly the field
+names of `CAL_SCHEMA`** — which is what makes it a drop-in and why `handleCreate`,
+`handleDelete`, `handleEdit` and `handleList` needed no changes at all. A fresh create is now
+**one** LLM call before the reply instead of three. User-visible behaviour is unchanged: it is
+faster, not different.
+
+> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all ELEVEN names.**
+> That binding is load-bearing, and it is a new way to break this skill *silently*: add a field
+> to `CAL_SCHEMA` and forget the declaration, and the merged prompt simply stops asking for it,
+> `draftFromInfo` reads `undefined`, and the feature that field implements dies **without a
+> single test going red.** It has already happened once (`all_day`). `scripts/turn-latency-selftest.mjs`
+> **T2.10** asserts set-equality. **If a future card makes it red, update the declaration —
+> never loosen the lint.**
+
+**`interpret(ctx)` is NOT deleted — it is the fallback**, and it still runs whenever `ctx.info`
+is absent: a shape-invalid payload, or a dual-intent turn (`["feedback","calendar_action"]`)
+where the payload belonged to the *other* skill and this one is handed `null` on purpose. It is
+also still the extractor on every continuation path. So no capability depends on the merge
+working — the worst case is that the turn is as slow as it used to be.
+
+**`interpret(ctx)`** — one Claude call (`buildSystem`/`buildUserPrompt`,
 `CAL_SCHEMA`, `max_tokens: 4096`) that extracts from the **whole conversation**, not just
-the order (`order` + `transcript` + `contact`), so a terse "schedule this" works. Schema:
+the order (`order` + `transcript` + `contact`), so a terse "schedule this" works. Its rules
+live in **`buildExtractionRules(owner)`** (`prompt.js`) — the same text, verbatim, that
+`manifest.inputs.rulebook()` hands the merged router call, so the two extractions read from
+one rulebook and cannot drift. Schema:
 ```jsonc
 { "action": "create"|"delete"|"edit"|"list"|"other",
   "title": string|null,                              // inferred subject heading, or null

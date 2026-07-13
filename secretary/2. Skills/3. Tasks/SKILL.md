@@ -160,6 +160,13 @@ becomes the task.
 
 ## For AI / maintainers — detailed
 
+**`manifest.inputs`** — this skill **declares** its required inputs (`list_requested`,
+`owner_done`, `ops[]`) so the orchestrator's merged router call can pre-extract them
+(`1. Orchestrator/lib/inputs.js`). It does **not yet consume `ctx.info`**: it still makes its own
+planning call. Adopting the pre-extracted payload needs its own live accuracy check and is a
+follow-up card — only this skill's *routing* has been measured under the merged prompt, never its
+payload accuracy.
+
 Files: `skill.js` (logic + Google Tasks client), `prompt.js` (planner + confirm prompts,
 JSON Schemas, and the localized `reply(lang)` string map + `localizeDueDate`).
 

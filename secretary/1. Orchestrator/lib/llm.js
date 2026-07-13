@@ -18,6 +18,38 @@ export function jsonFormat(schema) {
   return { format: { type: "json_schema", schema } };
 }
 
+// Extended thinking is ON BY DEFAULT on claude-sonnet-5, adaptively sized — and we discard
+// every thinking block (readText, below, keeps only the `text` ones). We were waiting for,
+// and paying for, ~1s per ~90 reasoning tokens of output nobody ever reads. Wrap the client
+// ONCE, at construction (server.js), so the safe default is STRUCTURAL: a skill cannot forget
+// to opt in, and a skill written next month inherits it without knowing it exists.
+//
+// A caller that genuinely WANTS reasoning passes its own `thinking` and this leaves it alone.
+//
+// A Proxy, NOT an object spread: `new Anthropic()` is a class instance, and spreading it drops
+// its prototype methods and getters. The proxy leaves the whole SDK surface
+// (messages.countTokens, .stream, …) intact and reachable.
+export function withThinkingDefault(client, thinking = { type: "disabled" }) {
+  return new Proxy(client, {
+    get(target, prop, recv) {
+      if (prop !== "messages") return Reflect.get(target, prop, recv);
+      const messages = target.messages;
+      return new Proxy(messages, {
+        get(m, p, r) {
+          if (p !== "create") return Reflect.get(m, p, r);
+          return (params, ...rest) =>
+            m.create(
+              params && Object.prototype.hasOwnProperty.call(params, "thinking")
+                ? params
+                : { ...params, thinking },
+              ...rest
+            );
+        },
+      });
+    },
+  });
+}
+
 // Read a schema-enforced reply. `who` only labels the log line. Returns the parsed
 // object, or null on a refusal / unparseable reply (never throws) — callers treat
 // null as "I didn't understand" and say so.

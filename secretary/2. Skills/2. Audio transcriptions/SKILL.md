@@ -46,6 +46,11 @@ acknowledgment**, and it does **not** wait for or pick up any follow-up answer.
 
 ## For AI / maintainers — detailed
 
+**`manifest.inputs: null`** — this skill declares **no inputs** for the orchestrator's merged
+router+extractor call (`1. Orchestrator/lib/inputs.js`). It needs a quoted **audio**, which is
+not text and cannot be declared this way, so nothing can be pre-extracted for it and it is never
+handed a `ctx.info` payload.
+
 Source: `skill.js` (logic) + `prompt.js` (reply strings — **no LLM prompts**;
 this skill makes **no Claude call**). Contract: `export const manifest` +
 `export async function run(ctx)`; auto-discovered at boot.

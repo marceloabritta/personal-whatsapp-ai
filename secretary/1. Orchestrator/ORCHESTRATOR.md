@@ -45,9 +45,20 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    `[Assistente IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
 2. **Clients:** `anthropic` (SDK), `evolution` (`createEvolution`), `sessions`
    (`createSessions` — Redis or in-memory fallback).
+   **`anthropic` is WRAPPED, once, here:** `withThinkingDefault(new Anthropic({…}))` (`lib/llm.js`).
+   It is the **only** `new Anthropic(` in the product, and every call site reaches it through
+   `ctx.anthropic` — so all of them send `thinking: {type:"disabled"}`, **and a skill written next
+   month inherits that without knowing it exists.** *Why:* extended thinking is **on by default**
+   on `claude-sonnet-5`, and both `readText()` and the router's reader keep only `text` blocks —
+   the model reasoned, we waited for it, we paid for it, and we deleted it (~4.6s of every 16s
+   turn). A call site that genuinely wants reasoning **passes its own `thinking`** and the wrapper
+   leaves it alone. The wrapper is a `Proxy`, not a spread — the SDK client is a class instance and
+   a spread would drop its prototype. `scripts/turn-latency-selftest.mjs` T1.5 lints that exactly
+   one client exists and that it is wrapped.
 3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
    and requires `manifest.id` + `run()`. Builds `SKILLS = { [id]: run }` and
-   `CATALOG = [{id, description}]` (the router's menu). Also collects each skill's
+   `CATALOG = [{id, description, inputs}]` (the router's menu — `inputs` is the skill's declared
+   input contract, `manifest.inputs`, or `null`). Also collects each skill's
    **optional** `capabilities` export into `CAPS = { [id]: { [name]: fn } }` — the
    internal skill-to-skill API (see "Composing skills" below). Logs each
    `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit
@@ -82,9 +93,17 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, isTagged, quoted, hasQuotedAudio,
-    catalog, env, evolution, send, sendFailure, sessions, session, lang, hasSkill,
+    catalog, env, evolution, send, sendFailure, sessions, session, lang, info, hasSkill,
     callSkill, _turn`.
     `session` is set **only** on a continuation (else `null`).
+    **`ctx.info`** — the skill's **declared inputs**, already extracted by the router in the same
+    call that classified the order (see step 12), and already checked by plain code. It is set on
+    the dispatch loop and it is **scoped to `tasks[0]`: every other skill on the turn is handed
+    `null`** and extracts for itself. A skill reads it as *"my extraction may already be done"*:
+    `let info = ctx.info ?? null; if (!info) info = await interpret(ctx);`. It is `null` on a
+    continuation, on a shape-invalid payload, and for any skill that declared no `inputs` — in
+    every one of those cases the skill falls back to its own call, which is the old behaviour,
+    unchanged. **A skill that ignores `ctx.info` is untouched by any of this.**
     `isTagged` — did **THIS** message carry a tag? `true` on a fresh command, and **always
     `false` on a continuation** (a tagged message is never a continuation — see the gate at
     step 7). It is the only honest source of that bit: **`ctx.tag` is not a substitute**, it
@@ -101,9 +120,26 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
       (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
       → "I failed to continue that."
     - **Fresh** → first `sessions.clear` any stale session (a new `@secretary` overrides), then
-      **`route(ctx)`** (one Claude call via the router) → `tasks[]`, validated against the
-      catalog. Empty/unknown → "I didn't understand… Available skills: …". Otherwise run
-      each `SKILLS[task](ctx)` in order; per-skill errors → "I failed to run that task."
+      **`route(ctx)`** — **ONE Claude call that both classifies AND extracts** → `{tasks, lang,
+      info}`. `tasks[]` is validated against the catalog; empty/unknown → "I didn't understand…
+      Available skills: …". Otherwise run each `SKILLS[task](ctx)` in order; per-skill errors →
+      "I failed to run that task."
+
+      **THE GATE, and it is plain code — no AI.** The merged call also returns `info`: the
+      **first** task's declared inputs, as the model filled them. Before any skill sees it,
+      `checkPayload(primary.inputs, info)` (`lib/inputs.js`) checks it against the *declaration*:
+      is it an object, are the declared fields present, are the types right?
+      - **shape-VALID** → it is handed to `tasks[0]` as `ctx.info`. That skill skips its own
+        extraction call. If the payload is valid but *incomplete* (no email for Laura) it is
+        **still handed over** — the skill's own clarification pass fills the gap exactly as it
+        does today. That is the "only if the check fails do we ask again" call.
+      - **shape-INVALID, or the task declared no inputs** → `ctx.info` is `null` and the skill
+        extracts for itself. Today's path, unchanged.
+
+      So the worst case of the merge is **correct but slow**, never **fast and wrong** — and note
+      that a *declared field that is absent* is INVALID, not defaulted. That distinction is the
+      whole safety net: a skill that adds a schema field and forgets its declaration gets a slow
+      turn, not a silently un-shipped feature.
 
 ### Self-learning — the orchestrator's failure capture
 `installLogBuffer()` (`lib/logbuffer.js`) runs **first**, above everything that logs: it wraps

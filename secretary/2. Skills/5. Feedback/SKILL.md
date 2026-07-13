@@ -67,6 +67,12 @@ Every secretary message carries the language-aware header (`headerFor(lang)`) an
 
 ## For AI / maintainers — detailed
 
+**`manifest.inputs: null`** — this skill declares **no inputs** for the orchestrator's merged
+router+extractor call (`1. Orchestrator/lib/inputs.js`). It re-reads the conversation itself, so
+there is nothing to pre-extract and it is never handed a `ctx.info` payload. (This matters on a
+dual-intent turn, `["feedback","calendar_action"]`: feedback is `tasks[0]`, so no payload is
+handed to anyone, and `calendar_action` correctly falls back to its own extraction call.)
+
 Files: `skill.js` (evidence + capture + the one question), `prompt.js` (the extraction prompt,
 `buildFeedbackSchema`, and the localized `reply(lang)` map). The report writing itself lives in
 `1. Orchestrator/lib/selflearning.js` — this skill is a thin front door onto it.

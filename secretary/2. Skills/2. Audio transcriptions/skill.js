@@ -13,8 +13,12 @@ import { msg } from "./prompt.js";
 import { headerFor } from "../../1. Orchestrator/lib/identity.js";
 import { frame } from "../../1. Orchestrator/lib/format.js";
 
+// `inputs: null` — NO declared inputs (see 1. Orchestrator/lib/inputs.js). This skill needs a
+// quoted AUDIO, which is not text and cannot be declared this way, so there is nothing for the
+// router's merged call to pre-extract and nothing may be handed to it.
 export const manifest = {
   id: "transcribe_audio",
+  inputs: null,
   description:
     "transcribe an audio message that the user REPLIED to (quoted) and asked to transcribe",
 };

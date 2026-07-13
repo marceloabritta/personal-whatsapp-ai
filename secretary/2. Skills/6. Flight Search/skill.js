@@ -45,10 +45,53 @@ import {
 } from "./prompt.js";
 import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
 
+// `inputs` — the DECLARED input contract (see 1. Orchestrator/lib/inputs.js). The router's
+// merged call fills it in the same round-trip that classifies the order.
+// ⚠ THIS SKILL DECLARES BUT DOES NOT YET CONSUME `ctx.info` — it still makes its own extraction
+// call. Deliberate: only its ROUTING was measured under the merged prompt, never its payload
+// accuracy, and adopting ctx.info here needs its own accuracy check.
 export const manifest = {
   id: "flight_search",
   description:
     "search for flights and show the cheapest sensible options (origin, destination, dates, passengers, cabin), and send the booking link for a flight option ALREADY shown in this conversation (e.g. 'link for option 2'); it only SEARCHES and never buys — it is NOT for adding a flight-related to-do or reminder to the task list",
+  inputs: {
+    discriminator: "intent",
+    fields: {
+      intent: { type: "enum", enum: ["search", "link", "book", "other"] },
+      origin: { type: "string", nullable: true, desc: "IATA code or city" },
+      destination: { type: "string", nullable: true },
+      depart_date: { type: "iso", nullable: true },
+      return_date: { type: "iso", nullable: true },
+      adults: { type: "number", nullable: true },
+      cabin: {
+        type: "enum",
+        enum: ["economy", "premium_economy", "business", "first"],
+        nullable: true,
+      },
+      summary: { type: "string" },
+    },
+    requiredWhen: {
+      search: ["origin", "destination", "depart_date"],
+      link: [],
+      book: [],
+      other: [],
+    },
+    consistency: [
+      {
+        name: "return_after_depart",
+        test: (i) =>
+          !(i.depart_date && i.return_date) ||
+          Date.parse(i.return_date) >= Date.parse(i.depart_date),
+      },
+      {
+        name: "origin_is_not_destination",
+        test: (i) =>
+          !(i.origin && i.destination) ||
+          String(i.origin).toLowerCase() !== String(i.destination).toLowerCase(),
+      },
+    ],
+    rulebook: () => "",
+  },
 };
 
 // ---- Kiwi -------------------------------------------------------------------

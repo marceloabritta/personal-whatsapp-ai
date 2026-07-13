@@ -15,10 +15,16 @@ secretary/
 │   ├── lib/                 #   shared utilities
 │   │   ├── whatsapp.js      #     extract text, detect quoted audio, buffer, transcript
 │   │   ├── evolution.js     #     sendText/sendMedia (documents), fetch history, download media (base64)
+│   │   ├── llm.js           #     jsonFormat/readReply/readText/parseJsonReply + withThinkingDefault
+│   │   │                    #     (wraps the ONE Anthropic client: every call defaults thinking:disabled)
+│   │   ├── inputs.js        #     the declared-inputs contract: describeInputs (prompt text) +
+│   │   │                    #     checkPayload (the plain-code, no-AI gate). Knows declarations, not skills.
 │   │   └── sessions.js      #     per-chat conversation state in Redis (confirmations, clarifications)
 │   └── router/
-│       ├── prompt.js        #     classification prompt (lists the catalog's skills)
-│       └── router.js        #     calls Claude and returns the task(s)
+│       ├── prompt.js        #     the MERGED prompt: classifies AND asks for the chosen skill's declared
+│       │                    #     inputs. No output_config — the format is demanded in the prompt, which is
+│       │                    #     what keeps the orchestrator from having to know what a calendar is.
+│       └── router.js        #     ONE Claude call; returns { tasks, lang, info }
 └── 2. Skills/               # one folder per skill; the orchestrator scans this at boot
     ├── 1. Calendar Actions/
     │   ├── skill.js         #   export { manifest, run, capabilities.startCreate } — create/cancel a Calendar event

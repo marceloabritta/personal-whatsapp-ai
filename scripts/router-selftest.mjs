@@ -32,7 +32,14 @@ for (const e of await readdir(SKILLS_DIR, { withFileTypes: true })) {
     pathToFileURL(path.join(SKILLS_DIR, e.name, "skill.js")).href
   );
   if (mod.manifest?.id) {
-    catalog.push({ id: mod.manifest.id, description: mod.manifest.description || "" });
+    // `inputs` too — the router prompt now carries each skill's DECLARED INPUTS and its
+    // extraction rulebook. A catalog without them would build a prompt production never sends,
+    // and this test would be checking the wrong thing (card 9af6967a).
+    catalog.push({
+      id: mod.manifest.id,
+      description: mod.manifest.description || "",
+      inputs: mod.manifest.inputs || null,
+    });
   }
 }
 console.log(`catalog: ${catalog.map((c) => c.id).join(", ")}\n`);

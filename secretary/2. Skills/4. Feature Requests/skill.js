@@ -34,8 +34,12 @@ import { headerFor } from "../../1. Orchestrator/lib/identity.js";
 import { frame } from "../../1. Orchestrator/lib/format.js";
 import { jsonFormat, readReply, readText } from "../../1. Orchestrator/lib/llm.js";
 
+// `inputs: null` — NO declared inputs (see 1. Orchestrator/lib/inputs.js). This skill opens its
+// own clarifying conversation, so there is nothing for the router's merged call to pre-extract,
+// and nothing may be handed to it: a task with no declaration is never given a payload.
 export const manifest = {
   id: "feature_request",
+  inputs: null,
   description:
     "capture and spec out a NEW FEATURE / product idea the owner wants to build: hold a " +
     "clarifying conversation, then produce a Markdown spec document delivered as a file. " +

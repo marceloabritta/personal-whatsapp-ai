@@ -174,10 +174,17 @@ export const EDIT_REVIEW_SCHEMA = {
   },
 };
 
-export function buildSystem(OWNER_NAME) {
-  return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data. (Your reply's shape is enforced separately — here, focus on getting the values right.)
-
-Choosing "action":
+// The skill's own extraction RULEBOOK — everything buildSystem() says after its opening line.
+// It lives on its own because it is used TWICE, and it must be the SAME text both times:
+//   - buildSystem(), below, for this skill's dedicated interpret() call (the fallback);
+//   - the orchestrator's merged router+extractor call, which carries it VERBATIM as the
+//     rulebook of `manifest.inputs` (skill.js). The router does not read it or reword it —
+//     it is opaque text to the orchestrator, which is what keeps the orchestrator generic.
+// Carried whole, the merged call keeps a nameless guest on a terse order; a trimmed rulebook
+// DROPS her, and a dropped guest is a person who is silently never invited. Do not trim it to
+// "just the fields the router needs", and do not reword it in one place only.
+export function buildExtractionRules(OWNER_NAME) {
+  return `Choosing "action":
 - "create": ${OWNER_NAME} wants to schedule/create a NEW meeting or event.
 - "delete": ${OWNER_NAME} wants to cancel/delete/remove an EXISTING event. This
   almost always happens when the order is a REPLY to a message that contains a
@@ -239,6 +246,12 @@ For action="list", resolve the time WINDOW the question implies and set list_mod
 
 For EVERY action other than "list", set list_mode=null, range_start_iso=null, and
 range_end_iso=null.`;
+}
+
+export function buildSystem(OWNER_NAME) {
+  return `You are ${OWNER_NAME}'s calendar assistant. Read the conversation, the order, and any replied-to (quoted) message, then decide the calendar ACTION and extract its data. (Your reply's shape is enforced separately — here, focus on getting the values right.)
+
+${buildExtractionRules(OWNER_NAME)}`;
 }
 
 // ---- Continuation: judge whether a message answers a pending confirmation ----

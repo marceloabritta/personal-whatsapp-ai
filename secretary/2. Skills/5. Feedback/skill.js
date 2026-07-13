@@ -35,8 +35,12 @@ import {
   appendToReport,
 } from "../../1. Orchestrator/lib/selflearning.js";
 
+// `inputs: null` — NO declared inputs (see 1. Orchestrator/lib/inputs.js). This skill re-reads
+// the conversation itself, so there is nothing for the router's merged call to pre-extract, and
+// nothing may be handed to it: a task with no declaration is never given a payload.
 export const manifest = {
   id: "feedback",
+  inputs: null,
   description:
     "the owner is telling you that YOU, the secretary, did something WRONG — a mistake, a " +
     "false positive, a wrong answer, bad behaviour. Use for 'you made a mistake', 'that's " +

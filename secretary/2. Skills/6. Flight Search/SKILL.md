@@ -241,6 +241,13 @@ vanish. Every unreadable answer (`isError`, a shape we can't parse, nothing judg
 
 ## Files
 
+**`manifest.inputs`** — this skill **declares** its required inputs (`intent`, `origin`,
+`destination`, `depart_date`, `return_date`, `adults`, `cabin`, `summary`) so the orchestrator's
+merged router call can pre-extract them (`1. Orchestrator/lib/inputs.js`). It does **not yet
+consume `ctx.info`**: it still makes its own extraction call. Adopting the pre-extracted payload
+needs its own live accuracy check and is a follow-up card — only this skill's *routing* has been
+measured under the merged prompt, never its payload accuracy.
+
 | File | What's in it |
 |---|---|
 | `skill.js` | `manifest` + `run`, the C1/C2 recognition, the slot chase, confirm/modify, the Kiwi client, **`selectOptions` (the filter → sort → take-3 order)**, the stash lifecycle, `answerLink`. |

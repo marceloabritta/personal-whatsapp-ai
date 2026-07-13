@@ -26,6 +26,8 @@ import {
   contactName,
 } from "./lib/whatsapp.js";
 import { createSessions } from "./lib/sessions.js";
+import { withThinkingDefault } from "./lib/llm.js";
+import { checkPayload } from "./lib/inputs.js";
 import { TAGS, headerFor, isOwnMessage, matchedTag } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
 import { route } from "./router/router.js";
@@ -56,7 +58,11 @@ const OWNER_NAME = process.env.OWNER_NAME || "User";
 // detected language is handled by the LLM-translation fallback in send().
 const MAINTAINED_LANGS = new Set(["en", "pt"]);
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// THE one Anthropic client, handed to everything via ctx.anthropic. It is WRAPPED so every
+// call site defaults to thinking:{type:"disabled"} — we throw every thinking block away
+// (lib/llm.js readText), so generating them was pure latency. Wrapping it here, at the single
+// door, is what makes the fix inherited rather than remembered. See lib/llm.js.
+const anthropic = withThinkingDefault(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
 const evolution = createEvolution({
   url: EVOLUTION_URL,
   apikey: APIKEY,
@@ -103,7 +109,15 @@ async function loadSkills() {
         continue;
       }
       skills[id] = mod.run;
-      catalog.push({ id, description: mod.manifest.description || "" });
+      // `inputs` is the skill's DECLARED input contract (manifest.inputs, may be null). The
+      // router asks the model to fill it in the same call that classifies the order; the
+      // orchestrator only ever handles it as opaque text + a declaration to validate against.
+      // See lib/inputs.js.
+      catalog.push({
+        id,
+        description: mod.manifest.description || "",
+        inputs: mod.manifest.inputs || null,
+      });
       if (mod.capabilities && typeof mod.capabilities === "object") {
         caps[id] = mod.capabilities;
         console.log(
@@ -406,12 +420,31 @@ app.post("/webhook", async (req, res) => {
     // FRESH COMMAND: a new tagged order overrides any pending session.
     if (session) await sessions.clear(remoteJid);
 
-    // ROUTER: decide which skill(s) to run — and detect the conversation language.
+    // ROUTER: decide which skill(s) to run, detect the conversation language — and, in the
+    // SAME call, extract the chosen skill's declared inputs.
     let tasks;
+    let infoFor = null; // the ONE task allowed to receive the extracted payload
+    let routedInfo = null;
     try {
       const routed = await route(ctx);
       tasks = routed.tasks;
       ctx.lang = routed.lang || ctx.lang; // reply in the detected language
+      routedInfo = routed.info;
+
+      // The merged call extracted the FIRST task's declared inputs. PLAIN CODE — no AI —
+      // decides whether the payload is usable. Shape-invalid (or a task that declares
+      // nothing) => the skill re-extracts for itself, which is the old path, unchanged.
+      // Shape-VALID but incomplete => hand it over anyway: the skill's own clarification
+      // pass fills the gaps exactly as it does today.
+      //
+      // Scoping it to tasks[0] is not a detail. On a dual-intent turn the payload belongs to
+      // the FIRST skill; a second skill must be handed null and extract for itself. Handing a
+      // skill someone else's payload is how you act on the wrong data.
+      const primary = CATALOG.find((c) => c.id === tasks[0]);
+      const gate = checkPayload(primary?.inputs, routedInfo);
+      infoFor = gate.shapeOk ? tasks[0] : null;
+      if (!gate.shapeOk && routedInfo)
+        console.log("ROUTER payload withheld:", gate.problems.join("; "));
     } catch (e) {
       console.error("Router error:", e);
       await send(number, orch(ctx.lang, "routerError"), ctx.lang);
@@ -438,6 +471,10 @@ app.post("/webhook", async (req, res) => {
       const run = SKILLS[task];
       if (!run) continue;
       ctx._turn.skill = task; // so a soft report names the skill, not just "soft"
+      // The pre-extracted payload, for the ONE task it belongs to and no other. Every other
+      // skill sees null and extracts for itself — which is exactly what it does today, so a
+      // skill that ignores ctx.info is behaviourally untouched by all of this.
+      ctx.info = task === infoFor ? routedInfo : null;
       try {
         await run(ctx);
       } catch (e) {

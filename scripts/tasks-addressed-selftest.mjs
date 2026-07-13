@@ -296,10 +296,14 @@ const CASES = [
 
 // The call MUST mirror production exactly (skill.js:127-145): same max_tokens, same
 // output_config, and NO temperature. A fixture that is easier than production proves nothing.
+// `thinking` too: this script builds its OWN raw Anthropic client, so it does not inherit
+// server.js's withThinkingDefault() wrapper — production sends thinking:{type:"disabled"} on
+// every call, and a fixture that let the model think would no longer be mirroring it.
 async function planFor(anthropic, c) {
   const msg = await anthropic.messages.create({
     model: MODEL,
     max_tokens: 1500,
+    thinking: { type: "disabled" },
     system: buildPlanSystem(OWNER, { addressed: c.addressed }),
     output_config: jsonFormat(PLAN_SCHEMA),
     messages: [

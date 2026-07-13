@@ -1,13 +1,22 @@
 // ============================================================================
-//  router/router.js  —  ROUTER LOGIC.
-//  Calls Claude with the classification prompt and returns the list of tasks,
-//  validated against the catalog of skills discovered by the orchestrator.
+//  router/router.js  —  ROUTER + EXTRACTOR LOGIC.
+//  Calls Claude ONCE with the merged prompt and returns the list of tasks (validated
+//  against the catalog of skills discovered by the orchestrator), the conversation
+//  language, and the FIRST task's declared inputs as an `info` payload.
+//
+//  There is NO output_config on this call: the reply format is demanded in the prompt, which
+//  is what keeps the orchestrator generic (see router/prompt.js). Two consequences:
+//    - parseJsonReply below is now LOAD-BEARING, not a fallback. ~4% of merged replies leak a
+//      line of prose before the JSON and are recovered by its balanced-brace scan. Do not
+//      remove it and do not "simplify" it.
+//    - nothing but the prompt enforces the shape any more. An unparseable reply degrades to
+//      tasks:["other"], which server.js already answers with "I didn't understand" AND a
+//      self-learning report. That existing path is the schema-drift alarm.
 // ============================================================================
-import { buildRouterSystem, buildRouterUser, ROUTER_SCHEMA } from "./prompt.js";
+import { buildRouterSystem, buildRouterUser } from "./prompt.js";
 
-// Robustly pull a JSON object out of an LLM reply (fallback for the rare case the
-// API doesn't honor output_config — refusal, or a model without structured-output
-// support). Extracts the FIRST balanced {...}. Returns the object or null.
+// Robustly pull a JSON object out of an LLM reply. Extracts the FIRST balanced {...},
+// tolerating ```json fences and stray prose. Returns the object or null.
 function parseJsonReply(out) {
   if (!out) return null;
   let s = String(out).trim();
@@ -42,8 +51,12 @@ function parseJsonReply(out) {
   return null;
 }
 
-// ctx: { owner, anthropic, model, order, transcript, hasQuotedAudio, catalog }
-// -> { tasks: string[], lang: string, reason: string }
+// ctx: { owner, anthropic, model, order, transcript, nowStr, contact, hasQuotedAudio,
+//        quoted, catalog }
+// -> { tasks: string[], lang: string, info: object | null }
+//    `info` is the FIRST task's declared inputs, as the model filled them. It is NOT trusted
+//    here: server.js runs it through the plain-code gate (lib/inputs.js) before any skill sees
+//    it. This function's job is to return what came back, not to judge it.
 export async function route(ctx) {
   const {
     owner,
@@ -51,6 +64,8 @@ export async function route(ctx) {
     model,
     order,
     transcript,
+    nowStr,
+    contact,
     hasQuotedAudio,
     quoted,
     catalog,
@@ -63,18 +78,21 @@ export async function route(ctx) {
     transcript,
     hasQuotedAudio,
     hasQuotedCalendarLink: !!quoted?.calendarLink,
+    nowStr,
+    contact,
+    quotedText: quoted?.text || null,
   });
 
+  // 1024, not 200: the reply now carries a payload as well as a classification (measured
+  // median output: 169 tokens). With thinking disabled the budget can no longer be eaten by
+  // reasoning, which is what makes this safe — and is why the thinking fix ships first.
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 200,
+    max_tokens: 1024,
     system,
-    output_config: { format: { type: "json_schema", schema: ROUTER_SCHEMA } },
     messages: [{ role: "user", content: user }],
   });
 
-  // Structured outputs guarantee schema-valid JSON; parseJsonReply is the fallback
-  // for a refusal (empty/partial) or a model swapped to one without support.
   let parsed = null;
   if (msg?.stop_reason === "refusal") {
     console.error("router: model refused the request");
@@ -97,5 +115,5 @@ export async function route(ctx) {
       ? parsed.lang.trim().toLowerCase()
       : "en";
 
-  return { tasks, lang, reason: parsed?.reason || "" };
+  return { tasks, lang, info: parsed?.info ?? null };
 }

@@ -84,25 +84,41 @@ Sent **twice** — once as `{ "where": { "key": { "remoteJid": "…" } } }` and 
 > which is what makes the merge correct. Those 50 are raw rows, though, including non-text
 > protocol noise, so a busy chat's usable transcript can be far thinner than 30 messages.
 
-### 3. secretary → Claude (router)
+### 3. secretary → Claude (router — it CLASSIFIES **and** EXTRACTS, in ONE call)
 
 ```
 POST https://api.anthropic.com/v1/messages   (via @anthropic-ai/sdk)
 ```
-Sent: the router system prompt (the live skill catalog) plus a user message with the
-order, the transcript and whether a quoted audio is present. The router is
-schema-enforced (`output_config.format` with `ROUTER_SCHEMA`) and returns:
+Sent: the router system prompt — the live skill catalog, **each skill's declared inputs
+(`manifest.inputs`) and its own extraction rulebook** — plus a user message with the order, the
+transcript, the current date/time, the contact and any quoted message. It returns:
 ```json
-{ "tasks": ["calendar_action"], "lang": "pt", "reason": "..." }
+{ "tasks": ["calendar_action"], "lang": "pt", "info": { "action": "create", "...": "..." } }
 ```
 `lang` is the detected conversation language (ISO code; default `"en"`) — it rides in
 `ctx.lang` so the whole system replies in that language (see the localization note under
-"Adding a skill"). Only the content of that one conversation leaves for Anthropic, and only
-at that moment.
+"Adding a skill"). `info` is the **first** task's declared inputs, already extracted.
 
-### 4. secretary → Claude (skill: calendar_action)
+**This call sends NO `output_config`. The reply format is demanded in the prompt, and that is
+deliberate.** A schema-enforced merged call would mean the orchestrator importing each skill's
+JSON Schema to build it — **the router would then know what a calendar is.** It must not: it
+renders each skill's declaration as opaque text and validates the reply *against that
+declaration* (`lib/inputs.js`), never against a schema it had to understand. The price we pay
+knowingly: nothing but a prompt instruction now enforces the reply's shape. An unparseable reply
+falls back to `["other"]` → "I didn't understand" **+ a self-learning report**, which is the
+alarm. `router.js`'s balanced-brace scanner is therefore **load-bearing**, not a nicety.
 
-A second call, with the calendar skill's own prompt, extracts:
+Then **plain code — no AI** — checks the payload (`checkPayload`): is it an object, are the
+declared fields present and well-typed? If yes it reaches the skill as **`ctx.info`** and the
+skill acts without a second round-trip. If not, the skill falls back to its own extraction call
+(step 4) — so the worst case is *correct but slow*, never *fast and wrong*. Only the content of
+that one conversation leaves for Anthropic, and only at that moment.
+
+### 4. secretary → Claude (skill: calendar_action) — now the FALLBACK, not the norm
+
+This call only runs when the merged call above did **not** hand the skill a usable payload (a
+shape-invalid `info`, or a dual-intent turn where the payload belonged to another skill). With
+the skill's own prompt, it extracts:
 ```json
 {
   "action": "create",
@@ -113,6 +129,8 @@ A second call, with the calendar skill's own prompt, extracts:
   "summary": "Meeting with Alex, tomorrow 2pm."
 }
 ```
+— **the same field names the merged call returns**, which is exactly what makes the merged
+payload a drop-in and leaves `handleCreate`/`handleDelete`/`handleEdit`/`handleList` untouched.
 `action` is `"create"`, `"delete"`, `"edit"`, or `"list"` — the skill can create a new
 event, cancel/delete an existing one, edit/reschedule one (reply to the invite **or** the
 summary/confirm bubble with a change — the target is matched like delete, by decoded link
@@ -271,11 +289,51 @@ endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store; defaults to
 
 Create `secretary/2. Skills/<Your Skill>/skill.js`:
 ```js
-export const manifest = { id: "unique_id", description: "what it does (the router reads this)" };
+export const manifest = {
+  id: "unique_id",
+  description: "what it does (the router reads this)",
+  inputs: null,          // or a declaration — see "Declaring your inputs" below
+};
 export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ctx.lang, ... */ }
 export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — see "Composing skills"
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
+
+### Declaring your inputs (`manifest.inputs`) — one fewer round-trip
+
+A skill that needs data extracted from the order can **declare** it. The router then fills that
+declaration in the **same call** that classifies the order, plain code validates the reply
+against it (`lib/inputs.js`), and a valid payload arrives on **`ctx.info`**:
+
+```js
+inputs: {
+  discriminator: "action",                       // the field whose value picks the required set
+  fields: { action: { type: "enum", enum: [...], desc: "…" }, /* … */ },
+  requiredWhen: { create: ["start_iso"] },       // "must be non-null before we can act"
+  consistency: [{ name: "…", test: (i) => true }],  // your own plain-code sanity rules
+  rulebook: () => buildExtractionRules(owner),   // your extraction prose, carried VERBATIM
+}
+export async function run(ctx) {
+  let info = ctx.info ?? null;                   // the router already extracted it
+  if (!info) info = await interpret(ctx);        // …or it didn't: fall back to your own call
+}
+```
+
+`desc` is not documentation — **it is the prompt**, and so is `rulebook()`. Both are rendered
+straight into the merged system prompt. **`inputs: null` is a perfectly good answer** ("no
+inputs; I read the conversation myself"), and such a skill is never handed a payload. A skill
+that ignores `ctx.info` behaves exactly as it did before any of this existed.
+
+**Two rules, and both have already bitten:**
+- **`ctx.info` is scoped to `tasks[0]`, and to nobody else.** On a dual-intent turn
+  (`["feedback","calendar_action"]`) the payload belongs to *feedback*; every other skill is
+  handed `null` and extracts for itself. Handing a skill someone else's payload is how you book
+  the wrong meeting.
+- **If your `fields` mirror a JSON Schema you also send elsewhere, they must stay in lockstep
+  forever, and nothing in the language enforces it.** Add a field to the schema and forget the
+  declaration and the merged prompt silently stops asking for it — the feature dies with no test
+  going red. `calendar_action` keeps them honest with a static set-equality lint
+  (`scripts/turn-latency-selftest.mjs` T2.10). **Write one.**
 
 **Send failures with `ctx.sendFailure`, not `ctx.send`.** A reply that means *"you asked me to
 do something and I did not do it"* — an API error, "something went wrong", a batch that only
@@ -297,7 +355,8 @@ still live in the others. Reach for them before writing your own:
 
 | Module | Exports | Use it for |
 | --- | --- | --- |
-| `llm.js` | `jsonFormat`, `readReply`, `readText`, `parseJsonReply` | Any Claude call that must return JSON. `jsonFormat(SCHEMA)` → `output_config`; `readReply(msg, "<skill>")` → the parsed object, or `null` on a refusal/truncated reply (it logs `stop_reason` + size). Never hand-parse a model reply. |
+| `llm.js` | `jsonFormat`, `readReply`, `readText`, `parseJsonReply`, `withThinkingDefault` | Any Claude call that must return JSON. `jsonFormat(SCHEMA)` → `output_config`; `readReply(msg, "<skill>")` → the parsed object, or `null` on a refusal/truncated reply (it logs `stop_reason` + size). Never hand-parse a model reply. `withThinkingDefault(client)` wraps the SDK client so every call defaults to `thinking: {type:"disabled"}` — **`server.js` already applies it to the one shared client, so a skill inherits it and never calls this itself.** (Extended thinking is on by default and we discard every thinking block; we were paying latency for output nobody reads. A call site that genuinely wants reasoning passes its own `thinking`, and the wrapper leaves it alone.) |
+| `inputs.js` | `describeInputs`, `checkPayload` | The **declared-inputs contract** that lets the router extract a skill's inputs in the same call that classifies the order. `describeInputs(catalog)` renders each skill's declaration as prompt text; `checkPayload(inputs, info)` is the **plain-code, no-AI** gate — `{ shapeOk, ok, problems }`. It knows about *declarations*, never about skills. You almost never call this directly: declare `manifest.inputs` and read `ctx.info`. |
 | `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
 | `identity.js` | `headerFor`, `TAGS`, `isOwnMessage`, `matchedTag` | The trigger tags and the reply header. |
