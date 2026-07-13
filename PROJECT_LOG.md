@@ -465,8 +465,8 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
-- **2026-07-13 — the owner can change the tag he summons her with, by asking her (BUILT, not yet
-  deployed — expedited card 793566bd).** `@assistant, change your tag to @assist` → she **deduces**
+- **2026-07-13 — the owner can change the tag he summons her with, by asking her (SHIPPED, DEPLOYED
+  — expedited card 793566bd).** `@assistant, change your tag to @assist` → she **deduces**
   whether the other language's call should change too, **states the reasoning in prose** and the
   **complete** new tag list, and asks. On `yes` it is applied live and persisted; the old tags stop
   working. New skill `assistant_settings` (`2. Skills/7. Assistant Settings/`), new durable store
@@ -495,6 +495,15 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   she will not apply anything on a maybe: `lib/confirm.js` returns `"unrelated"` on any doubt, which
   is a no-op. Guarded by `scripts/settings-tag-selftest.mjs` (apply→live→persist, offline) and
   assertion 9 of `scripts/identity-selftest.mjs` (the prefix trap).
+
+  **Verified against the live router before it was switched on** (the offline suite structurally
+  cannot: the router is a prompt). On the droplet, with the real model and the real catalog:
+  `scripts/router-selftest.mjs` PASS (13/13 — the new manifest steals none of the existing orders),
+  and `"change your tag to @assist"` / `"muda sua tag para @assist"` both route to
+  `assistant_settings`, not to `feature_request` — which was the one way this feature could have
+  shipped silently broken. Persistence proved on the box too: a stored list beat the `SECRETARY_TAG`
+  seed across a restart (`tags: … (source: stored setting)`), and `redis-cli DEL
+  secretary:settings:tags` + restart put it back on the seed.
 
 - **2026-07-13 — The secretary got slow: a fresh calendar order took 16–23s to reply, as unbroken
   silence (SHIPPED, DEPLOYED — maintenance card 9af6967a).** It used to be ~6.5s. **Two causes,
