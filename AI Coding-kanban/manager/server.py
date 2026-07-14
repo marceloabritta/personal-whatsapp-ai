@@ -9,16 +9,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
+import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import policy
 from . import update as updater
 from .journal import Journal
 from .logs import setup_logging
-from .models import PLAN
-from .manager import Manager, ManagerConfig
+from .models import BACKLOG, KINDS, PLAN
+from .manager import POLICY_KEY, Manager, ManagerConfig
 from .recovery import Recovery
 from .version import SYSTEM_DIR, system_version
 from .workspace import load_env, resolve
@@ -27,6 +30,15 @@ log = logging.getLogger("manager")
 
 # The SYSTEM side. Code and UI only — replaced wholesale on every update.
 WEB_DIR = os.path.join(SYSTEM_DIR, "web")
+
+# The version of the code THIS PROCESS IS RUNNING — read once, at import.
+#
+# `system_version()` re-reads the VERSION file on every call, so a server that has been up
+# since 0.11.0 would cheerfully report 0.11.1 the moment the file changed on disk. During a
+# ship — the one moment you are actually asking "did the new code land?" — it answers about
+# the disk instead of about itself. It fooled me while shipping this very change.
+RUNNING_VERSION = system_version()
+
 
 # The REPO the manager works on, and the WORKING FOLDER that holds this project's state.
 # Neither is derived from where this file happens to sit: see manager/workspace.py.
@@ -38,6 +50,29 @@ load_env(WORKSPACE)  # so `uvicorn manager.server:app` sees the same config as .
 # Kept as module-level names because tests and tools import them.
 DATA_DIR = WORKSPACE.data_dir
 WORKERS_DIR = WORKSPACE.workers_dir
+
+# Dropped on disk when the server is going down IN ORDER TO COME BACK. `python -m manager`
+# sees it after uvicorn stops and re-execs itself into the new code. Without it a SIGTERM is
+# just a SIGTERM — which is what you want when someone actually means "stop".
+RESTART_SENTINEL = os.path.join(WORKSPACE.path, ".restart")
+
+# How the board asks the process to stop.
+#
+# NOT a signal. `uvicorn.run()` does not return after SIGTERM — it re-raises the signal once
+# it has shut down gracefully, so the process dies at exit code 143 and anything you wrote
+# after `uvicorn.run(...)` never executes. That is exactly where the "restart into the new
+# code" step lives, so a SIGTERM restart is a restart that never comes back.
+#
+# `__main__` sets this to uvicorn's own `should_exit` flag, which makes `run()` return
+# normally and lets the process go on to re-exec itself.
+EXIT_HOOK = None
+
+
+def request_exit() -> None:
+    if EXIT_HOOK is not None:
+        EXIT_HOOK()
+    else:  # no hook (e.g. `uvicorn manager.server:app` by hand) — a signal is all we have
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 class Hub:
@@ -105,6 +140,11 @@ def create_app() -> FastAPI:
         if not notes:
             log.info("recovery: nothing was in flight — clean start")
 
+        # Anything the human sent WHILE we were being updated was written to disk rather
+        # than started. Now that we are back, send it.
+        for n in await manager.dispatch_pending(spawn):
+            log.warning("pending: %s", n)
+
     def err(msg: str, code: int = 400):
         return JSONResponse({"error": msg}, status_code=code)
 
@@ -123,6 +163,142 @@ def create_app() -> FastAPI:
 
         task.add_done_callback(done)
 
+    # ---- shipping: drain, then restart. Never kill work. ---------------
+    # The old way to ship an update was to kill the process and let recovery pick up the
+    # pieces. Recovery works, but it is a seatbelt: a run killed mid-flight loses the turn it
+    # was in — the worker that was halfway through a task, and everything it had not yet
+    # written. That was happening on EVERY update. So: stop taking new work, wait for the
+    # in-flight runs to finish, and only then go down. See manager/shipping.py.
+    def _inflight_json() -> dict:
+        runs = manager.inflight()
+        now = time.time()
+        return {
+            "draining": manager.draining,
+            "count": len(runs),
+            "pending": len(manager.pending),
+            "runs": [
+                {
+                    "kind": r.kind,
+                    "target": r.target_id,
+                    "label": _run_label(r),
+                    "seconds": max(0, int(now - r.started_at)),
+                }
+                for r in runs
+            ],
+        }
+
+    def _run_label(r) -> str:
+        if r.kind == "card":
+            c = board.cards.get(r.target_id)
+            if not c:
+                return r.target_id
+            # Where the card is NOW — not `r.column`, which is where it was when the run was
+            # dispatched. A run drives a card through several columns, so the journal's copy
+            # goes stale within minutes and makes a healthy run look parked.
+            col = board.pipelines.get(c.column)
+            return f"{c.title} ({col.title if col else 'backlog'})"
+        if r.kind == "worker":
+            return f"worker chat: {r.target_id}"
+        m = board.managers.get(r.target_id)
+        return f"board chat with {m.name}" if m else r.target_id
+
+    @app.get("/api/inflight")
+    async def get_inflight():
+        return JSONResponse(_inflight_json())
+
+    # ---- "an update is available. restart when you like." ---------------
+    # The board does NOT stop taking work because new code exists. It carries on, and offers
+    # a button. Draining pre-emptively — the old shape — meant the human sat behind a queue
+    # for work they had not asked to pause, which is a worse tax than the update itself.
+    #
+    # When they click: finish what is running, restart, resume. Nothing is killed, and the
+    # only window in which anything queues is the one they opened on purpose.
+    @app.get("/api/update")
+    async def update_available():
+        on_disk = system_version()
+        return JSONResponse(
+            {
+                "running": RUNNING_VERSION,
+                "on_disk": on_disk,
+                "available": on_disk != RUNNING_VERSION,
+                "restarting": os.path.exists(RESTART_SENTINEL),
+            }
+        )
+
+    @app.post("/api/restart")
+    async def restart_for_update():
+        """TELL THE WORKERS TO STOP, then restart, then pick every card back up.
+
+        Not "wait for them". A worker runs for many minutes, and waiting politely for jobs
+        nobody is waiting on turns a ten-second restart into a ten-minute one. They are
+        interrupted: what they wrote to the card folder is on disk, what they had not written
+        is gone, and the card resumes from the disk afterwards.
+
+        Returns immediately — the board stays up and usable while this happens, and the
+        manager keeps answering you.
+        """
+        runs = manager.begin_drain()
+        stopped = await manager.stop_workers()
+        await hub.broadcast({"type": "draining", "draining": True, "restarting": True})
+        log.warning(
+            "restart requested: told %d worker(s) to stop; %d run(s) winding down",
+            stopped, len(runs),
+        )
+
+        async def _wait_then_restart():
+            while True:
+                while manager.inflight():
+                    await asyncio.sleep(2)     # they FINISH. We do not cut them off.
+                # Commit to going down — from HERE, and only here, a message has to be queued,
+                # because there will be nothing left to act on it. Then look once more: a run
+                # may have started in the gap, and cutting it off is the one thing we promised
+                # never to do.
+                manager.stopping = True
+                await asyncio.sleep(0.5)
+                if not manager.inflight():
+                    break
+                manager.stopping = False
+            log.warning("restart: everything finished; going down to come back up")
+            with open(RESTART_SENTINEL, "w", encoding="utf-8") as fh:
+                fh.write(system_version())
+            await hub.broadcast({"type": "shutdown"})
+            await asyncio.sleep(0.3)       # let the frame reach the browser
+            request_exit()                 # graceful — and `run()` RETURNS, so we can re-exec
+
+        asyncio.create_task(_wait_then_restart())
+        return JSONResponse(_inflight_json())
+
+    @app.post("/api/drain")
+    async def start_drain():
+        manager.begin_drain()
+        await hub.broadcast({"type": "draining", "draining": True})
+        return JSONResponse(_inflight_json())
+
+    @app.post("/api/undrain")
+    async def stop_drain():
+        manager.end_drain()
+        await hub.broadcast({"type": "draining", "draining": False})
+        return JSONResponse(_inflight_json())
+
+    @app.post("/api/shutdown")
+    async def shutdown(payload: dict | None = None):
+        """Go down cleanly. REFUSES while anything is still running, unless forced — the
+        whole point of this path is that it cannot be the thing that destroys work."""
+        force = bool((payload or {}).get("force"))
+        runs = manager.inflight()
+        if runs and not force:
+            return err(f"{len(runs)} run(s) still in flight — drain first", 409)
+        log.warning("shutdown requested (in flight: %d, forced: %s)", len(runs), force)
+        manager.stopping = True   # from here a message must be saved: nothing is left to run it
+        await hub.broadcast({"type": "shutdown"})
+
+        async def _bye():
+            await asyncio.sleep(0.25)  # let the response and the frame actually go out
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_bye())
+        return JSONResponse({"ok": True, "inflight": len(runs)})
+
     # ---- board / config ----------------------------------------------
     @app.get("/api/board")
     async def get_board():
@@ -139,7 +315,8 @@ def create_app() -> FastAPI:
             "mock_reason": config.mock_reason,
             "model": config.model or "(sdk default)",
             "permission_mode": config.permission_mode,
-            "system_version": system_version(),
+            "system_version": RUNNING_VERSION,   # what is RUNNING, not what is on disk
+            "version_on_disk": system_version(),  # what a restart would give you
             "schema_version": WORKSPACE.schema_version(),
         }
 
@@ -158,9 +335,26 @@ def create_app() -> FastAPI:
             title,
             (payload.get("description") or "").strip(),
             payload.get("manager_id"),
-            pipeline=payload.get("pipeline") or PLAN,
+            pipeline=payload.get("pipeline") or BACKLOG,
+            kind=payload.get("kind") or "",
         )
-        return JSONResponse({"id": card.id})
+        # Nobody said what it is → the manager decides, now. This is what makes "no card is
+        # left without a type" true, rather than merely intended.
+        if card.kind not in KINDS:
+            spawn(manager.triage_card(card.id), f"triage {card.id}")
+        return JSONResponse({"id": card.id, "kind": card.kind})
+
+    @app.post("/api/card/{card_id}/route")
+    async def route_card(card_id: str, payload: dict):
+        c = await board.route_card(card_id, (payload.get("pipeline") or "").strip().lower())
+        return JSONResponse({"pipeline": c.pipeline}) if c else err(
+            "cannot route: unknown pipeline, or the card still has no type", 400
+        )
+
+    @app.post("/api/card/{card_id}/backlog")
+    async def unroute_card(card_id: str):
+        c = await board.send_to_backlog(card_id)
+        return JSONResponse({"ok": bool(c)})
 
     @app.post("/api/card/{card_id}/move")
     async def move_card(card_id: str, payload: dict):
@@ -227,6 +421,24 @@ def create_app() -> FastAPI:
         return JSONResponse({"ok": ok}) if ok else err("cannot delete the last manager")
 
     # ---- columns ------------------------------------------------------
+    # ---- the manager's own brain: <workspace>/MANAGER.md ---------------
+    @app.get("/api/policy")
+    async def get_policy():
+        return JSONResponse(
+            {
+                "markdown": policy.read(WORKSPACE.path),
+                "path": policy.path_for(WORKSPACE.path),
+            }
+        )
+
+    @app.put("/api/policy")
+    async def put_policy(payload: dict):
+        md = payload.get("markdown", "")
+        if not (md or "").strip():
+            return err("refusing to erase your standing orders entirely")
+        path = policy.write(WORKSPACE.path, md)
+        return JSONResponse({"ok": True, "path": path})
+
     @app.patch("/api/pipeline/{pipeline}")
     async def update_pipeline(pipeline: str, payload: dict):
         color = await board.set_pipeline_color(pipeline, payload.get("color", ""))
@@ -338,7 +550,7 @@ def create_app() -> FastAPI:
 
         elif kind == "worker_open":
             key = data.get("key") or ""
-            if manager.board.pipelines.by_slug(*key.partition("/")[::2]):
+            if key == POLICY_KEY or board.pipelines.by_slug(*key.partition("/")[::2]):
                 await ws.send_json(board.worker_chat_view(key))
 
         elif kind == "trash_open":
@@ -347,12 +559,18 @@ def create_app() -> FastAPI:
         elif kind == "create":
             title = (data.get("title") or "").strip()
             if title:
-                await board.add_card(
+                card = await board.add_card(
                     title,
                     (data.get("description") or "").strip(),
                     data.get("manager_id"),
-                    pipeline=data.get("pipeline") or PLAN,
+                    pipeline=data.get("pipeline") or BACKLOG,
+                    kind=data.get("kind") or "",
                 )
+                if card.kind not in KINDS:
+                    spawn(manager.triage_card(card.id), f"triage {card.id}")
+
+        elif kind == "backlog":
+            await board.send_to_backlog(data["card_id"])
 
         elif kind == "move":
             await board.move_card(data["card_id"], data["column"])
@@ -386,7 +604,7 @@ def create_app() -> FastAPI:
         elif kind == "worker_message":
             key, text = data.get("key") or "", (data.get("text") or "").strip()
             if key and text:
-                spawn(manager.handle_worker_message(key, text), f"worker {key} run")
+                spawn(manager.handle_prompt_message(key, text), f"prompt {key} run")
 
         else:
             log.warning("ignoring unknown websocket frame: %r", kind)

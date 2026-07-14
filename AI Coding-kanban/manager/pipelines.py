@@ -18,6 +18,7 @@ import re
 from .models import (
     BUILD,
     DEFAULT_PIPELINE_COLORS,
+    EXPED,
     MAINT,
     PLAN,
     PIPELINES,
@@ -58,6 +59,18 @@ DEFAULT_COLUMNS: dict[str, list[tuple[str, str, bool]]] = {
         ("Exploring", "exploring", False),  # ROOT CAUSE, not a symptom
         ("Plan Fix", "plan-fix", False),
         ("Plan Ready to Build", "plan-ready-to-build", True),  # GATE: human approves the fix
+    ],
+    # The fast lane. One pipeline end to end — scope, plan, build, ship — for work that does
+    # not need the full ceremony. It takes BOTH kinds: a small feature and a small fix.
+    #
+    # The two gates are the whole reason it is allowed to be fast. Speed is bought by cutting
+    # STEPS, never by cutting the human out: you approve the plan before any code is written,
+    # and you approve the build before anything is committed, pushed or deployed.
+    EXPED: [
+        ("Scope", "scope", False),
+        ("Plan", "plan", True),  # GATE: the human approves the plan before a line is written
+        ("Build", "build", True),  # GATE: the human approves the build before it ships
+        ("Shipped", "shipped", False),
     ],
     BUILD: [
         ("Preflight", "preflight", False),

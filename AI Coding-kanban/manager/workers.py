@@ -418,6 +418,40 @@ class WorkerStore:
         if base and os.path.exists(base):
             os.remove(base)  # the column is gone; there is nothing left to merge against
 
+    # ---- running a worker as its OWN conversation ---------------------
+    def runtime(self, col: Column) -> dict:
+        """Everything needed to run this column's worker as a STANDALONE query.
+
+        This is the difference between the old design and the new one. A worker used to be an
+        `AgentDefinition` handed to the manager's own query — which meant the worker ran
+        INSIDE the manager's session, and the manager sat there occupied for the whole of it.
+        A twenty-minute coder meant a twenty-minute busy manager, and the human asking him a
+        question got queued behind a job he was not actually doing.
+
+        Now the worker is its own conversation, with its own tools, and the manager is idle
+        while it runs. Same prompt either way — see definitions(), which still exists for the
+        contract the UI shows.
+        """
+        w = self.ensure(col)
+        return {
+            "name": w.agent_name,
+            "title": w.title,
+            "prompt": f"{WORKER_PREAMBLE}\n{resolve_tokens(w.instructions.strip(), self.root)}\n{REPORT_PROTOCOL}",
+            "tools": list(w.tools),
+            "model": w.model,
+        }
+
+    def by_agent_name(self, columns: list[Column], name: str) -> Column | None:
+        """Resolve what the manager asked to delegate to — by agent name, slug or title."""
+        want = (name or "").strip().lower()
+        if not want:
+            return None
+        for col in columns:
+            w = self.ensure(col)
+            if want in (w.agent_name.lower(), col.slug.lower(), col.title.lower()):
+                return col
+        return None
+
     # ---- agent definitions -------------------------------------------
     def definitions(self, columns: list[Column]) -> dict:
         """Build the AgentDefinition map the manager delegates to, from the files on disk.

@@ -23,9 +23,14 @@ import tempfile
 from typing import Awaitable, Callable
 
 from .models import (
+    BACKLOG,
     BUILD,
+    KINDS,
     ORIGIN_PIPELINES,
+    PIPELINES,
     PLAN,
+    ROUTABLE,
+    UNSET,
     Card,
     ChatMessage,
     Column,
@@ -138,15 +143,12 @@ class Board:
                 dirty = True
             if card.trashed:
                 continue
-            # A card whose column vanished (deleted, or an old data file) lands in an inbox —
-            # its OWN pipeline's, if it still has one. A maintenance card that loses its
-            # column is still a maintenance card; dropping it into the feature inbox would
-            # quietly relabel work the human classified themselves.
-            if not self.pipelines.get(card.column):
-                home = card.pipeline if card.pipeline in ORIGIN_PIPELINES else PLAN
-                first = self.pipelines.first(home)
-                card.pipeline, card.column = home, first.id
-                card.kind = kind_for_pipeline(home, card.kind)
+            # A card whose column vanished (deleted, or an old data file) goes BACK TO THE
+            # BACKLOG — unrouted, keeping its type. That is the honest answer now: it is a
+            # card nobody has placed. Dropping it into some pipeline's first column instead
+            # would be a guess, and it would put work into a flow the human never chose.
+            if card.pipeline != BACKLOG and not self.pipelines.get(card.column):
+                card.pipeline, card.column = BACKLOG, ""
                 dirty = True
             if self._ensure_card_dir(card):
                 dirty = True
@@ -192,13 +194,22 @@ class Board:
         """Absolute path of the card's folder."""
         return os.path.join(self.data_dir, card.dir)
 
+    def _backlog_dir(self) -> str:
+        return os.path.join(self.data_dir, CARDS_DIRNAME, BACKLOG)
+
     def _ensure_card_dir(self, card: Card) -> bool:
         """Make the card's folder exist at the location its column implies. Returns True
-        if anything changed on disk or on the card."""
+        if anything changed on disk or on the card.
+
+        A backlog card has no column, but it still gets a folder — the human may drop a
+        screenshot or a log in it long before anyone decides which pipeline it belongs to,
+        and the folder travels with the card when it is finally routed.
+        """
         col = self.pipelines.get(card.column)
-        if not col:
+        if not col and card.pipeline != BACKLOG:
             return False
-        want_abs = os.path.join(self._column_dir(col), card.folder_name())
+        parent = self._backlog_dir() if not col else self._column_dir(col)
+        want_abs = os.path.join(parent, card.folder_name())
         want_rel = self._rel(want_abs)
         have_abs = os.path.join(self.data_dir, card.dir) if card.dir else ""
 
@@ -249,6 +260,7 @@ class Board:
                     "stage": c.stage,
                     "gate": bool(col and col.gate),
                     "busy": c.busy,
+                    "working": c.working,
                     "error": c.error,
                     "dir": c.dir,
                     "artifacts": c.artifacts,
@@ -313,21 +325,36 @@ class Board:
         title: str,
         description: str = "",
         manager_id: str | None = None,
-        pipeline: str = PLAN,
+        pipeline: str = BACKLOG,
+        kind: str = "",
     ) -> Card:
-        """A card is born in an ORIGIN pipeline — plan (a feature) or maint (a fix).
+        """Every card is born in the BACKLOG, unrouted.
 
-        Never in build: nothing enters the build pipeline that has not been planned, and
-        that is a rule of the board, not a rule of the UI.
+        That is the whole point of the backlog: a card arrives as a request, and *which
+        pipeline it belongs down* is a decision — the manager's, or the human's — not
+        something the creation form should be quietly making for you.
+
+        `kind` may be left empty. The card is then `unset`, and the manager is expected to
+        classify it immediately (see Manager.triage_card). A card must not leave the backlog
+        still holding `unset`.
+
+        `pipeline` is still accepted so a caller can put a card straight into a pipeline —
+        the manager's routing does exactly that.
         """
         async with self._lock:
-            if pipeline not in ORIGIN_PIPELINES:
-                pipeline = PLAN
             card = Card.new(title, description)
-            first = self.pipelines.first(pipeline)
-            card.pipeline, card.column = pipeline, first.id
-            card.kind = kind_for_pipeline(pipeline)
-            card.stage = first.slug
+            # A card may be born in the backlog, or straight into a pipeline you can ROUTE
+            # to. Never into `build`: nothing reaches the build pipeline that has not been
+            # planned, and that is a rule of the board, not a convention of the UI.
+            if pipeline not in ROUTABLE:
+                card.pipeline, card.column = BACKLOG, ""
+                card.kind = valid_kind(kind) or UNSET
+                card.stage = "backlog"
+            else:
+                first = self.pipelines.first(pipeline)
+                card.pipeline, card.column = pipeline, first.id
+                card.kind = valid_kind(kind) or kind_for_pipeline(pipeline, UNSET)
+                card.stage = first.slug
             card.manager_id = (
                 manager_id if manager_id in self.managers else next(iter(self.managers))
             )
@@ -418,6 +445,57 @@ class Board:
             self._save()
         await self.broadcast_board()
 
+    async def append_note(self, card_id: str, text: str) -> ChatMessage | None:
+        """A decision, filed on the card. NOT a message to the human.
+
+        The manager's notes used to land in the chat with the same weight as something he
+        actually needed you to answer — so "document every decision" and "keep the chat
+        clean" were fighting each other, and the chat lost. A note is a record: it is kept,
+        it is readable, and it does not interrupt anyone.
+        """
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c:
+                return None
+            msg = ChatMessage(role="note", text=text)
+            c.thread.append(msg)
+            c.touch()
+            self._save()
+        await self._emit({"type": "message", "card_id": card_id, "message": msg.to_dict()})
+        return msg
+
+    async def set_stopped_worker(self, card_id: str, name: str, session_id: str | None) -> None:
+        """Remember a worker we stopped, so it can be RESUMED rather than restarted.
+
+        Stopping a worker is only acceptable because nothing it knew is thrown away: the
+        files it wrote are on disk, and this is the thread it was thinking in.
+        """
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c:
+                return
+            c.worker_name, c.worker_session = (name, session_id) if session_id else ("", None)
+            self._save()
+
+    async def clear_stopped_worker(self, card_id: str) -> None:
+        """It finished properly. There is nothing left to resume."""
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c or not (c.worker_session or c.worker_name):
+                return
+            c.worker_name, c.worker_session = "", None
+            self._save()
+
+    async def set_working(self, card_id: str, who: str) -> None:
+        """Who is actually working on this card right now. "" = the manager himself."""
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c or c.working == who:
+                return
+            c.working = who
+            self._save()
+        await self.broadcast_board()
+
     async def set_session(self, card_id: str, session_id: str) -> None:
         async with self._lock:
             c = self.cards.get(card_id)
@@ -484,9 +562,15 @@ class Board:
             origin = c.trashed_from or {}
             col = self.pipelines.get(origin.get("column", ""))
             if not col:
-                col = self.pipelines.first(
-                    c.pipeline if c.pipeline in ORIGIN_PIPELINES else PLAN
-                )
+                # Its column is gone, or it was in the backlog when it was trashed. Either
+                # way the honest place to put it back is the backlog — not a guessed column.
+                c.pipeline, c.column, c.stage = BACKLOG, "", "backlog"
+                c.trashed = False
+                self._ensure_card_dir(c)
+                c.touch()
+                self._save()
+                await self.broadcast_board()
+                return c
             c.pipeline, c.column = col.pipeline, col.id
             c.kind = kind_for_pipeline(col.pipeline, c.kind)
             c.stage = col.slug
@@ -571,6 +655,38 @@ class Board:
             {"type": "manager_message", "manager_id": manager_id, "message": msg.to_dict()}
         )
         return msg
+
+    async def route_card(self, card_id: str, pipeline: str) -> Card | None:
+        """Send a card OUT of the backlog and into the first column of a pipeline.
+
+        Refuses a card that still has no type. "No card leaves the backlog untyped" is the
+        one invariant this layer exists to hold, and enforcing it here — rather than trusting
+        the manager to remember — is the difference between an invariant and a hope.
+        """
+        c = self.cards.get(card_id)
+        if not c or pipeline not in ROUTABLE:
+            return None
+        if c.kind not in KINDS:
+            return None
+        return await self.move_card(card_id, self.pipelines.first(pipeline).id)
+
+    async def send_to_backlog(self, card_id: str) -> Card | None:
+        """Pull a card back out of a pipeline. It keeps its type and its folder."""
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c or c.pipeline == BACKLOG:
+                return None
+            c.pipeline, c.column, c.stage = BACKLOG, "", "backlog"
+            c.trashed = False
+            self._ensure_card_dir(c)
+            c.touch()
+            self._save()
+        await self.broadcast_board()
+        return c
+
+    def untyped_cards(self) -> list[str]:
+        """Cards nobody has classified. The manager owes each of these a decision."""
+        return [c.id for c in self.cards.values() if not c.trashed and c.kind not in KINDS]
 
     # ---- worker chats (one conversation per column's worker) ----------
     @staticmethod

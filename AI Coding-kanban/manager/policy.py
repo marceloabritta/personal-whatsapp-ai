@@ -53,6 +53,19 @@ def read(data_dir: str) -> str:
         return ""
 
 
+def write(data_dir: str, markdown: str) -> str:
+    """Replace the standing orders. Returns the path written.
+
+    No merging, no validation, no "improving" it on the way through: this file is the
+    human's instructions to the manager, and it says whatever they want it to say.
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    text = (markdown or "").strip()
+    with open(path_for(data_dir), "w", encoding="utf-8") as fh:
+        fh.write(text + "\n" if text else "")
+    return path_for(data_dir)
+
+
 def ensure(data_dir: str) -> bool:
     """Scaffold the policy file from the system default. True if it created one.
 

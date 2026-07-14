@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manager.board import Board  # noqa: E402
 from manager.journal import CARD, WORKER, Journal  # noqa: E402
-from manager.manager import Manager, ManagerConfig  # noqa: E402
+from manager.manager import POLICY_KEY, Manager, ManagerConfig  # noqa: E402
 from manager.migrations import m0005_worker_chats as m0005  # noqa: E402
+from manager import policy
 from manager.models import MAINT, PLAN  # noqa: E402
 from manager.recovery import Recovery  # noqa: E402
 from manager.workspace import Workspace  # noqa: E402
@@ -66,7 +67,7 @@ async def main() -> int:
     key = b.worker_key(MAINT, "exploring")
 
     check("it starts empty", b.worker_chat(key).thread == [])
-    await m.handle_worker_message(key, "this one is too vague")
+    await m.handle_prompt_message(key, "this one is too vague")
     chat = b.worker_chat(key)
     check("what I said is in the thread", chat.thread[0].role == "user")
     check("the manager answered", any(x.role == "manager" for x in chat.thread))
@@ -86,7 +87,7 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("a nonexistent worker is not a conversation")
-    await m.handle_worker_message("plan/does-not-exist", "hello?")
+    await m.handle_prompt_message("plan/does-not-exist", "hello?")
     check("nothing was created for it", "plan/does-not-exist" not in b.worker_chats)
 
     # -----------------------------------------------------------------
@@ -130,6 +131,34 @@ async def main() -> int:
     check("an orphaned 'thinking' spinner is cleared", b3.worker_chat(k3).busy is False)
 
     # -----------------------------------------------------------------
+    section("the manager's OWN brain is a prompt chat too")
+    bd = new_board()
+    policy.ensure(bd.data_dir)
+    bm = mgr(bd)
+    check("the reserved key cannot collide with a worker's", "/" not in POLICY_KEY)
+    check(
+        "no column could ever produce it",
+        all(bd.worker_key(c.pipeline, c.slug) != POLICY_KEY for c in bd.pipelines.all_columns()),
+    )
+
+    before = policy.read(bd.data_dir)
+    check("he has standing orders to begin with", "Decide. Do not ask." in before)
+
+    await bm.handle_prompt_message(POLICY_KEY, "you ask me too much")
+    pchat = bd.worker_chat(POLICY_KEY)
+    check("it is its own conversation", len(pchat.thread) == 2)
+    check("...and it answered about the ORDERS", "standing orders" in pchat.thread[-1].text)
+    check("it is not left spinning", pchat.busy is False)
+    check("it persists", len(new_board(bd.data_dir).worker_chat(POLICY_KEY).thread) == 2)
+
+    # the file itself is editable, and cannot be silently erased
+    policy.write(bd.data_dir, "# Mine\nAlways ask me first.")
+    check("writing the orders sticks", "Always ask me first." in policy.read(bd.data_dir))
+    check("...and reaches his prompt", "Always ask me first." in policy.block(bd.data_dir))
+    check("recovery knows this key always exists",
+          Recovery(bd, bm, Journal(bd.data_dir))._column_exists(POLICY_KEY))
+
+    # -----------------------------------------------------------------
     section("the migration opens the drawer, and touches nothing else")
     ws = Workspace(tempfile.mkdtemp(prefix="km-ws-"), tempfile.mkdtemp(prefix="repo-"))
     ws.ensure()
@@ -152,12 +181,19 @@ async def main() -> int:
     section("the UI: a chat under the file, and a ✕ that goes back where you came from")
     check("the chat box is titled as asked", "Talk to the manager about this worker" in page)
     check("it has its own thread and composer", "w-thread" in page and "w-chat-send" in page)
-    check("starting the chat collapses the file", "#d-worker.chatting textarea.code{min-height:0" in page)
+    check(
+        "starting the chat collapses the file (both prompt drawers)",
+        "#d-worker.chatting textarea.code,#d-brain.chatting textarea.code{min-height:0" in page,
+    )
     check("...and it collapses on the first message", "setChatting(true)" in page)
     check("...and stays collapsed when you reopen a worker you've talked to",
           "setChatting((m.thread||[]).length>0)" in page)
     check("the ✕ returns to the pipeline panel if you came from there",
           "wFrom ? openPipe(wFrom) : closeAll()" in page)
+    check("the manager has a brain button", 'id="m-brain"' in page)
+    check("...which opens his standing orders", "function openBrain" in page)
+    check("...with a chat to rewrite them", "Ask the manager to rewrite his own orders" in page)
+    check("...and a ✕ back to his chat", "bFrom ? openManager(bFrom) : closeAll()" in page)
     check("the manager's edits are pulled back into the file", "refreshWorkerFile()" in page)
     check("...but never over your unsaved edits", "if(!wCtx || wDirty) return;" in page)
 

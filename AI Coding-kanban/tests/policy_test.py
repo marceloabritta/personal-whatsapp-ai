@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manager import migrations, policy  # noqa: E402
 from manager.agents import board_prompt_for, manager_prompt_for  # noqa: E402
 from manager.migrations import m0002_manager_policy as m0002  # noqa: E402
-from manager.models import BUILD, MAINT, PLAN  # noqa: E402
+from manager.models import BUILD, EXPED, MAINT, PLAN  # noqa: E402
 from manager.workers import WorkerStore, resolve_tokens  # noqa: E402
 from manager.workspace import Workspace  # noqa: E402
 
@@ -65,7 +65,7 @@ class FakeCol:
 
 class FakeCard:
     id, title, description = "abc123", "A card", "does a thing"
-    pipeline, column = "plan", "scoping"
+    pipeline, column, kind = "plan", "scoping", "feature"
 
 
 class FakePipelines:
@@ -75,6 +75,7 @@ class FakePipelines:
         self.columns = {
             PLAN: [FakeCol(PLAN, "scoping", "Scoping")],
             MAINT: [FakeCol(MAINT, "replication", "Replication")],
+            EXPED: [FakeCol(EXPED, "scope", "Scope")],
             BUILD: [FakeCol(BUILD, "coding", "Coding")],
         }
 

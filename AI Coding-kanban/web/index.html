@@ -18,6 +18,9 @@
        the whole point is telling a fix from a feature at a glance, INCLUDING once both are
        sitting in the build pipeline together. */
     --maint:#e0a03a; --maint-bg:#2a2318; --maint-line:#5c4620;
+    /* The backlog is not a pipeline — it has no columns, no workers, no contracts — so it
+       is deliberately colourless. A card in it that nobody has typed yet is grey. */
+    --backlog-bg:#171a21; --untyped:#3a4050;
   }
   *{box-sizing:border-box}
   body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -42,6 +45,12 @@
   .mode{font-size:11px;padding:3px 8px;border-radius:20px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
   .mode.live{color:var(--ok);border-color:#204a2b}
   .repo{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
+
+  /* Shown while an update is draining. The board is not broken and the human is not being
+     ignored — say so, or they will reasonably assume both. */
+  .ship-banner{display:none;margin:12px 16px 0;padding:10px 13px;border-radius:10px;font-size:12.5px;
+               background:#2e2415;color:#e8c88a;border:1px solid #5c4620;line-height:1.5}
+  body.draining .ship-banner{display:block}
 
   /* ---- boards ---- */
   /* NEVER scrolls sideways. The board is a thing you look at, not a thing you drive. */
@@ -106,6 +115,63 @@
             text-align:center;cursor:pointer;font-size:12.5px}
   .add-card:hover{border-color:var(--accent);color:var(--text)}
 
+  /* ---- the backlog: above every pipeline, and not one of them ---- */
+  .backlog{background:var(--backlog-bg);border:1px solid var(--line);border-radius:14px;
+           padding:11px 12px 12px;margin-bottom:18px}
+  .backlog.dragover{outline:2px dashed var(--accent);outline-offset:-3px}
+  .backlog .cards{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}
+  .backlog .card{width:230px;margin:0}
+  .backlog .empty{color:var(--muted);font-size:12px;padding:6px 2px}
+  .bl-new{border:1px dashed rgba(255,255,255,.18);border-radius:9px;color:var(--muted);
+          width:230px;min-height:44px;display:flex;align-items:center;justify-content:center;
+          cursor:pointer;font-size:12.5px}
+  .bl-new:hover{border-color:var(--accent);color:var(--text)}
+  .badge.untyped{background:#20242e;color:#93a0b8;border-color:var(--untyped)}
+
+  /* ---- modal: the app's own dialogs ----
+     The browser's prompt()/confirm()/alert() are not this app's UI. They cannot be styled,
+     they cannot show a type picker, they block the whole tab, and they look like a phishing
+     page. Everything asks in here now. */
+  .modal-scrim{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;display:none}
+  .modal-scrim.open{display:block}
+  .modal{position:fixed;z-index:41;top:50%;left:50%;transform:translate(-50%,-50%);
+         width:min(520px,94vw);max-height:88vh;overflow-y:auto;background:var(--panel);
+         border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.55);
+         display:none;flex-direction:column}
+  .modal.open{display:flex}
+  .modal h3{margin:0;padding:15px 17px 0;font-size:15px}
+  .modal .m-body{padding:6px 17px 4px}
+  .modal .m-foot{display:flex;gap:8px;justify-content:flex-end;padding:13px 17px 15px}
+  .modal label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+               color:var(--muted);margin:13px 0 5px}
+  .modal input[type=text],.modal textarea{width:100%;background:var(--panel2);color:var(--text);
+        border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;resize:vertical}
+  .modal textarea{min-height:190px;line-height:1.5}
+  .modal input[type=text]:focus,.modal textarea:focus{outline:none;border-color:var(--accent)}
+  .modal .m-note{font-size:12px;color:var(--muted);line-height:1.55;padding-top:4px}
+  /* the type picker: real choices, in the product's own colours */
+  .choices{display:flex;flex-direction:column;gap:7px}
+  .choice{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:9px;cursor:pointer;
+          border:1px solid var(--line);background:var(--panel2)}
+  .choice:hover{border-color:var(--accent)}
+  .choice.on{border-color:var(--accent);background:var(--panel3)}
+  .choice .swat{width:11px;height:11px;border-radius:3px;margin-top:4px;flex:0 0 auto}
+  .choice .ct{font-weight:600;font-size:13px}
+  .choice .cd{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:2px}
+  /* Three stacked blocks with a paragraph each was a wall. Inline: one row, one word each,
+     the explanation on hover — the picker should not be the biggest thing in the dialog. */
+  .choices.inline{flex-direction:row;gap:7px}
+  .choices.inline .choice{flex:1;min-width:0;padding:9px 10px;align-items:center;justify-content:center}
+  .choices.inline .choice .cd{display:none}
+  .choices.inline .choice .swat{margin-top:0}
+  .choices.inline .choice .ct{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* a toast, in place of alert() */
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:60;display:none;
+         background:var(--panel3);color:var(--text);border:1px solid var(--line);border-radius:10px;
+         padding:10px 15px;font-size:12.5px;box-shadow:0 8px 28px rgba(0,0,0,.45);max-width:min(560px,92vw)}
+  #toast.on{display:block}
+  #toast.bad{border-color:var(--danger);color:#ffb3b3}
+
   /* ---- drawer ---- */
   .drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,94vw);background:var(--panel);
           border-left:1px solid var(--line);transform:translateX(101%);transition:transform .18s ease;
@@ -132,14 +198,63 @@
   #d-card .dh select.mini{background:#2e3852;border-color:#46506a}
   #d-card .dh .arts a{background:#2e3852;border-color:#46506a;color:#b9cdff}
   #d-card .dh .arts a:hover{border-color:#8fb0ff}
+  /* A thread scrolls; the "new messages" pill must NOT scroll with it. So the thread lives
+     inside a positioned wrapper and the pill is pinned to the wrapper, not the content. */
+  .thread-wrap{position:relative;display:flex;flex-direction:column;flex:1;min-height:0}
   .thread{flex:1;overflow-y:auto;padding:14px 15px;display:flex;flex-direction:column;gap:9px}
+  .new-msgs{position:absolute;left:13px;bottom:11px;z-index:3;display:none;align-items:center;gap:6px;
+            background:var(--panel3);color:var(--text);border:1px solid var(--line);border-radius:20px;
+            padding:5px 11px;font-size:11.5px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);opacity:.92}
+  .new-msgs:hover{border-color:var(--accent);opacity:1}
+  .new-msgs.on{display:flex}
   .msg{padding:9px 12px;border-radius:10px;max-width:94%;white-space:pre-wrap;word-wrap:break-word;line-height:1.5}
   .msg.user{background:var(--user);align-self:flex-end;border:1px solid #2b3d4f}
   .msg.manager{background:var(--mgr);align-self:flex-start;border:1px solid var(--line)}
   .msg.worker{background:var(--wrk);align-self:flex-start;border:1px solid #2c4032;font-size:12.5px;
               font-family:ui-monospace,SFMono-Regular,monospace;max-width:100%}
   .msg.system{background:transparent;color:var(--muted);font-size:11.5px;align-self:center;text-align:center;padding:1px}
-  .msg .who{font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px}
+  /* A NOTE is the manager's decision record — filed on the card, not said to you. The chat
+     shows only what he actually needs you for; the Decisions tab shows the thinking. */
+  .msg.note{background:#1b1f27;border:1px solid var(--line);border-left:3px solid var(--accent2);
+            align-self:stretch;max-width:100%;color:#c8cfdb}
+  #d-card:not(.notes) .msg.note{display:none}
+  #d-card.notes .msg:not(.note){display:none}
+  #d-card.notes .composer{display:none}
+  .brief{margin:9px 0 2px;padding:9px 11px;background:rgba(0,0,0,.22);border:1px solid var(--line);
+         border-radius:9px;font-size:12.5px;line-height:1.55;color:#c3cad6;white-space:pre-wrap;
+         max-height:96px;overflow:hidden;position:relative;cursor:pointer}
+  .brief:empty{display:none}
+  .brief.long::after{content:'⌄ more';position:absolute;right:0;bottom:0;padding:1px 10px 2px 22px;
+    font-size:11px;color:var(--muted);background:linear-gradient(90deg,transparent,#1b1f27 40%)}
+  .brief.open{max-height:none}
+  .brief.open.long::after{content:'⌃ less';background:none}
+  .brief .none{color:var(--muted);font-style:italic}
+  .tabs{display:flex;gap:4px;padding:8px 15px 0}
+  .tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);
+               padding:5px 9px;font-size:12px;cursor:pointer;font-weight:600}
+  .tabs button:hover{color:var(--text)}
+  .tabs button.on{color:var(--text);border-bottom-color:var(--accent)}
+  .tabs .n{font-weight:400;opacity:.7;margin-left:4px}
+  /* ---- the work, as opposed to the conversation ----
+     Tool calls and worker reports are the manager's WORKING OUT. They are not addressed to
+     you, and shown by default they buried the one thing you opened the card to read. Kept
+     on the thread (they are the audit trail) but hidden until you ask for them with 🔧.
+     NOTE the exclusions: an ⚠️ error, a ⏸ shutdown or a 🛑 recovery notice is a `system`
+     message and stays VISIBLE. Hiding a failure to make the chat tidy would be a bug. */
+  .msg.activity{background:transparent;color:var(--muted);font-size:11px;padding:1px 2px;
+                font-family:ui-monospace,SFMono-Regular,monospace;align-self:flex-start;
+                max-width:100%;white-space:pre-wrap;opacity:.75}
+  body:not(.showwork) .msg.activity,
+  body:not(.showwork) .msg.worker{display:none}
+  #work-btn.on{border-color:var(--accent);color:var(--text)}
+  /* An update does NOT stop the board. It offers itself, and waits to be asked. */
+  .icon-btn.upd{border-color:#5c4620;color:#e8c88a;background:#2e2415}
+  .icon-btn.upd:hover{border-color:var(--maint);color:#fff}
+  .msg .who{font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px;
+            display:flex;align-items:baseline;gap:7px}
+  .msg .at{font-weight:400;letter-spacing:0;text-transform:none;opacity:.75;font-size:10px}
+  /* A system line has no "who" row to hang the time off, so put it inline. */
+  .msg.system .at{margin-left:6px;opacity:.6}
   /* a message you typed, rendered immediately, until the server echoes it back */
   .msg.pending{opacity:.5}
   .msg.failed{border-color:var(--danger);opacity:1}
@@ -160,16 +275,20 @@
   /* ---- the worker drawer: file on top, chat underneath ----
      Once the chat starts, the FILE collapses to make room for the conversation. It is the
      conversation you are working in at that point; the file is there to glance at. */
-  #d-worker .body{display:flex;flex-direction:column}
-  #d-worker textarea.code{flex:0 0 auto;transition:min-height .18s ease,height .18s ease}
-  #d-worker.chatting textarea.code{min-height:0;height:104px}
-  #d-worker.chatting #w-hint,#d-worker.chatting #w-savehint{display:none}
+  #d-worker .body,#d-brain .body{display:flex;flex-direction:column}
+  #d-worker textarea.code,#d-brain textarea.code{flex:0 0 auto;transition:min-height .18s ease,height .18s ease}
+  #d-worker.chatting textarea.code,#d-brain.chatting textarea.code{min-height:0;height:104px}
+  #d-worker.chatting #w-hint,#d-worker.chatting #w-savehint,
+  #d-brain.chatting #b-hint,#d-brain.chatting #b-savehint{display:none}
+  .dh .row1 .tool{opacity:.7;cursor:pointer;font-size:14px;margin-left:auto;padding:0 6px}
+  .dh .row1 .tool:hover{opacity:1}
+  .dh .row1 .close{margin-left:0}
   .wchat{display:flex;flex-direction:column;flex:1;min-height:0;margin-top:14px;
          border-top:1px solid var(--line);padding-top:10px}
   .wchat-h{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
            font-weight:650;margin-bottom:6px}
-  #d-worker .wchat .thread{flex:1;min-height:0;padding:0}
-  #d-worker.chatting .wchat .thread{min-height:220px}
+  #d-worker .wchat .thread,#d-brain .wchat .thread{flex:1;min-height:0;padding:0}
+  #d-worker.chatting .wchat .thread,#d-brain.chatting .wchat .thread{min-height:220px}
   .wchat .composer{padding:9px 0 0}
   .wchat .composer textarea{min-height:38px}
   .body .hint{font-size:11.5px;color:var(--muted);margin-top:5px;line-height:1.5}
@@ -200,27 +319,56 @@
   <h1>manager-kanban</h1>
   <div class="managers" id="managers"></div>
   <div class="right">
+    <button class="icon-btn upd" id="update-btn" style="display:none">⬆ Update ready — restart</button>
+    <button class="icon-btn" id="work-btn" title="Show the manager's working out — the commands he runs and the workers' reports. Off by default: the chat is for what he says to you.">🔧 Work</button>
     <button class="icon-btn" id="trash-btn">🗑 Trash <span id="trash-n"></span></button>
     <span class="mode" id="mode">…</span>
     <span class="repo" id="repo"></span>
   </div>
 </header>
 
+<div class="ship-banner" id="ship-banner">
+  ⏳ <b>Winding down to restart.</b> The workers were told to stop and are writing down where
+  they got to — nothing they did is thrown away, and each is <b>resumed</b> afterwards in the
+  same conversation. <b>Keep using the board</b>: the manager is free and will still answer
+  you. Only in the last few seconds, as it actually goes down, is a message held and delivered
+  on the way back.
+</div>
 <div class="boards" id="boards"></div>
+
+<div class="modal-scrim" id="m-scrim"></div>
+<div class="modal" id="modal">
+  <h3 id="modal-title"></h3>
+  <div class="m-body" id="modal-body"></div>
+  <div class="m-foot">
+    <button class="btn ghost" id="modal-cancel">Cancel</button>
+    <button class="btn" id="modal-ok">OK</button>
+  </div>
+</div>
+<div id="toast"></div>
 
 <div class="scrim" id="scrim"></div>
 
 <!-- card chat -->
 <aside class="drawer" id="d-card">
   <div class="dh">
-    <div class="row1"><h3 id="c-title">—</h3><span class="close" data-close>×</span></div>
+    <div class="row1"><h3 id="c-title">—</h3>
+      <span class="tool" id="c-trash" title="Move this card to the trash. The folder is kept — it can be restored.">🗑</span>
+      <span class="close" data-close>×</span></div>
     <div class="sub">
       <span class="badge" id="c-where"></span>
       <span id="c-busy"></span>
-      <select class="mini" id="c-mgr" title="assigned manager"></select>
+      <select class="mini" id="c-mgr" title="Which manager OWNS this card. This is not who is working on it right now — the badge beside it says that."></select>
     </div>
+    <!-- The brief you wrote when you created the card. It was write-only until now: you
+         typed it, the manager read it, and you could never see it again. -->
+    <div class="brief" id="c-brief"></div>
     <div class="sub"><span class="path" id="c-dir"></span></div>
     <div class="sub arts" id="c-arts"></div>
+  </div>
+  <div class="tabs" id="c-tabs">
+    <button id="tab-chat" class="on">Chat</button>
+    <button id="tab-notes">Decisions <span class="n" id="c-nnotes"></span></button>
   </div>
   <div class="quick" id="c-quick"></div>
   <div class="thread" id="c-thread"></div>
@@ -233,7 +381,9 @@
 <!-- manager chat (board-level) -->
 <aside class="drawer" id="d-mgr">
   <div class="dh">
-    <div class="row1"><h3 id="m-title">Manager</h3><span class="close" data-close>×</span></div>
+    <div class="row1"><h3 id="m-title">Manager</h3>
+      <span class="tool" id="m-brain" title="His brain — the standing orders he works to">🧠</span>
+      <span class="close" data-close>×</span></div>
     <div class="sub">
       <span class="badge">board-level chat</span>
       <span class="badge" id="m-cards"></span>
@@ -323,6 +473,38 @@
   </div>
 </aside>
 
+<!-- the manager's BRAIN: his standing orders, and a chat about changing them -->
+<aside class="drawer" id="d-brain">
+  <div class="dh">
+    <div class="row1"><h3>Manager — his brain</h3><span class="close" id="b-close">×</span></div>
+    <div class="sub"><span class="badge">standing orders</span><span id="b-busy"></span></div>
+    <div class="sub"><span class="path" id="b-path"></span></div>
+  </div>
+  <div class="body">
+    <div class="hint" id="b-hint">
+      This file is appended <b>last</b> to the manager's prompt on every run, and it
+      <b>overrides</b> the system's own instructions. It is how you tell him when to decide
+      alone, what to escalate, and how to talk to you. Yours — an update never overwrites it.
+    </div>
+    <label>MANAGER.md</label>
+    <textarea class="code" id="b-md" spellcheck="false"></textarea>
+    <div class="hint" id="b-savehint">Saved to your working folder. Takes effect on his next message.</div>
+
+    <div class="wchat">
+      <div class="wchat-h">Ask the manager to rewrite his own orders</div>
+      <div class="thread" id="b-thread"></div>
+      <div class="composer">
+        <textarea id="b-input" rows="1" placeholder="e.g. you ask me too much — decide it yourself and write down why"></textarea>
+        <button id="b-chat-send">Send</button>
+      </div>
+    </div>
+  </div>
+  <div class="dfoot">
+    <button class="btn" id="b-save">Save orders</button>
+    <span class="saved" id="b-saved">saved ✓</span>
+  </div>
+</aside>
+
 <!-- pipeline editor: the columns of one pipeline, their workers, and its colour -->
 <aside class="drawer pipe-edit" id="d-pipe">
   <div class="dh">
@@ -366,7 +548,15 @@ let ws=null, openCard=null, openMgr=null, seenTs=0, colCtx=null;
 /* ---------- socket ---------- */
 function connect(){
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen  = ()=>$('conn').classList.add('on');
+  ws.onopen  = ()=>{
+    $('conn').classList.add('on');
+    // Reconnected — so the update is over and this is the NEW server. Clear the banner, and
+    // then ask, in case we connected to a board that is draining right now.
+    document.body.classList.remove('draining');
+    fetch('/api/inflight').then(r=>r.json())
+      .then(s=>document.body.classList.toggle('draining', !!s.draining)).catch(()=>{});
+    checkUpdate();   // we may have just come back ON the new version
+  };
   ws.onclose = ()=>{$('conn').classList.remove('on'); setTimeout(connect,1200);};
   ws.onmessage = e=>handle(JSON.parse(e.data));
 }
@@ -388,18 +578,24 @@ function handle(m){
   else if(m.type==='message'){ if(m.card_id===openCard) appendMsg('c-thread', m.message); }
   else if(m.type==='manager_message'){ if(m.manager_id===openMgr) appendMsg('m-thread', m.message); }
   else if(m.type==='worker_chat'){
-    if(m.key===wKey){
-      renderThread('w-thread', m.thread);
-      setChatting((m.thread||[]).length>0);   // reopening a worker you've talked to lands you in the chat
-      $('w-busy').innerHTML=m.busy?'<span class="badge busy">thinking <span class="dot"></span></span>':'';
+    if(m.key===chat.key){
+      renderThread(chat.thread, m.thread);
+      setChatting((m.thread||[]).length>0);   // reopening a prompt you've discussed lands you in the chat
+      $(chat.busy).innerHTML=m.busy?'<span class="badge busy">thinking <span class="dot"></span></span>':'';
     }
   }
   else if(m.type==='worker_message'){
-    if(m.key===wKey){
-      appendMsg('w-thread', m.message);
+    if(m.key===chat.key){
+      appendMsg(chat.thread, m.message);
       setChatting(true);
-      if(m.message.role==='manager') refreshWorkerFile();  // he may have just rewritten it
+      if(m.message.role==='manager' && chat.refresh) chat.refresh();  // he may have just rewritten the file
     }
+  }
+  else if(m.type==='draining'){ document.body.classList.toggle('draining', !!m.draining); }
+  else if(m.type==='shutdown'){
+    // It is going down ON PURPOSE, drained. Say so, rather than letting the socket just die
+    // and leaving the human staring at a dead board wondering what broke.
+    document.body.classList.add('draining');
   }
   else if(m.type==='trash'){ renderTrash(m.cards); }
 }
@@ -420,10 +616,13 @@ function renderHeader(){
   const add=document.createElement('button');
   add.className='icon-btn'; add.textContent='+'; add.title='Add a manager';
   add.onclick=async()=>{
-    const name=prompt('Manager name:'); if(!name) return;
-    const emoji=prompt('Emoji for this manager:','🧭')||'🧭';
+    const v=await askForm('New manager', [
+      {id:'name', label:'Name', placeholder:'e.g. Ada'},
+      {id:'emoji', label:'Emoji', value:'🧭', placeholder:'🧭'},
+    ], 'Add');
+    if(!v || !v.name.trim()) return;
     await fetch('/api/manager',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({name,emoji})});
+      body:JSON.stringify({name:v.name.trim(), emoji:(v.emoji||'🧭').trim()||'🧭'})});
   };
   box.appendChild(add);
   $('trash-n').textContent = BOARD.trash_count ? `(${BOARD.trash_count})` : '';
@@ -442,15 +641,20 @@ function shade(hex,f){
   return '#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
 /* The pipeline a card BELONGS to — its kind — NOT the one it is sitting in. This is the
-   whole reason a promoted fix stays yellow in the red build pipeline. */
-function homePipe(c){
+   whole reason a promoted fix stays yellow in the red build pipeline.
+   An UNTYPED card belongs to nothing yet, and is grey: it is the manager's job to fix that. */
+function cardColor(c){
+  if(c.kind!=='feature' && c.kind!=='maintenance') return getVar('--untyped');
   const id = c.kind==='maintenance' ? 'maint' : 'plan';
-  return BOARD.pipelines.find(p=>p.id===id) || BOARD.pipelines[0];
+  const p = BOARD.pipelines.find(x=>x.id===id) || BOARD.pipelines[0];
+  return (p && p.color) || getVar('--untyped');
 }
+function getVar(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 
 /* ---------- boards ---------- */
 function renderBoards(){
   const root=$('boards'); root.innerHTML='';
+  root.appendChild(backlogEl());
   // Every pipeline is laid out on the SAME number of tracks — the longest pipeline's — so a
   // column is the same width everywhere and the board never scrolls sideways.
   const cols=Math.max(1,...BOARD.pipelines.map(p=>p.columns.length));
@@ -471,6 +675,59 @@ function renderBoards(){
   }
 }
 
+/* The backlog. Everything is created here; nothing is worked here. Drag a card into a
+   pipeline column to route it by hand, or drop it back here to pull it out of a pipeline. */
+function backlogEl(){
+  const sec=document.createElement('div'); sec.className='backlog';
+  const list=BOARD.cards.filter(c=>c.pipeline==='backlog');
+  const untyped=list.filter(c=>c.kind!=='feature'&&c.kind!=='maintenance').length;
+
+  const h=document.createElement('div'); h.className='pipe-h';
+  h.innerHTML=`<span class="name">Backlog — not routed yet</span>`
+    +`<span class="badge">${list.length}</span>`
+    +(untyped?`<span class="badge untyped">${untyped} need a type</span>`:'')
+    +`<span class="rule"></span>`;
+  sec.appendChild(h);
+
+  const box=document.createElement('div'); box.className='cards';
+  for(const c of list) box.appendChild(cardEl(c));
+  const add=document.createElement('div'); add.className='bl-new'; add.textContent='+ New card';
+  add.onclick=newCard;
+  box.appendChild(add);
+  if(!list.length){
+    const e=document.createElement('div'); e.className='empty';
+    e.textContent='Nothing waiting. New cards land here, get a type, and wait for you to say go.';
+    sec.appendChild(e);
+  }
+  sec.appendChild(box);
+
+  sec.ondragover=e=>{e.preventDefault();sec.classList.add('dragover');};
+  sec.ondragleave=()=>sec.classList.remove('dragover');
+  sec.ondrop=e=>{e.preventDefault();sec.classList.remove('dragover');
+    const id=e.dataTransfer.getData('text/plain'); if(id) send({type:'backlog',card_id:id});};
+  return sec;
+}
+
+/* Creation happens ONLY in the backlog, and the type is asked for up front — but it is
+   optional: leave it and the manager classifies it the moment the card exists. */
+async function newCard(){
+  const plan=BOARD.pipelines.find(p=>p.id==='plan'), maint=BOARD.pipelines.find(p=>p.id==='maint');
+  const v=await askForm('New card', [
+    {id:'title', label:'Title', required:true, placeholder:'e.g. Calendar replies twice'},
+    {id:'description', label:'Brief — optional', type:'textarea', rows:10,
+     placeholder:'What you saw, when, what you expected instead. Anything the manager should know before he touches it.'},
+    {id:'kind', label:'Type — optional', type:'choice', value:'', inline:true,
+     options:[
+       {value:'', label:'Manager decides', hint:'He reads the card and types it straight away — you are never left with an untyped card.'},
+       {value:'feature', label:'Feature', hint:'It does not exist yet, and we would be building it.', color:plan&&plan.color},
+       {value:'maintenance', label:'Maintenance', hint:'It exists, and it is behaving wrongly.', color:maint&&maint.color},
+     ],
+     note:'It lands in the backlog either way. Nothing starts until you say so.'},
+  ]);
+  if(!v || !v.title.trim()) return;
+  send({type:'create', title:v.title.trim(), description:(v.description||'').trim(), kind:v.kind});
+}
+
 function colEl(pipe,col,i){
   const el=document.createElement('div');
   el.className='col'+(col.gate?' gate':'');
@@ -489,19 +746,23 @@ function colEl(pipe,col,i){
   for(const c of list) drop.appendChild(cardEl(c));
   el.appendChild(drop);
 
-  // Cards are born in an ORIGIN pipeline — an idea, or a bug report. Never in build.
-  const ORIGINS={plan:'+ New idea', maint:'+ New report'};
-  if(i===0 && ORIGINS[pipe.id]){
-    const a=document.createElement('div'); a.className='add-card'; a.textContent=ORIGINS[pipe.id];
-    a.onclick=()=>{const t=prompt(pipe.id==='maint'?'What is broken?':'New card title:');
-      if(t&&t.trim()) send({type:'create',title:t.trim(),pipeline:pipe.id});};
-    el.appendChild(a);
-  }
+  // No "+ card" inside a pipeline any more. Cards are created in the BACKLOG and routed out
+  // of it — deciding which pipeline work goes down is a decision, not a side effect of which
+  // column you happened to click "+" under.
   el.ondragover=e=>{e.preventDefault();el.classList.add('dragover');};
   el.ondragleave=()=>el.classList.remove('dragover');
   el.ondrop=e=>{e.preventDefault();el.classList.remove('dragover');
     const id=e.dataTransfer.getData('text/plain'); if(id) send({type:'move',card_id:id,column:col.id});};
   return el;
+}
+
+/* "working" told you nothing: was the manager thinking for two seconds, or has a coder been
+   running for twenty minutes? Now it says which. */
+function whoIsWorking(c){
+  if(!c.busy) return '';
+  if(!c.working) return '🧭 manager';
+  const w=c.working.includes('__') ? c.working.split('__')[1].replace(/_/g,' ') : c.working;
+  return `🔨 ${w}`;
 }
 
 function cardEl(c){
@@ -512,15 +773,16 @@ function cardEl(c){
   // The colour comes from the card's HOME pipeline, so it travels with the card: a fix that
   // has been promoted is still yellow sitting in the red build pipeline. That is the point.
   d.className='card'+(c.kind==='maintenance'?' maint':'')+(c.id===openCard?' open-chat':'');
-  const home=homePipe(c).color;
+  const home=cardColor(c);
   d.style.setProperty('--c-bg',shade(home,.62));      // "a slightly darker tone" of the pipeline
   d.style.setProperty('--c-line',shade(home,1.15));
   d.style.setProperty('--c-accent',shade(home,1.9));  // the stripe: survives the open-card highlight
-  d.dataset.id=c.id; d.dataset.kind=c.kind||'feature'; d.draggable=true;
+  d.dataset.id=c.id; d.dataset.kind=c.kind||'unset'; d.draggable=true;
   const m=BOARD.managers.find(x=>x.id===c.manager_id);
   let b='';
   if(c.kind==='maintenance') b+=`<span class="badge maint">🛠 fix</span>`;
-  if(c.busy) b+=`<span class="badge busy">working <span class="dot"></span></span>`;
+  else if(c.kind!=='feature') b+=`<span class="badge untyped">needs a type</span>`;
+  if(c.busy) b+=`<span class="badge busy">${esc(whoIsWorking(c))} <span class="dot"></span></span>`;
   if(c.gate) b+=`<span class="badge gate">awaiting you</span>`;
   if(c.error) b+=`<span class="badge err">error</span>`;
   if(BOARD.managers.length>1 && m) b+=`<span class="badge mgr">${m.emoji} ${esc(m.name)}</span>`;
@@ -548,17 +810,30 @@ function closeAll(keepScrim){
   // way out. A list that has to be kept in sync by hand will eventually not be.
   document.querySelectorAll('.drawer').forEach(d=>d.classList.remove('open'));
   if(!keepScrim) $('scrim').classList.remove('open');
-  openCard=null; openMgr=null; wKey=null;   // openWorker sets wKey AFTER show(), so this is safe
+  openCard=null; openMgr=null; chat.key=null;  // the openers set these AFTER show(), so this is safe
   paintOpenCard();          // clear the board highlight NOW — closeAll() does not re-render.
 }
 document.querySelectorAll('[data-close]').forEach(x=>x.onclick=()=>closeAll());
 $('scrim').onclick=()=>closeAll();
+
+/* --- card: chat vs decisions ---
+   Everything he thinks is kept. It is just not thrown at you: the chat is what he needs you
+   FOR, and the decisions tab is the record of what he did without you. */
+function showTab(which){
+  $('d-card').classList.toggle('notes', which==='notes');
+  $('tab-chat').classList.toggle('on', which!=='notes');
+  $('tab-notes').classList.toggle('on', which==='notes');
+  const t=$('c-thread'); t.scrollTop=t.scrollHeight; hidePill(t);
+}
+$('tab-chat').onclick=()=>showTab('chat');
+$('tab-notes').onclick=()=>showTab('notes');
 
 /* --- card --- */
 function openCardDrawer(id){
   show('d-card');            // show() → closeAll(), which clears openCard: set it AFTER.
   openCard=id; seenTs=0;
   paintOpenCard();           // ...and repaint AFTER that, or closeAll()'s clear wins.
+  showTab('chat');            // always land in the conversation, not the archive
   const c=BOARD.cards.find(x=>x.id===id); if(c) cardHeader(c);
   send({type:'open',card_id:id});
 }
@@ -566,27 +841,54 @@ function colTitle(colId){
   for(const p of BOARD.pipelines){ const c=p.columns.find(x=>x.id===colId); if(c) return `${p.title} → ${c.title}`; }
   return '—';
 }
-const KIND_TITLES={feature:'New feature', maintenance:'Maintenance'};
+const KIND_TITLES={feature:'New feature', maintenance:'Maintenance', unset:'Needs a type'};
 /* The card's TYPE, in the drawer header, painted the same colour as the card itself — and
    clicking it flips it. The type is the human's field: it is what the card IS, which is a
    different question from which column it happens to be sitting in. */
 function paintKind(c){
   const el=$('c-where');
+  // An untyped card has no opposite to flip to — the first click simply TYPES it. You can
+  // never flip a card back to untyped, and that is deliberate: nothing un-decides a card.
   const other = c.kind==='maintenance' ? 'feature' : 'maintenance';
-  const home=homePipe(c).color;
-  el.textContent=KIND_TITLES[c.kind]||KIND_TITLES.feature;
+  const next = (c.kind==='feature'||c.kind==='maintenance') ? other : 'feature';
+  const home=cardColor(c);
+  el.textContent=KIND_TITLES[c.kind]||KIND_TITLES.unset;
   el.style.background=shade(home,.62);          // the card's own colour
   el.style.borderColor=shade(home,1.25);
   el.style.color='#fff';
   el.style.cursor='pointer';
-  el.title=`This is a ${KIND_TITLES[c.kind]||'New feature'} card. Click to make it ${KIND_TITLES[other]}.`;
-  el.onclick=()=>send({type:'set_kind',card_id:c.id,kind:other});
+  el.title=`This card is: ${KIND_TITLES[c.kind]||'untyped'}. Click to make it ${KIND_TITLES[next]}.`;
+  el.onclick=()=>send({type:'set_kind',card_id:c.id,kind:next});
 }
 function cardHeader(c){
   $('c-title').textContent=c.title;
+
+  // The brief, as you wrote it. Clamped, and click to expand — a long one should not push
+  // the conversation off the screen, but it must be READABLE, which it was not at all.
+  const br=$('c-brief');
+  const text=(c.description||'').trim();
+  br.textContent = text || '';
+  if(!text){ br.innerHTML='<span class="none">No brief was written for this card.</span>'; }
+  br.classList.remove('open');
+  // measure AFTER paint: is it actually taller than the clamp?
+  requestAnimationFrame(()=>br.classList.toggle('long', br.scrollHeight > br.clientHeight + 2));
+  br.onclick=()=>br.classList.toggle('open');
+
+  $('c-trash').onclick=async()=>{
+    if(await askConfirm(`Move "${c.title}" to the trash?`,
+       'The card folder is kept, not deleted — you can restore it from the trash.', {ok:'Trash it'})){
+      send({type:'trash',card_id:c.id});
+      closeAll();
+    }
+  };
+  if(c.thread){   // the board snapshot has no thread; only the card view does
+    const notes=c.thread.filter(m=>m.role==='note').length;
+    $('c-nnotes').textContent=notes||'';
+  }
   paintKind(c);
-  $('c-busy').innerHTML=c.busy?'<span class="badge busy">working <span class="dot"></span></span>'
-                              :(c.gate?'<span class="badge gate">awaiting you</span>':'');
+  $('c-busy').innerHTML=c.busy
+    ? `<span class="badge busy">${esc(whoIsWorking(c))} <span class="dot"></span></span>`
+    : (c.gate?'<span class="badge gate">awaiting you</span>':'');
   $('c-dir').textContent='📁 '+(c.abs_dir||c.dir||'');
   const sel=$('c-mgr'); sel.innerHTML='';
   for(const m of BOARD.managers){
@@ -600,7 +902,11 @@ function cardHeader(c){
   const btn=(label,fn,cls)=>{const b=document.createElement('button'); b.textContent=label; if(cls)b.className=cls; b.onclick=fn; q.appendChild(b);};
   if(c.gate) btn('✓ Approve', ()=>sendCard('approve'));
   else       btn('▶ Run this column', ()=>sendCard('start'));
-  btn('🗑 Trash', ()=>{ if(confirm(`Move "${c.title}" to the trash? The folder is kept and can be restored.`)) send({type:'trash',card_id:c.id}); }, 'danger');
+  btn('🗑 Trash', async ()=>{
+    if(await askConfirm(`Move "${c.title}" to the trash?`,
+       'The card folder is kept, not deleted — you can restore it from the trash.', {ok:'Trash it'}))
+      send({type:'trash',card_id:c.id});
+  }, 'danger');
 }
 async function viewFile(cardId,name){
   const r=await fetch(`/api/card/${cardId}/file/${encodeURIComponent(name)}`);
@@ -637,23 +943,80 @@ function mgrHeader(m){
        b.onclick=()=>sendMgr(text); q.appendChild(b); }
   if(BOARD.managers.length>1){
     const b=document.createElement('button'); b.className='danger'; b.textContent='Delete manager';
-    b.onclick=async()=>{ if(!confirm(`Delete ${m.name}? Their cards move to another manager.`)) return;
+    b.onclick=async()=>{ if(!await askConfirm(`Delete ${m.name}?`, 'Their cards move to another manager. No card is lost.')) return;
       await fetch('/api/manager/'+m.id,{method:'DELETE'}); closeAll(); };
     q.appendChild(b);
   }
 }
 
 /* --- threads --- */
-function renderThread(id,msgs){ $(id).innerHTML=''; seenTs=0; for(const m of (msgs||[])) appendMsg(id,m); }
+/* ---------- scrolling ----------
+   Reading back through a thread and having a new message yank you to the bottom is the
+   fastest way to lose your place. So: only follow the tail if you were ALREADY at the tail.
+   Otherwise leave the scroll exactly where it is and raise a discreet pill instead. */
+const NEAR = 60;   // px from the bottom that still counts as "at the bottom"
+function atBottom(t){ return t.scrollHeight - t.scrollTop - t.clientHeight <= NEAR; }
+
+function pillFor(id){
+  const t=$(id);
+  if(t._pill) return t._pill;
+  // Wrap the thread once, so the pill can hover over it without scrolling with it.
+  const wrap=document.createElement('div'); wrap.className='thread-wrap';
+  t.parentNode.insertBefore(wrap, t); wrap.appendChild(t);
+  const pill=document.createElement('div'); pill.className='new-msgs';
+  pill.onclick=()=>{ t.scrollTop=t.scrollHeight; hidePill(t); };
+  wrap.appendChild(pill);
+  t.addEventListener('scroll', ()=>{ if(atBottom(t)) hidePill(t); });
+  t._pill=pill; t._unseen=0;
+  return pill;
+}
+function hidePill(t){ t._unseen=0; if(t._pill) t._pill.classList.remove('on'); }
+function bumpPill(id){
+  const t=$(id), pill=pillFor(id);
+  t._unseen=(t._unseen||0)+1;
+  pill.textContent=`↓ ${t._unseen} new message${t._unseen>1?'s':''}`;
+  pill.classList.add('on');
+}
+/* Follow the tail only if we were on it. `wasAtBottom` MUST be read BEFORE the node is
+   appended — afterwards the scrollHeight has already grown and every check says "no". */
+function follow(id, wasAtBottom, el){
+  const t=$(id);
+  if(wasAtBottom){ t.scrollTop=t.scrollHeight; return; }
+  if(el && el.offsetParent===null) return;   // hidden (a ⌘ line with 🔧 off) — not "a new message"
+  bumpPill(id);
+}
+
+function renderThread(id,msgs){
+  const t=$(id);
+  pillFor(id); hidePill(t);
+  t.innerHTML=''; seenTs=0;
+  for(const m of (msgs||[])) appendMsg(id,m);
+  t.scrollTop=t.scrollHeight;   // opening a thread lands you at the bottom, as it should
+}
+/* Tool activity used to be posted with role "system", the same role as errors and recovery
+   notices. Threads written before the split still carry it that way, so re-classify it on
+   the way in — otherwise every card you have already worked keeps showing its ⌘ lines
+   forever. Matched on the exact prefixes _describe_tool() emits, nothing looser: an ⚠️ or a
+   🛑 is a real notice and must never be swept up by this. */
+const ACTIVITY_RE=/^(⌘|✎|→ delegating)/;
+function roleOf(m){
+  return (m.role==='system' && ACTIVITY_RE.test((m.text||'').trim())) ? 'activity' : m.role;
+}
 function appendMsg(id,m){
   if(m.ts && m.ts<=seenTs) return; if(m.ts) seenTs=m.ts;
   // If this is the server echoing back something we already drew optimistically,
   // don't draw it twice — just confirm the bubble we already have.
   if(m.role==='user' && confirmPending(id,m.text)) return;
-  const t=$(id); const el=document.createElement('div'); el.className='msg '+m.role;
-  const who={manager:'Manager',user:'You',worker:'Worker'}[m.role]||'';
-  el.innerHTML=(who?`<div class="who">${who}</div>`:'')+fmt(m.text);
-  t.appendChild(el); t.scrollTop=t.scrollHeight;
+  const role=roleOf(m);
+  const t=$(id); const el=document.createElement('div'); el.className='msg '+role;
+  const who={manager:'Manager',user:'You',worker:'Worker',note:'Decision'}[role]||'';
+  const at=stamp(m.ts);
+  el.innerHTML=(who?`<div class="who">${who}<span class="at">${at}</span></div>`:'')
+             + fmt(m.text)
+             + (who?'':`<span class="at">${at}</span>`);
+  const wasDown=atBottom(t);          // BEFORE the append — see follow()
+  t.appendChild(el);
+  follow(id, wasDown, el);
 }
 
 /* Optimistic echo. A message you type is drawn the moment you send it, greyed out until
@@ -663,9 +1026,11 @@ function echoLocal(id,text,delivered){
   const t=$(id); const el=document.createElement('div');
   el.className='msg user '+(delivered?'pending':'failed');
   el.dataset.pending=text;
-  el.innerHTML=`<div class="who">You</div>`+fmt(text)
+  el.innerHTML=`<div class="who">You<span class="at">${stamp(Date.now()/1000)}</span></div>`+fmt(text)
     +(delivered?'':'<span class="undelivered">not delivered — no connection to the server. Reconnecting…</span>');
-  t.appendChild(el); t.scrollTop=t.scrollHeight;
+  t.appendChild(el);
+  t.scrollTop=t.scrollHeight;   // you just sent it: always follow your own message
+  hidePill(t);
 }
 function confirmPending(id,text){
   for(const el of $(id).querySelectorAll('.msg.pending')){
@@ -677,18 +1042,29 @@ function confirmPending(id,text){
 }
 
 /* --- worker editor --- */
-let wCtx=null, wKey=null, wFrom=null, wDirty=false;
+/* ---------- prompt drawers: a FILE you can edit, and a CHAT about editing it ----------
+   Two of them — a column's worker, and the manager's own standing orders — and they behave
+   identically, so they share one mechanism. `chat` says which one is on screen; every
+   worker_chat / worker_message frame is routed through it. */
+let chat={key:null, thread:null, drawer:null, busy:null, refresh:null};
+let wCtx=null, wFrom=null, wDirty=false, bDirty=false;
+
+function setChatting(on){ if(chat.drawer) $(chat.drawer).classList.toggle('chatting',!!on); }
+function openChat(key,drawer,thread,busy,refresh){
+  chat={key,drawer,thread,busy,refresh};
+  $(thread).innerHTML='';
+  setChatting(false);
+  send({type:'worker_open',key});   // the server replies with this prompt's own thread
+}
+
 /* `fromPipe` — the ✕ must put you back where you came from: the pipeline panel if you
    opened the worker from there, the board otherwise. Anything else is a trapdoor. */
 async function openWorker(pipeId,col,fromPipe){
   show('d-worker');
-  wCtx={pipeline:pipeId,slug:col.slug};
-  wKey=`${pipeId}/${col.slug}`; wFrom=fromPipe||null; wDirty=false;
-  setChatting(false);
-  $('w-thread').innerHTML='';
+  wCtx={pipeline:pipeId,slug:col.slug}; wFrom=fromPipe||null; wDirty=false;
+  openChat(`${pipeId}/${col.slug}`,'d-worker','w-thread','w-busy',refreshWorkerFile);
   $('w-title').textContent=col.title+' — worker';
   $('w-md').value='loading…';
-  send({type:'worker_open',key:wKey});     // the conversation about THIS worker
   const r=await fetch(`/api/worker/${pipeId}/${col.slug}`); const w=await r.json();
   $('w-agent').textContent=w.agent_name;
   $('w-gate').textContent=w.gate?'⏸ gate column':'';
@@ -697,7 +1073,6 @@ async function openWorker(pipeId,col,fromPipe){
 }
 $('w-close').onclick=()=>{ wFrom ? openPipe(wFrom) : closeAll(); };
 $('w-md').addEventListener('input',()=>{wDirty=true;});
-function setChatting(on){ $('d-worker').classList.toggle('chatting',!!on); }
 
 $('w-save').onclick=async()=>{
   if(!wCtx) return;
@@ -707,19 +1082,48 @@ $('w-save').onclick=async()=>{
   const s=$('w-saved'); s.classList.add('on'); setTimeout(()=>s.classList.remove('on'),1400);
 };
 
-/* The manager EDITS this file when you ask him to, so pull it back in when he replies —
-   but never over unsaved edits of your own. Losing what the human typed to show them what
-   the manager typed is not a trade worth making. */
+/* The manager EDITS these files when you ask him to, so pull the file back in when he
+   replies — but NEVER over unsaved edits of your own. Losing what the human typed in order
+   to show them what the manager typed is not a trade worth making. */
 async function refreshWorkerFile(){
   if(!wCtx || wDirty) return;
   const r=await fetch(`/api/worker/${wCtx.pipeline}/${wCtx.slug}`); const w=await r.json();
   if(w && typeof w.markdown==='string' && w.markdown!==$('w-md').value) $('w-md').value=w.markdown;
 }
-const sendWorker = t => {
+
+/* --- the manager's brain: MANAGER.md, the orders he is held to --- */
+let bFrom=null;
+async function openBrain(fromMgr){
+  show('d-brain');
+  bFrom=fromMgr||null; bDirty=false;
+  openChat('manager','d-brain','b-thread','b-busy',refreshPolicyFile);
+  $('b-md').value='loading…';
+  const p=await (await fetch('/api/policy')).json();
+  $('b-path').textContent='📄 '+(p.path||'');
+  $('b-md').value=p.markdown||'';
+}
+$('m-brain').onclick=()=>openBrain(openMgr);
+$('b-close').onclick=()=>{ bFrom ? openManager(bFrom) : closeAll(); };
+$('b-md').addEventListener('input',()=>{bDirty=true;});
+$('b-save').onclick=async()=>{
+  const r=await fetch('/api/policy',{method:'PUT',headers:{'content-type':'application/json'},
+    body:JSON.stringify({markdown:$('b-md').value})});
+  const j=await r.json();
+  if(j.error){ toast(j.error, true); return; }
+  bDirty=false;
+  const s=$('b-saved'); s.classList.add('on'); setTimeout(()=>s.classList.remove('on'),1400);
+};
+async function refreshPolicyFile(){
+  if(bDirty) return;
+  const p=await (await fetch('/api/policy')).json();
+  if(p && typeof p.markdown==='string' && p.markdown!==$('b-md').value) $('b-md').value=p.markdown;
+}
+
+const sendPrompt = (thread,t) => {
   const text=(t||'').trim();
-  if(!wKey || !text) return;
+  if(!chat.key || !text) return;
   setChatting(true);
-  echoLocal('w-thread', text, send({type:'worker_message',key:wKey,text}));
+  echoLocal(thread, text, send({type:'worker_message',key:chat.key,text}));
 };
 
 /* --- pipeline editor: columns, their workers, and the pipeline's colour --- */
@@ -759,11 +1163,12 @@ function openPipe(pipeId){
     const del=document.createElement('span'); del.className='mini'; del.textContent='🗑';
     del.title='Delete this column';
     del.onclick=async()=>{
-      if(!confirm(`Delete "${col.title}"?\n\nAny cards in it move to the previous column. Its worker file is archived, not deleted.`)) return;
+      if(!await askConfirm(`Delete "${col.title}"?`,
+         'Any cards in it move to the previous column. Its worker file is archived, not deleted.')) return;
       const r=await fetch('/api/column/'+col.id,{method:'DELETE'});
       const j=await r.json();
-      if(j.error){ alert(j.error); return; }
-      if(j.moved_cards) alert(`${j.moved_cards} card(s) moved out of "${j.title}".`);
+      if(j.error){ toast(j.error, true); return; }
+      if(j.moved_cards) toast(`${j.moved_cards} card(s) moved out of "${j.title}".`);
       reopenPipe();
     };
 
@@ -824,12 +1229,60 @@ $('col-left').onclick=()=>nudge(-1);
 $('col-right').onclick=()=>nudge(1);
 $('col-del').onclick=async()=>{
   const {col}=colCtx; if(!col) return;
-  if(!confirm(`Delete "${col.title}"?\n\nAny cards in it move to the previous column. Its worker file is archived, not deleted.`)) return;
+  if(!await askConfirm(`Delete "${col.title}"?`,
+     'Any cards in it move to the previous column. Its worker file is archived, not deleted.')) return;
   const r=await fetch('/api/column/'+col.id,{method:'DELETE'});
   const j=await r.json();
-  if(j.error) alert(j.error); else if(j.moved_cards) alert(`${j.moved_cards} card(s) moved out of "${j.title}".`);
+  if(j.error) toast(j.error, true); else if(j.moved_cards) toast(`${j.moved_cards} card(s) moved out of "${j.title}".`);
   closeAll();
 };
+
+/* --- an update is available ---
+   The board does not stop taking work because new code exists on disk. It says so, and waits
+   to be asked. Draining pre-emptively taxed the human for an update they had not asked to
+   start — they sat behind a queue for their own board. */
+async function checkUpdate(){
+  try{
+    const u=await (await fetch('/api/update')).json();
+    $('update-btn').style.display = (u.available && !u.restarting) ? 'inline-block' : 'none';
+    $('update-btn').title = `Running ${u.running}. Version ${u.on_disk} is ready.\n\n`
+      + 'Click to restart: the running work is allowed to finish first, then the board comes '
+      + 'back on the new version and picks up exactly where it left off. Nothing is killed.';
+    if(u.restarting) document.body.classList.add('draining');
+  }catch(e){}
+}
+$('update-btn').onclick=async()=>{
+  const st=await (await fetch('/api/inflight')).json();
+  const running = st.count
+    ? `${st.count} worker${st.count>1?'s are':' is'} running. Each is told to STOP — it writes down `
+      + `where it got to (WIP.md: done / mid-flight / next), then hands back. Nothing it did is `
+      + `thrown away: after the restart it is RESUMED in the same conversation, with everything `
+      + `it knew, and carries on. Takes well under a minute.`
+    : 'Nothing is running, so this takes a few seconds.';
+  if(!await askConfirm('Restart into the new version?',
+      running + ' You can carry on using the board while it winds down — the manager is free '
+      + 'and will still answer you.',
+      {ok:'Restart', danger:false})) return;
+  await fetch('/api/restart',{method:'POST'});
+  document.body.classList.add('draining');
+  $('update-btn').style.display='none';
+};
+checkUpdate(); setInterval(checkUpdate, 20000);
+
+/* --- show the work? ---
+   Off by default, and remembered. The chat is what the manager SAID to you; the commands he
+   ran and the reports he read are how he got there, and they belong behind a switch. */
+function paintWork(){
+  const on = localStorage.getItem('showwork')==='1';
+  document.body.classList.toggle('showwork', on);
+  $('work-btn').classList.toggle('on', on);
+}
+$('work-btn').onclick=()=>{
+  localStorage.setItem('showwork', localStorage.getItem('showwork')==='1' ? '0' : '1');
+  paintWork();
+  // the threads are already in the DOM — CSS does the hiding, so nothing to re-render
+};
+paintWork();
 
 /* --- trash --- */
 $('trash-btn').onclick=()=>{ show('d-trash'); send({type:'trash_open'}); };
@@ -843,7 +1296,9 @@ function renderTrash(items){
     const r=document.createElement('button'); r.className='btn ghost'; r.textContent='Restore';
     r.onclick=()=>send({type:'restore',card_id:c.id});
     const d=document.createElement('button'); d.className='btn danger'; d.textContent='Delete';
-    d.onclick=()=>{ if(confirm(`Permanently delete "${c.title}" and its folder? This cannot be undone.`)) send({type:'purge',card_id:c.id}); };
+    d.onclick=async()=>{ if(await askConfirm(`Permanently delete "${c.title}"?`,
+      'This deletes the card AND its folder from disk. It cannot be undone.', {ok:'Delete forever'}))
+      send({type:'purge',card_id:c.id}); };
     el.append(r,d); box.appendChild(el);
   }
 }
@@ -856,8 +1311,112 @@ function wire(inputId,btnId,fn){
 }
 wire('c-input','c-send',t=>sendCard(t));
 wire('m-input','m-send',t=>sendMgr(t));
-wire('w-input','w-chat-send',t=>sendWorker(t));
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeAll(); });
+wire('w-input','w-chat-send',t=>sendPrompt('w-thread',t));
+wire('b-input','b-chat-send',t=>sendPrompt('b-thread',t));
+document.addEventListener('keydown',e=>{ if(e.key!=='Escape') return; if(modalOpen()) closeModal(null); else closeAll(); });
+
+/* When a message was sent. Today → the clock; older → the date too, because "14:03" on a
+   message from last Tuesday is worse than no timestamp at all. */
+function stamp(ts){
+  if(!ts) return '';
+  const d=new Date(ts*1000), now=new Date();
+  const hm=d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const sameDay = d.toDateString()===now.toDateString();
+  return sameDay ? hm : `${d.toLocaleDateString([], {day:'2-digit', month:'short'})} ${hm}`;
+}
+
+
+/* ---------- the app's own dialogs ----------
+   Promise-based, so a call site reads like the prompt() it replaces:
+       const v = await askForm('New card', [...]);   // null if cancelled
+       if (await askConfirm('Delete X?', '...')) ...
+   Nothing here blocks the tab, and everything can be styled, tested and driven. */
+let modalDone=null;
+function closeModal(value){
+  $('modal').classList.remove('open');
+  $('m-scrim').classList.remove('open');
+  const done=modalDone; modalDone=null;
+  if(done) done(value);
+}
+function openModal(title, buildBody, ok='OK', danger=false){
+  return new Promise(resolve=>{
+    modalDone=resolve;
+    $('modal-title').textContent=title;
+    const body=$('modal-body'); body.innerHTML='';
+    // Reset the button BEFORE building: the form's own validation runs during buildBody and
+    // may legitimately disable it, and re-enabling afterwards would silently undo that.
+    $('modal-ok').textContent=ok;
+    $('modal-ok').className='btn'+(danger?' danger':'');
+    $('modal-ok').disabled=false;
+    const submit=buildBody(body);
+    $('modal-ok').onclick=()=>closeModal(submit ? submit() : true);
+    $('modal-cancel').onclick=()=>closeModal(null);
+    $('m-scrim').onclick=()=>closeModal(null);
+    $('modal').classList.add('open');
+    $('m-scrim').classList.add('open');
+    const first=body.querySelector('input,textarea'); if(first) first.focus();
+  });
+}
+function modalOpen(){ return $('modal').classList.contains('open'); }
+
+function askConfirm(title, note, {ok='Delete', danger=true}={}){
+  return openModal(title, body=>{
+    const p=document.createElement('div'); p.className='m-note'; p.textContent=note;
+    body.appendChild(p);
+    return ()=>true;
+  }, ok, danger).then(v=>v===true);
+}
+
+/* fields: {id,label,type:'text'|'textarea'|'choice',placeholder,value,required,options:[...]} */
+function askForm(title, fields, ok='Create'){
+  return openModal(title, body=>{
+    const state={};
+    // A required field disables the button until it is filled, rather than accepting the
+    // click and then telling you off. The rule should be visible, not a trap.
+    const required=fields.filter(f=>f.required).map(f=>f.id);
+    const revalidate=()=>{ $('modal-ok').disabled = required.some(id=>!(state[id]||'').trim()); };
+    for(const f of fields){
+      const lab=document.createElement('label'); lab.textContent=f.label; body.appendChild(lab);
+      if(f.type==='choice'){
+        state[f.id]=f.value ?? f.options[0].value;
+        const box=document.createElement('div'); box.className='choices'+(f.inline?' inline':'');
+        for(const o of f.options){
+          const el=document.createElement('div');
+          el.className='choice'+(o.value===state[f.id]?' on':'');
+          el.dataset.value=o.value;
+          if(f.inline) el.title=o.hint||'';
+          el.innerHTML=`<span class="swat" style="background:${o.color||'var(--untyped)'}"></span>`
+            +`<span><span class="ct">${esc(o.label)}</span><div class="cd">${esc(o.hint||'')}</div></span>`;
+          el.onclick=()=>{ state[f.id]=o.value;
+            [...box.children].forEach(c=>c.classList.toggle('on', c.dataset.value===o.value)); };
+          box.appendChild(el);
+        }
+        body.appendChild(box);
+      }else if(f.type==='textarea'){
+        const t=document.createElement('textarea'); t.rows=f.rows||3; t.placeholder=f.placeholder||'';
+        t.value=f.value||''; state[f.id]=t.value;
+        t.oninput=()=>{ state[f.id]=t.value; revalidate(); };
+        body.appendChild(t);
+      }else{
+        const i=document.createElement('input'); i.type='text'; i.placeholder=f.placeholder||'';
+        i.value=f.value||''; state[f.id]=i.value;
+        i.oninput=()=>{ state[f.id]=i.value; revalidate(); };
+        i.onkeydown=e=>{ if(e.key==='Enter' && !$('modal-ok').disabled) $('modal-ok').click(); };
+        body.appendChild(i);
+      }
+      if(f.note){ const n=document.createElement('div'); n.className='m-note'; n.textContent=f.note; body.appendChild(n); }
+    }
+    revalidate();
+    return ()=>state;
+  }, ok, false);
+}
+
+let toastTimer=null;
+function toast(text, bad=false){
+  const t=$('toast'); t.textContent=text;
+  t.classList.toggle('bad', !!bad); t.classList.add('on');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('on'), 4200);
+}
 
 /* ---------- util ---------- */
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}

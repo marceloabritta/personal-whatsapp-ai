@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manager import migrations  # noqa: E402
 from manager.board import Board  # noqa: E402
 from manager.migrations import m0003_maintenance_pipeline as m0003  # noqa: E402
-from manager.models import BUILD, FEATURE, MAINT, MAINTENANCE, PIPELINES, PLAN  # noqa: E402
+from manager.models import BACKLOG, BUILD, EXPED, FEATURE, MAINT, MAINTENANCE, PIPELINES, PLAN, UNSET  # noqa: E402
 from manager.pipelines import DEFAULT_COLUMNS  # noqa: E402
 from manager.workspace import Workspace  # noqa: E402
 
@@ -42,7 +42,7 @@ def new_board() -> Board:
 async def main() -> int:
     # -----------------------------------------------------------------
     section("the board has three pipelines, maintenance between plan and build")
-    check("order is plan → maint → build", PIPELINES == (PLAN, MAINT, BUILD))
+    check("order is plan → maint → exped → build", PIPELINES == (PLAN, MAINT, EXPED, BUILD))
 
     b = new_board()
     slugs = [c.slug for c in b.pipelines.columns[MAINT]]
@@ -66,13 +66,15 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("a card is born with the kind of the pipeline it is filed in")
-    feature = await b.add_card("Add flight search")
+    # Cards are born in the backlog now; `pipeline=` puts one straight into a pipeline.
+    feature = await b.add_card("Add flight search", pipeline=PLAN)
     fix = await b.add_card("Calendar replies twice", pipeline=MAINT)
 
     check("a plan card is a feature", feature.kind == FEATURE)
     check("a maint card is maintenance", fix.kind == MAINTENANCE)
     check("and it starts in Report", b.pipelines.get(fix.column).slug == "report")
-    check("a card cannot be born in build", (await b.add_card("x", pipeline=BUILD)).pipeline == PLAN)
+    check("a card cannot be born in build — it lands in the backlog", (await b.add_card("x", pipeline=BUILD)).pipeline == BACKLOG)
+    check("...and an unrouted card is born untyped", (await b.add_card("y")).kind == UNSET)
 
     # -----------------------------------------------------------------
     section("THE POINT: the kind survives promotion into build")
@@ -110,7 +112,7 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("the kind is the HUMAN's field: settable, and it stays set")
-    idea = await b.add_card("Actually this is a bug")
+    idea = await b.add_card("Actually this is a bug", pipeline=PLAN)
     check("it starts as a feature", idea.kind == FEATURE)
 
     await b.set_card_kind(idea.id, MAINTENANCE)

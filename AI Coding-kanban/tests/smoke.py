@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manager.board import Board                        # noqa: E402
 from manager.manager import Manager, ManagerConfig     # noqa: E402
-from manager.models import BUILD, MAINT, PLAN          # noqa: E402
+from manager.models import BACKLOG, BUILD, EXPED, MAINT, PLAN, FEATURE  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -44,9 +44,10 @@ async def main() -> int:
 
     # ---------------------------------------------------------------
     section("setup")
-    check("three pipelines exist", [p["id"] for p in pl.snapshot()] == [PLAN, MAINT, BUILD])
+    check("four pipelines exist", [p["id"] for p in pl.snapshot()] == [PLAN, MAINT, EXPED, BUILD])
     check("plan pipeline has columns", len(pl.columns[PLAN]) == 6)
     check("maintenance pipeline has columns", len(pl.columns[MAINT]) == 5)
+    check("expedited pipeline has columns", len(pl.columns[EXPED]) == 4)
     check("build pipeline has columns", len(pl.columns[BUILD]) == 5)
     check("a default manager exists", len(board.managers) == 1)
     check(
@@ -66,12 +67,20 @@ async def main() -> int:
 
     # ---------------------------------------------------------------
     section("a card, and its folder")
-    card = await board.add_card("Add password reset flow", "users forget passwords")
+    # Every card is born in the BACKLOG now — unrouted, and (unless told) untyped.
+    card = await board.add_card("Add password reset flow", "users forget passwords", kind=FEATURE)
     cid = card.id
-    check("card starts in the plan inbox", board.cards[cid].column == pl.first(PLAN).id)
+    check("card starts in the BACKLOG, not a pipeline", board.cards[cid].pipeline == BACKLOG)
+    check("...with no column", board.cards[cid].column == "")
     check("card is assigned to a manager", bool(board.cards[cid].manager_id))
     check(
-        "folder is under the column it sits in",
+        "folder is under the backlog",
+        board.cards[cid].dir == os.path.join("cards", "backlog", f"{cid}-add-password-reset-flow"),
+    )
+    await board.route_card(cid, PLAN)
+    check("routing puts it in the plan inbox", board.cards[cid].column == pl.first(PLAN).id)
+    check(
+        "...and the folder follows it",
         board.cards[cid].dir == os.path.join("cards", "plan", "ideas", f"{cid}-add-password-reset-flow"),
     )
     check("folder exists on disk", os.path.isdir(board.abs_dir(board.cards[cid])))

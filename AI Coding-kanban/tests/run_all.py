@@ -8,6 +8,9 @@
     maintenance  the third pipeline, and the card kind that survives promotion into build
     colors       pipeline colours, and the card that keeps its own into build
     workerchat   the per-worker conversation: its own session, journalled, rename-safe
+    backlog      the backlog, the card type, and the expedited fast lane
+    decouple     the manager goes IDLE while a worker runs — and keeps the card's context
+    ship         drain → wait → stop → migrate → start, WITHOUT killing live work
     restart      kill -9 the real server mid-run and start it again
     recovery     the incident's acceptance test: killed mid-run, it resumes ITSELF
     ui           drive the real page in headless Chrome  (skipped if Chrome isn't there)
@@ -26,6 +29,9 @@ SUITES = [
     "maintenance_test.py",
     "colors_test.py",
     "workerchat_test.py",
+    "backlog_test.py",
+    "decouple_test.py",
+    "ship_test.py",
     "restart_test.py",
     "recovery_test.py",
     "ui_test.py",

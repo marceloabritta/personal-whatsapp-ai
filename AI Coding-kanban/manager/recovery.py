@@ -124,7 +124,7 @@ class Recovery:
         elif run.kind == WORKER:
             await self.board.append_worker_message(run.target_id, "system", INTERRUPTED_NOTE)
             dispatch(
-                self.manager.handle_worker_message(
+                self.manager.handle_prompt_message(
                     run.target_id, RESUME_PROMPT.format(text=run.text), resuming=True
                 ),
                 f"resume worker {run.target_id}",
@@ -140,6 +140,15 @@ class Recovery:
         return f"resuming the interrupted {run.kind} run on {run.target_id} (attempt {attempts})"
 
     def _column_exists(self, key: str) -> bool:
+        """Is there still something for this prompt chat to be ABOUT?
+
+        The manager's own standing orders always exist. A column's worker may not — it can
+        be deleted, or renamed, while the process is dead.
+        """
+        from .manager import POLICY_KEY
+
+        if key == POLICY_KEY:
+            return True
         pipeline, _, slug = (key or "").partition("/")
         return self.board.pipelines.by_slug(pipeline, slug) is not None
 

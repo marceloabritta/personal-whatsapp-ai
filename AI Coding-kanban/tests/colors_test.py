@@ -25,6 +25,7 @@ from manager.migrations import m0004_pipeline_colors as m0004  # noqa: E402
 from manager.models import (  # noqa: E402
     BUILD,
     DEFAULT_PIPELINE_COLORS,
+    EXPED,
     MAINT,
     PIPELINE_TITLES,
     PLAN,
@@ -106,7 +107,7 @@ async def main() -> int:
     notes = m0004.migrate(ws)
     after = json.load(open(cfg))
     check("it reports what it did", bool(notes))
-    check("all three are painted", set(after["colors"]) == {PLAN, MAINT, BUILD})
+    check("all four are painted", set(after["colors"]) == {PLAN, MAINT, EXPED, BUILD})
     check("with the defaults", after["colors"][BUILD] == DEFAULT_PIPELINE_COLORS[BUILD])
     check("the columns survived", len(after[MAINT]) == 5)
     check("running it twice does nothing", m0004.migrate(ws) == [])
@@ -139,7 +140,11 @@ async def main() -> int:
     section("THE POINT: a card is coloured by the pipeline it BELONGS to")
     check(
         "the card's colour comes from its home pipeline, not its current one",
-        "function homePipe" in page and "c.kind==='maintenance' ? 'maint' : 'plan'" in page,
+        "function cardColor" in page and "c.kind==='maintenance' ? 'maint' : 'plan'" in page,
+    )
+    check(
+        "...and an UNTYPED card is grey, belonging to no pipeline yet",
+        "if(c.kind!=='feature' && c.kind!=='maintenance') return getVar('--untyped')" in page,
     )
     check("the card is a DARKER shade of it", re.search(r"--c-bg',shade\(home,\.\d+\)", page) is not None)
     check(

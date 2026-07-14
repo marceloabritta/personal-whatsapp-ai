@@ -134,7 +134,8 @@ def main() -> int:
     check("the card folders live there, not in the system folder", not cfg["data_dir"].startswith(ROOT + os.sep))
     check("it reports a schema version", cfg["schema_version"] >= 1)
 
-    cid = post(port, "/api/card", {"title": "Survive a kill", "description": "the whole point"})["id"]
+    cid = post(port, "/api/card", {"title": "Survive a kill", "description": "the whole point",
+                                   "pipeline": "plan", "kind": "feature"})["id"]
     asyncio.run(send_ws(port, {"type": "message", "card_id": cid, "text": "start"}))
 
     # The mock manager walks the columns with a pause at each one, so this lands mid-run.

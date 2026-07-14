@@ -48,7 +48,8 @@ def main() -> int:
     section("1-2. a run is dispatched, and the process is killed mid-flight")
     srv = Server(ws_dir, repo, port)
     srv.start()
-    cid = post(port, "/api/card", {"title": "Resume me", "description": "without being asked"})["id"]
+    cid = post(port, "/api/card", {"title": "Resume me", "description": "without being asked",
+                                   "pipeline": "plan", "kind": "feature"})["id"]
     send_ws_sync(port, {"type": "message", "card_id": cid, "text": "start"})
     time.sleep(1.4)  # the mock manager pauses at each column, so this lands mid-run
 

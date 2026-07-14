@@ -34,15 +34,28 @@ from typing import Any
 # ---------------------------------------------------------------------------
 PLAN = "plan"
 MAINT = "maint"
+EXPED = "exped"
 BUILD = "build"
 
+# The BACKLOG is not a pipeline, and calling it one would be a lie that costs us later: it
+# has no columns, no contracts and no workers. It is where a card LIVES BEFORE it has been
+# routed — everything is created there, and the only questions it answers are "what type is
+# this?" and "which pipeline should it go down?". Both are the manager's job, not a worker's.
+BACKLOG = "backlog"
+
 # Order matters: this is the order the board renders in, top to bottom.
-PIPELINES: tuple[str, ...] = (PLAN, MAINT, BUILD)
+PIPELINES: tuple[str, ...] = (PLAN, MAINT, EXPED, BUILD)
 PIPELINE_TITLES: dict[str, str] = {
+    BACKLOG: "Backlog",
     PLAN: "New Feature Plan",
     MAINT: "Maintenance",
+    EXPED: "Expedited",
     BUILD: "Build",
 }
+
+# Where the manager may ROUTE a card out of the backlog. Build is not on this list: nothing
+# reaches the build pipeline that has not been planned first.
+ROUTABLE: tuple[str, ...] = (PLAN, MAINT, EXPED)
 
 # The colour each pipeline is painted, and — one shade darker — the cards that BELONG to it.
 # These are DEFAULTS: the colour is state, editable per pipeline in the UI, so an upgrade
@@ -50,6 +63,7 @@ PIPELINE_TITLES: dict[str, str] = {
 DEFAULT_PIPELINE_COLORS: dict[str, str] = {
     PLAN: "#1d3b2a",  # green — new work
     MAINT: "#3d3620",  # yellow — repair
+    EXPED: "#22304d",  # blue — the fast lane
     BUILD: "#3b2222",  # red — shipping, the expensive end
 }
 
@@ -62,8 +76,18 @@ ORIGIN_PIPELINES: tuple[str, ...] = (PLAN, MAINT)
 FEATURE = "feature"
 MAINTENANCE = "maintenance"
 
-KINDS: tuple[str, ...] = (FEATURE, MAINTENANCE)
-KIND_TITLES: dict[str, str] = {FEATURE: "New feature", MAINTENANCE: "Maintenance"}
+# A card whose type nobody has decided YET. It exists so that "the manager assigns a type
+# right after creation" can be true: without it, an unclassified card would already be
+# silently a feature, and the classification would be a no-op nobody could audit.
+# It is a WAITING ROOM, not a resting place — a card must not leave the backlog holding it.
+UNSET = "unset"
+
+KINDS: tuple[str, ...] = (FEATURE, MAINTENANCE)  # the types a card may actually BE
+KIND_TITLES: dict[str, str] = {
+    FEATURE: "New feature",
+    MAINTENANCE: "Maintenance",
+    UNSET: "Needs a type",
+}
 KIND_BY_PIPELINE: dict[str, str] = {PLAN: FEATURE, MAINT: MAINTENANCE}
 
 # The pipeline a card of each kind BELONGS to — what it is coloured from, wherever it sits.
@@ -71,6 +95,8 @@ PIPELINE_BY_KIND: dict[str, str] = {FEATURE: PLAN, MAINTENANCE: MAINT}
 
 
 def valid_kind(kind: str) -> str | None:
+    """A settable type. `unset` is deliberately NOT settable: you may only ever move a card
+    OUT of it. Nothing gets to un-decide a card that has already been classified."""
     k = (kind or "").strip().lower()
     return k if k in KINDS else None
 
@@ -209,14 +235,24 @@ class Card:
     id: str
     title: str
     description: str = ""
-    pipeline: str = PLAN
-    kind: str = FEATURE  # "feature" | "maintenance" — what the card IS, not where it sits
-    column: str = ""  # Column.id
+    pipeline: str = BACKLOG  # every card is born in the backlog, unrouted
+    kind: str = UNSET  # "feature" | "maintenance" | "unset" — what it IS, not where it sits
+    column: str = ""  # Column.id — EMPTY while the card is in the backlog
     manager_id: str = ""  # ManagerAgent.id that owns this card
     stage: str = "new"  # free-text fine-grained status
     session_id: str | None = None  # SDK conversation for this card
     error: str | None = None
     busy: bool = False  # a worker/manager is currently running for this card
+    # WHO is working, while busy. "" = the manager himself; otherwise the worker's agent
+    # name. The board used to say only "working", which told you nothing about whether the
+    # manager was thinking for two seconds or a coder had been running for twenty minutes.
+    working: str = ""
+    # A worker that was STOPPED mid-task, and the SDK session it was stopped in. This is how
+    # it comes back with everything it knew — what it had read, decided, half-written —
+    # instead of a fresh worker starting the column from a blank sheet. Cleared the moment a
+    # worker finishes properly.
+    worker_session: str | None = None
+    worker_name: str = ""
     dir: str = ""  # card folder, relative to the data dir
     artifacts: dict[str, str] = field(default_factory=dict)  # name -> path rel. to data dir
     thread: list[ChatMessage] = field(default_factory=list)

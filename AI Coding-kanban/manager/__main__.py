@@ -22,6 +22,14 @@ from .version import SYSTEM_DIR, system_version
 from .workspace import Workspace, WorkspaceError, load_env, resolve
 
 
+def _board_is_serving() -> bool:
+    from . import shipping
+
+    host = os.environ.get("MANAGER_HOST", "127.0.0.1")
+    port = int(os.environ.get("MANAGER_PORT", "4173"))
+    return shipping.is_running(f"http://{host}:{port}")
+
+
 def _context() -> tuple[str, Workspace]:
     repo = os.path.abspath(os.environ.get("MANAGER_REPO_DIR") or os.path.dirname(SYSTEM_DIR))
     ws = resolve(repo)
@@ -36,12 +44,23 @@ def main(argv: list[str] | None = None) -> int:
         "command",
         nargs="?",
         default="serve",
-        choices=["serve", "migrate", "adopt", "status", "where"],
+        choices=["serve", "migrate", "adopt", "status", "where", "ship"],
     )
     p.add_argument(
         "path",
         nargs="?",
         help="for `adopt`: the OLD install to take the board state from",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="for `ship`: kill runs that will not finish. The turn they are in is LOST.",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="for `ship`: how long to wait for in-flight runs (seconds; default 1800)",
     )
     args = p.parse_args(argv)
 
@@ -58,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         return _status(repo, ws)
     if args.command == "adopt":
         return _adopt(ws, args.path)
+    if args.command == "ship":
+        return _ship(repo, ws, force=args.force, timeout=args.timeout)
     if args.command == "migrate":
         return _migrate(ws)
     return _serve(repo, ws)
@@ -123,6 +144,17 @@ def _status(repo: str, ws: Workspace) -> int:
 
 
 def _migrate(ws: Workspace) -> int:
+    # NEVER migrate a folder that a live server is holding open. It has the board in memory
+    # and will write it back — over the top of whatever the migration just did. That is not
+    # hypothetical: it happened, and it silently reverted a migration mid-session.
+    if _board_is_serving():
+        print(
+            "\n  ✗ the board is running, and migrating underneath it would be overwritten "
+            "by it.\n    Ship instead — it drains the work, stops cleanly, migrates and "
+            "restarts:\n\n      ./ship.sh\n",
+            file=sys.stderr,
+        )
+        return 1
     try:
         notes = updater.migrate(ws)
     except migrations.MigrationFailed as e:
@@ -133,6 +165,39 @@ def _migrate(ws: Workspace) -> int:
         print(f"  {n}")
     print(flush=True)  # flush: the server's banner goes to stderr right after this
     return 0
+
+
+def _ship(repo: str, ws: Workspace, force: bool = False, timeout: float | None = None) -> int:
+    """Drain the running board, stop it cleanly, migrate, and serve the new code.
+
+    The point of this command is what it does NOT do: it never kills a run to make room for
+    an update. It waits. If a run will not finish, it refuses to ship rather than shipping
+    over the top of it — because "some work is lost, every time we update" is the bug it
+    exists to fix, and a shipping path that sometimes destroys work has not fixed it.
+    """
+    from . import shipping
+
+    host = os.environ.get("MANAGER_HOST", "127.0.0.1")
+    port = int(os.environ.get("MANAGER_PORT", "4173"))
+    base = f"http://{host}:{port}"
+
+    print(f"\n  shipping manager-kanban {system_version()}", file=sys.stderr)
+    try:
+        shipping.drain_and_stop(
+            base,
+            timeout=timeout if timeout is not None else shipping.DEFAULT_TIMEOUT,
+            force=force,
+            say=lambda m: print(m, file=sys.stderr, flush=True),
+        )
+    except shipping.ShipError as e:
+        print(f"\n  ✗ not shipped: {e}\n", file=sys.stderr)
+        return 1
+
+    print("  migrating the working folder", file=sys.stderr)
+    if _migrate(ws) != 0:
+        return 1
+    print("  starting the new code\n", file=sys.stderr)
+    return _serve(repo, ws)
 
 
 def _serve(repo: str, ws: Workspace) -> int:
@@ -147,8 +212,31 @@ def _serve(repo: str, ws: Workspace) -> int:
     host = os.environ.get("MANAGER_HOST", "127.0.0.1")  # localhost only
     port = int(os.environ.get("MANAGER_PORT", "4173"))
     _banner(host, port, repo, ws)
-    uvicorn.run("manager.server:app", host=host, port=port, log_level="info")
+
+    # A uvicorn Server we own, rather than `uvicorn.run(...)`. The difference is the only
+    # reason the restart button works: `uvicorn.run()` re-raises SIGTERM after shutting down,
+    # so the process dies and never reaches the line below. Owning the Server lets the board
+    # set `should_exit` and have `run()` return — into the re-exec.
+    from . import server as server_module
+
+    config = uvicorn.Config("manager.server:app", host=host, port=port, log_level="info")
+    srv = uvicorn.Server(config)
+    server_module.EXIT_HOOK = lambda: setattr(srv, "should_exit", True)
+    srv.run()
+
+    # Did it stop in order to COME BACK? The board writes this sentinel when the human asked
+    # for an update and the last run has finished. Re-exec: the new process re-imports the new
+    # code, runs any migration, and picks the board back up — recovery resumes anything that
+    # was interrupted, and the pending queue delivers anything they said in the meantime.
+    if os.path.exists(_restart_sentinel(ws)):
+        os.remove(_restart_sentinel(ws))
+        print("\n  restarting into the new code…\n", file=sys.stderr, flush=True)
+        os.execv(sys.executable, [sys.executable, "-m", "manager"])
     return 0
+
+
+def _restart_sentinel(ws: Workspace) -> str:
+    return os.path.join(ws.path, ".restart")
 
 
 def _banner(host: str, port: int, repo: str, ws: Workspace) -> None:

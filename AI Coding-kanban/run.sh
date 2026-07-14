@@ -2,6 +2,7 @@
 # One-command start for manager-kanban.
 #
 #   ./run.sh              start the board
+#   ./run.sh ship         ship an update WITHOUT killing work in flight (see ship.sh)
 #   ./run.sh status       what version am I on, what would an update do
 #   ./run.sh where        print this project's working folder
 #
