@@ -209,6 +209,8 @@ def _serve(repo: str, ws: Workspace) -> int:
         if _migrate(ws) != 0:
             return 1
 
+    _clear_orphaned_restart(ws)
+
     host = os.environ.get("MANAGER_HOST", "127.0.0.1")  # localhost only
     port = int(os.environ.get("MANAGER_PORT", "4173"))
     _banner(host, port, repo, ws)
@@ -237,6 +239,35 @@ def _serve(repo: str, ws: Workspace) -> int:
 
 def _restart_sentinel(ws: Workspace) -> str:
     return os.path.join(ws.path, ".restart")
+
+
+def _clear_orphaned_restart(ws: Workspace) -> None:
+    """A sentinel found at STARTUP is always stale, and clearing it is the whole job.
+
+    The sentinel bridges one process's exit to its own re-exec, and nothing longer: the board
+    writes it, `run()` returns, and the SAME process removes it before `execv` (above). So a
+    freshly-booted process cannot legitimately find one — if it does, whoever wrote it was
+    killed before it could consume it (closing the terminal mid-restart is enough), and this
+    start is the restart it was asking for.
+
+    Leaving it is not harmless. /api/update reports `restarting` from the file's mere
+    existence, so the board wears the "winding down to restart" banner forever while in fact
+    serving work normally — it lies to the human about the state of their own board.
+    """
+    path = _restart_sentinel(ws)
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            wanted = fh.read().strip()
+    except OSError:
+        wanted = ""
+    os.remove(path)
+    into = f" into {wanted}" if wanted else ""
+    print(
+        f"  a restart{into} was cut off before it could finish — this start IS that restart",
+        file=sys.stderr,
+    )
 
 
 def _banner(host: str, port: int, repo: str, ws: Workspace) -> None:

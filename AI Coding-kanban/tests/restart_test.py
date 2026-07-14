@@ -150,10 +150,22 @@ def main() -> int:
     check("the process is gone", srv.proc.poll() is not None)
     check("the card's folder is still on disk", os.path.isdir(card_dir))
 
+    # ...and say the kill landed while it was restarting into a new version. The board writes
+    # this sentinel and then removes it on the far side of its own exit, so a process killed in
+    # between leaves it behind. A fresh boot that INHERITS it reports `restarting` forever and
+    # wears the "winding down to restart" banner while actually serving work normally.
+    sentinel = os.path.join(ws_dir, ".restart")
+    with open(sentinel, "w", encoding="utf-8") as fh:
+        fh.write("9.9.9")
+
     section("start it again")
     srv2 = Server(ws_dir, repo, port)
     srv2.start()
     back = get(port, f"/api/card/{cid}")
+
+    check("the orphaned restart marker is gone", not os.path.exists(sentinel))
+    check("the board does NOT claim it is winding down", get(port, "/api/update")["restarting"] is False)
+    check("and it is not draining either", get(port, "/api/inflight")["draining"] is False)
 
     check("the card came back", back["id"] == cid)
     check("its title survived", back["title"] == "Survive a kill")
