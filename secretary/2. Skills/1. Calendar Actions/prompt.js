@@ -22,6 +22,34 @@ const PARTICIPANT = {
   },
 };
 
+// The repeat rule for a RECURRING create — a reusable nullable-object fragment shared by
+// CAL_SCHEMA and REVIEW_SCHEMA (same reason PARTICIPANT is shared). null = a ONE-OFF event
+// (the default). `anyOf` null-union (not a ["object","null"] type-union) — the same reason
+// list_mode/participants use anyOf: the structured-output validator is happier with the null
+// branch explicit. The object's REAL validation is skill.js's toRRule; this is only the shape.
+const RECURRENCE = {
+  anyOf: [
+    { type: "null" },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["freq", "interval", "byday", "count", "until"],
+      properties: {
+        freq: { type: "string", enum: ["daily", "weekly", "monthly"] },
+        interval: { type: ["number", "null"] },
+        byday: {
+          anyOf: [
+            { type: "null" },
+            { type: "array", items: { type: "string", enum: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] } },
+          ],
+        },
+        count: { type: ["number", "null"] },
+        until: { type: ["string", "null"] },
+      },
+    },
+  ],
+};
+
 export const CAL_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -37,6 +65,7 @@ export const CAL_SCHEMA = {
     "list_mode",
     "range_start_iso",
     "range_end_iso",
+    "recurrence",
   ],
   properties: {
     action: { type: "string", enum: ["create", "delete", "edit", "list", "other"] },
@@ -63,6 +92,9 @@ export const CAL_SCHEMA = {
     },
     range_start_iso: { type: ["string", "null"] },
     range_end_iso: { type: ["string", "null"] },
+    // The repeat rule for a RECURRING create ("every Monday", "a cada 2 semanas") — else null,
+    // a one-off (the default). action="create" only; toRRule (skill.js) is its sole validator.
+    recurrence: RECURRENCE,
   },
 };
 
@@ -81,6 +113,7 @@ export const REVIEW_SCHEMA = {
     "all_day",
     "all_day_end_iso",
     "summary",
+    "recurrence",
   ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
@@ -94,6 +127,11 @@ export const REVIEW_SCHEMA = {
     all_day: { type: ["boolean", "null"] },
     all_day_end_iso: { type: ["string", "null"] },
     summary: { type: "string" },
+    // The repeat rule, HERE so the confirm step can add / change / CLEAR it. null is the
+    // CLEAR value ("just once") — applyDraftUpdate reads it DIRECTLY, so the review copy must
+    // make the model ECHO the current recurrence on non-clearing modifies and return null
+    // ONLY to clear (a null it did not mean drops the whole series).
+    recurrence: RECURRENCE,
   },
 };
 
@@ -227,6 +265,24 @@ For action="create", fill these (for action="delete", ALSO fill participants and
 - all_day = true when the order says the event takes the WHOLE DAY ("o dia inteiro", "o dia todo", "all day") rather than starting at a time. STILL fill start_iso — with the FIRST day of the event at 00:00, -03:00 offset (the day is read from it); duration_min is ignored. If the order states a TIME ("amanhã 10h", "at 3pm"), all_day = false.
 - all_day_end_iso: ONLY for an all-day RANGE spanning several days ("de segunda a quarta", "a semana toda", "Mon to Wed", "os dois dias"). Set it to the LAST day the event STILL COVERS, at 00:00 with the -03:00 offset — INCLUSIVE: for "segunda a quarta" it is WEDNESDAY, not Thursday. Do NOT add a day. For a single all-day event, and whenever all_day is false, set all_day_end_iso = null.
 - "summary": a longer one-line agenda/description for the event BODY — distinct from the short title above; may be "" when there's nothing to add.
+- recurrence = the repeat rule when the order asks for a REPEATING event ("every Monday",
+  "toda segunda", "every 2 weeks", "a cada 2 semanas", "5 times", "5 vezes", "until August",
+  "até agosto", "every morning", "daily", "on the 5th every month", "todo dia 5"). Otherwise
+  recurrence = null — a ONE-OFF event, the default. NEVER invent a repeat from a single order.
+  start_iso STAYS the FIRST occurrence. The object is {freq, interval, byday, count, until}:
+  - freq: "daily" ("every day", "todo dia", "every morning", "daily"); "weekly" ("every Monday",
+    "toda segunda", "every week"); "monthly" ("every month", "todo mês", "on the 5th every
+    month"). Monthly repeats on start_iso's DAY-OF-MONTH. v1 has NO "first Monday of the month"
+    and NO yearly — if the order needs either, set recurrence = null.
+  - interval: the N in "every N days/weeks/months" ("every 2 weeks" -> 2; "a cada 2 semanas" ->
+    2). null or 1 when not stated.
+  - byday: WEEKLY only — the weekdays as ["MO","TU","WE","TH","FR","SA","SU"] ("every Mon & Wed"
+    -> ["MO","WE"]; "toda segunda" -> ["MO"]). null for daily/monthly.
+  - count: the number of occurrences ("5 times"/"5 vezes"/"for 3 sessions" -> 5/5/3); else null.
+  - until: the END date ("until August"/"até 30 de ago"), ISO 8601 with the -03:00 offset,
+    resolved from the current date/time; else null.
+  If the order gives BOTH a count and an until, fill count and leave until null — a repeat has
+  one or the other, never both.
 
 For action="delete", also identify WHICH event to cancel so it can be matched on the calendar (the decoded link is only one signal):
 - participants: the people the event is WITH — read them (and their emails) from the quoted invite message and the conversation. Include emails whenever they appear (the invite text usually lists them).
@@ -276,7 +332,7 @@ ${buildExtractionRules(OWNER_NAME)}`;
 // (one call keeps the correlated fields consistent — same reasoning as create).
 export function buildCreateReviewSystem(OWNER_NAME) {
   return `You are ${OWNER_NAME}'s calendar assistant. You already PROPOSED an event and asked ${OWNER_NAME} to confirm it. Read the current DRAFT, the recent conversation, and ${OWNER_NAME}'s LATEST message, then decide what that latest message means for the pending event.
-Choose the "decision" and, for a modify, return the updated draft fields (title, participants, start_iso, duration_min, all_day, all_day_end_iso, summary):
+Choose the "decision" and, for a modify, return the updated draft fields (title, participants, start_iso, duration_min, all_day, all_day_end_iso, summary, recurrence):
 
 - "confirm": the latest message clearly approves the event as proposed (e.g. yes, confirm, go ahead, send it, sim, pode, isso).
 - "modify": the latest message asks to CHANGE something (time, date, title, duration, attendees, emails, agenda). Return the FULL updated draft with the change applied, carrying over EVERY unchanged field from the current draft exactly.
@@ -288,6 +344,7 @@ For "modify", apply the change on top of the current draft:
 - all_day / all_day_end_iso: CARRY THEM OVER FROM THE DRAFT UNCHANGED unless the latest message asks to change them. Set all_day=true if ${OWNER_NAME} now says it is the whole day ("na verdade, o dia todo"), and false if he gives it a time ("na verdade às 10h") — in which case all_day_end_iso becomes null. all_day_end_iso is the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when it spans several days ("só até terça" → TUESDAY), and null for a single day. Changing only the title, the duration or the attendees changes NEITHER field;
 - when adding/removing an attendee, keep the others; each participant is {name, email|null};
 - "participants" is the FULL attendee list. An empty array [] means the event has NO outside guests — return [] ONLY when ${OWNER_NAME} says nobody should be invited. NEVER return [] when you are only changing the time, the title or the duration: echo the draft's attendees exactly.
+- recurrence: the repeat rule {freq, interval, byday, count, until} or null, SAME shape and rules as the first extraction. On any modify that is NOT about the repetition (a rename, a new time, an added guest), ECHO the draft's current recurrence EXACTLY — carry it over unchanged. Change it only when the latest message changes the repeat ("make it every other Monday" -> interval 2; "only until August" -> set until; "add Wednesdays" -> add "WE"). Return recurrence = null ONLY when the owner cancels the repetition ("actually just once", "na verdade só uma vez", "not recurring") — that clears it to a single event. NEVER return null just because the modify was about something else: a null you did not mean DROPS the whole series.
 - change ONLY what the latest message asks to change; echo everything else from the draft.
 For any decision other than "modify", the draft fields are ignored — you may echo the current draft.`;
 }
@@ -527,6 +584,52 @@ function localizeDay(lang, ms) {
   });
 }
 
+// Short localized weekday labels for a recurrence phrase (module-private). Canonical
+// RRULE codes -> the 3-letter name in each maintained language.
+const WEEKDAY_SHORT = {
+  en: { MO: "Mon", TU: "Tue", WE: "Wed", TH: "Thu", FR: "Fri", SA: "Sat", SU: "Sun" },
+  pt: { MO: "seg", TU: "ter", WE: "qua", TH: "qui", FR: "sex", SA: "sáb", SU: "dom" },
+};
+
+// The confirm/done RECURRENCE line, localized. Assumes `rec` is COMPILABLE — the caller
+// (recurrenceLineFor) gates on toRRule first, so freq is one of daily/weekly/monthly and any
+// until is in the future. Returns a capitalized phrase, e.g. "Every week on Mon, 5 times",
+// "A cada 2 semanas às seg, qua", "Todo dia até 30 de ago. de 2026". All-day carries no clock
+// time, so these phrases never embed a time — the when-line still prints "Dia todo".
+export function describeRecurrence(rec, lang) {
+  const pt = lang === "pt";
+  const iv = Number(rec.interval) > 1 ? Number(rec.interval) : 1;
+  const ORDER = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+  const map = WEEKDAY_SHORT[lang] || WEEKDAY_SHORT.en;
+  const set = new Set((Array.isArray(rec.byday) ? rec.byday : []).map((d) => String(d).toUpperCase()));
+  const days = ORDER.filter((d) => set.has(d)).map((d) => map[d]).join(", ");
+
+  let core;
+  if (rec.freq === "daily") {
+    core = iv > 1 ? (pt ? `a cada ${iv} dias` : `every ${iv} days`) : pt ? "todo dia" : "every day";
+  } else if (rec.freq === "monthly") {
+    core = iv > 1 ? (pt ? `a cada ${iv} meses` : `every ${iv} months`) : pt ? "todo mês" : "every month";
+  } else {
+    // weekly
+    const base = iv > 1 ? (pt ? `a cada ${iv} semanas` : `every ${iv} weeks`) : pt ? "toda semana" : "every week";
+    core = days ? (pt ? `${base} às ${days}` : `${base} on ${days}`) : base;
+  }
+
+  let suffix = "";
+  const count = Number(rec.count);
+  if (Number.isFinite(count) && count > 0) {
+    suffix = pt ? `, ${count} vezes` : `, ${count} times`;
+  } else if (rec.until) {
+    const ms = Date.parse(rec.until);
+    if (Number.isFinite(ms)) {
+      suffix = pt ? ` até ${localizeDay("pt", ms)}` : ` until ${localizeDay("en", ms)}`;
+    }
+  }
+
+  const phrase = core + suffix;
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+}
+
 // Do two instants fall on the same calendar day in the reply TZ? Used only for the
 // empty-state wording (single day vs a spanning range).
 function sameLocalDay(aMs, bMs) {
@@ -579,28 +682,30 @@ const REPLY = {
     // empty "- " bullet says nothing, and a person must NEVER be dropped silently.
     // `duration` is null for an all-day event (the caller passes null) — `when` already
     // says "All day", and "(1440 min)" is exactly the thing the owner should never see.
-    createConfirm: ({ title, emails, when, duration, uninvited }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n- Without ${joinListEn(uninvited)} — I don't have their email.`
         : "";
+      const rec = recurrence ? `\n- ${recurrence}` : "";
       return `Confirm this event:
 - ${title}
 - ${guests}${without}
-- ${when}${duration ? ` (${duration} min)` : ""}
+- ${when}${duration ? ` (${duration} min)` : ""}${rec}
 
 Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
     },
-    createDone: ({ reused, title, emails, when, duration, link, uninvited }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n\nI created it without inviting ${joinListEn(uninvited)} — I don't have their email.`
         : "";
+      const rec = recurrence ? `\n- ${recurrence}` : "";
       return `${
         reused
           ? "That event already exists — here it is (no duplicate created):"
           : "Done! Invite created and sent:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${without}\n\nHere is a link for the event:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nHere is a link for the event:\n${link}`;
     },
     createCancelled: ({ title }) => `Okay, I won't create "${title}".`,
     createGoogleError: () =>
@@ -676,28 +781,30 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     noAction: ({ summary }) =>
       `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
-    createConfirm: ({ title, emails, when, duration, uninvited }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n- Sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
+      const rec = recurrence ? `\n- ${recurrence}` : "";
       return `Confirme este evento:
 - ${title}
 - ${guests}${without}
-- ${when}${duration ? ` (${duration} min)` : ""}
+- ${when}${duration ? ` (${duration} min)` : ""}${rec}
 
 Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`;
     },
-    createDone: ({ reused, title, emails, when, duration, link, uninvited }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n\nCriei sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
+      const rec = recurrence ? `\n- ${recurrence}` : "";
       return `${
         reused
           ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
           : "Pronto! Convite criado e enviado:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${without}\n\nAqui está o link do evento:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nAqui está o link do evento:\n${link}`;
     },
     createCancelled: ({ title }) => `Ok, não vou criar "${title}".`,
     createGoogleError: () =>

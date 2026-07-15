@@ -478,6 +478,7 @@ const cal = (o) =>
     list_mode: null,
     range_start_iso: null,
     range_end_iso: null,
+    recurrence: null,
     ...o,
   });
 const resolve_ = (o) =>

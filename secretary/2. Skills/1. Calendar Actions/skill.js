@@ -33,6 +33,7 @@ import {
   reply,
   localizeDate,
   localizeWhen,
+  describeRecurrence,
 } from "./prompt.js";
 // Structured outputs (jsonFormat/readReply), the shared confirm-first classifier and
 // Google OAuth all live in the orchestrator's lib — see those files.
@@ -56,7 +57,7 @@ export const capabilities = {
 // back, through ctx.info, is a drop-in for interpret()'s output — which is why handleCreate,
 // handleDelete, handleEdit and handleList need no changes at all.
 //
-// 🔴 `fields` MUST BE EXACTLY CAL_SCHEMA.required — the SAME ELEVEN NAMES. That identity is
+// 🔴 `fields` MUST BE EXACTLY CAL_SCHEMA.required — the SAME TWELVE NAMES. That identity is
 // what makes the payload a drop-in. It is also a NEW way to break this skill silently: add a
 // field to CAL_SCHEMA and forget it here, and the merged prompt simply stops asking for it,
 // draftFromInfo reads `undefined`, and the feature that field implements dies with no test
@@ -114,6 +115,11 @@ export const manifest = {
       },
       range_start_iso: { type: "iso", nullable: true, desc: 'action="list" ONLY, else null' },
       range_end_iso: { type: "iso", nullable: true, desc: 'action="list" ONLY, else null' },
+      recurrence: {
+        type: "object",
+        nullable: true,
+        desc: 'the repeat rule for a RECURRING event, else null (one-off — the default). Object {freq: "daily"|"weekly"|"monthly", interval: number|null, byday: ["MO".."SU"]|null (weekly only), count: number|null, until: ISO-8601 -03:00|null}. count XOR until, never both.',
+      },
     },
     // A faithful transcription of missingOf()/isComplete() below. `participants[].email` means
     // "every attendee that EXISTS has an email" — an EMPTY list is COMPLETE, not missing (a
@@ -248,6 +254,59 @@ function normalizeAllDay(start_iso, all_day, all_day_end_iso) {
   return end;
 }
 
+// ---- RRULE compiler (recurring create) --------------------------------------
+// The deterministic layer that turns the model's structured recurrence object into the
+// exact RRULE string written to Google. Exported so scripts/calendar-recurrence-selftest.mjs
+// can pin the output offline. `toRRule` is the SINGLE validator of a recurrence — an
+// uncompilable / degenerate / past-until object falls back to null (a one-off), so a garbled
+// recurrence degrades to a single event rather than erroring (confirm-first is the backstop).
+//
+// rec: the structured recurrence object (or null). opts: { allDay = false, startIso = null }.
+// Returns an RRULE string ("RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=5") or null when there is no valid
+// recurrence (one-off). Part order is fixed: FREQ ; INTERVAL ; BYDAY ; (COUNT | UNTIL).
+export function toRRule(rec, { allDay = false, startIso = null } = {}) {
+  if (!rec || typeof rec !== "object") return null;
+  const FREQ = { daily: "DAILY", weekly: "WEEKLY", monthly: "MONTHLY" }[rec.freq];
+  if (!FREQ) return null;                                   // unknown/absent freq -> one-off
+  const parts = [`FREQ=${FREQ}`];
+
+  const interval = Number(rec.interval);
+  if (Number.isFinite(interval) && interval > 1) parts.push(`INTERVAL=${interval}`); // 0/1/missing -> default 1
+
+  if (FREQ === "WEEKLY" && Array.isArray(rec.byday)) {      // BYDAY on WEEKLY only; never ordinal
+    const ORDER = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+    const set = new Set(rec.byday.map((d) => String(d).toUpperCase()));
+    const codes = ORDER.filter((d) => set.has(d));          // dedup + canonical order
+    if (codes.length) parts.push(`BYDAY=${codes.join(",")}`);
+  }
+
+  const count = Number(rec.count);
+  if (Number.isFinite(count) && count > 0) {
+    parts.push(`COUNT=${count}`);                           // COUNT wins, UNTIL dropped — RRULE forbids both
+  } else if (rec.until) {
+    const startMs = Date.parse(startIso || "");
+    const untilMs = Date.parse(rec.until);
+    if (!Number.isFinite(untilMs)) return null;             // unparseable until -> one-off
+    if (Number.isFinite(startMs) && untilMs <= startMs) return null; // past-until -> one-off
+    const tok = toRRuleUntil(rec.until, allDay);
+    if (!tok) return null;
+    parts.push(`UNTIL=${tok}`);
+  }
+  return `RRULE:${parts.join(";")}`;
+}
+
+// Value-type-correct RRULE UNTIL token (RFC 5545: UNTIL must match DTSTART's value type).
+// all-day series (DATE DTSTART) -> "YYYYMMDD". timed series -> UTC basic "YYYYMMDDTHHMMSSZ",
+// pinned to the INCLUSIVE end of the until day in CAL_TZ. Returns null on an unparseable date.
+export function toRRuleUntil(untilIso, allDay = false) {
+  const ms = Date.parse(untilIso || "");
+  if (!Number.isFinite(ms)) return null;
+  const day = localDayStr(ms);                              // "YYYY-MM-DD" in CAL_TZ (existing helper)
+  if (allDay) return day.replace(/-/g, "");                 // DATE form: YYYYMMDD
+  const endMs = Date.parse(`${day}T23:59:59-03:00`);        // inclusive end of the local until-day
+  return new Date(endMs).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"); // YYYYMMDDTHHMMSSZ
+}
+
 // The READ direction: the all-day shape of a REAL Google event, in the house's own terms.
 // The inverse of allDayWireDates — Google's `end.date` is EXCLUSIVE, so the INCLUSIVE last
 // day is one day back, and it is null when that IS the start day (a single all-day day
@@ -285,7 +344,7 @@ function calId(env) {
 // read side. `end_date` is EXCLUSIVE (Google's rule) and is computed by the caller.
 async function createEvent(
   env,
-  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date }
+  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date, recurrence }
 ) {
   const cal = calendarClient(env);
   // Idempotency: repeated "schedule this" (e.g. while testing) used to stack up
@@ -311,6 +370,9 @@ async function createEvent(
             start: { dateTime: start_iso, timeZone: CAL_TZ },
             end: { dateTime: end_iso, timeZone: CAL_TZ },
           }),
+      // A RECURRING event carries an RRULE line; a one-off (recurrence null) omits the field
+      // entirely — byte-identical to today's write.
+      ...(recurrence ? { recurrence: [recurrence] } : {}),
       attendees: emails.map((email) => ({ email })),
     },
   });
@@ -668,6 +730,10 @@ function draftFromInfo(ctx, info) {
     all_day,
     all_day_end_iso,
     summary: info.summary || "",
+    // Kept RAW (no normalization here) — toRRule is the single validator, called at render
+    // and write time. Plays no part in missingOf()/isComplete(): a null recurrence is an
+    // ordinary one-off, never a missing field.
+    recurrence: info.recurrence || null,
   };
 }
 
@@ -680,6 +746,18 @@ function draftEmails(draft) {
 // never dropped silently.
 function draftUninvited(draft) {
   return (draft.participants || []).filter((p) => !p.email && p.name).map((p) => p.name);
+}
+
+// The localized recurrence line for the confirm/done bubble, or null for a one-off. It MUST
+// call toRRule with the SAME opts createFromDraft uses to WRITE the rule — `all_day` and
+// `start_iso` transcribed, not re-derived — so the text line and the written RRULE can never
+// diverge at a boundary. Gating the display on toRRule truthiness keeps wire and text in
+// sync: an uncompilable or past-until recurrence (which toRRule drops to null) shows NO line
+// and writes NO rule.
+function recurrenceLineFor(draft, lang) {
+  return toRRule(draft.recurrence, { allDay: !!draft.all_day, startIso: draft.start_iso })
+    ? describeRecurrence(draft.recurrence, lang)
+    : null;
 }
 
 // Open (or refresh) the confirmation session holding the draft and show it. The
@@ -707,6 +785,7 @@ async function openCreateConfirm(ctx, draft) {
       // An all-day event has no duration to state — "(1440 min)" is the bug, not the event.
       duration: draft.all_day ? null : draft.duration_min,
       uninvited: draftUninvited(draft),
+      recurrence: recurrenceLineFor(draft, ctx.lang),
     })
   );
 }
@@ -729,6 +808,10 @@ async function createFromDraft(ctx, draft) {
     ).toISOString();
   }
 
+  // Compile the RRULE with the SAME opts recurrenceLineFor uses to render the line — so the
+  // written rule and the confirmed text agree. null (one-off) omits the field on the write.
+  const rrule = toRRule(draft.recurrence, { allDay: all_day, startIso: draft.start_iso });
+
   const ev = await createEvent(env, {
     title: draft.title,
     emails,
@@ -738,6 +821,7 @@ async function createFromDraft(ctx, draft) {
     all_day,
     start_date,
     end_date,
+    recurrence: rrule,
   });
   await send(
     number,
@@ -749,6 +833,7 @@ async function createFromDraft(ctx, draft) {
       duration: all_day ? null : draft.duration_min,
       link: ev.htmlLink || "",
       uninvited: draftUninvited(draft),
+      recurrence: recurrenceLineFor(draft, ctx.lang),
     })
   );
 }
@@ -824,6 +909,12 @@ function applyDraftUpdate(ctx, prev, review) {
     all_day: review.all_day ?? prev.all_day,
     all_day_end_iso: review.all_day_end_iso ?? prev.all_day_end_iso,
     summary: review.summary ?? prev.summary,
+    // DIRECT, not `?? prev`: for recurrence, null is the CLEAR value ("just once"), so
+    // `?? prev` would make clearing impossible. The review copy makes the model echo the
+    // current recurrence on every non-clearing modify and return null ONLY to clear, so a
+    // direct read is correct. (Contrast all_day above: an explicit false is "turn off", so
+    // it keeps `?? prev` to distinguish that from "not mentioned".)
+    recurrence: review.recurrence,
   });
 }
 
@@ -938,6 +1029,10 @@ function mergeDraft(ctx, prev, patch) {
     all_day: prev.all_day,
     all_day_end_iso: prev.all_day_end_iso,
     summary: prev.summary,
+    // Carried from prev, same as all_day above: the resolver chases a time and emails, never
+    // the repeat rule, so without this line the recurrence is silently dropped on every
+    // gathering merge.
+    recurrence: prev.recurrence,
   });
 }
 

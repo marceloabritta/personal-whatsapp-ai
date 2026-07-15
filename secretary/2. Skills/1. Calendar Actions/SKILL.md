@@ -6,7 +6,11 @@
 >
 > **It handles four tasks:**
 > 1. **Create** an event and email the invite to the attendees — **confirm-first**:
->    it shows you a draft and waits for your **`yes`** before writing anything.
+>    it shows you a draft and waits for your **`yes`** before writing anything. Handles
+>    **recurring** events too ("every Monday", "every 2 weeks until August", "5 times",
+>    "daily", "on the 5th every month") — the draft states the repeat in words, and it writes
+>    a real repeating Google event. *(Create-only: editing or cancelling a recurring event
+>    currently affects a single occurrence, not the series.)*
 > 2. **Edit/reschedule** an event you replied to — move it, change its length, rename it,
 >    or add/remove an attendee. **Confirm-first**: it shows the updated event and waits
 >    for your **`yes`**, and **stays open** so you can keep telling it changes ("actually
@@ -248,7 +252,7 @@ names of `CAL_SCHEMA`** — which is what makes it a drop-in and why `handleCrea
 **one** LLM call before the reply instead of three. User-visible behaviour is unchanged: it is
 faster, not different.
 
-> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all ELEVEN names.**
+> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all TWELVE names.**
 > That binding is load-bearing, and it is a new way to break this skill *silently*: add a field
 > to `CAL_SCHEMA` and forget the declaration, and the merged prompt simply stops asking for it,
 > `draftFromInfo` reads `undefined`, and the feature that field implements dies **without a
@@ -428,6 +432,50 @@ now queries the **start day's** window and matches `start.date` **and** `end.dat
 Mon–Wed order does not dedupe against a Monday-only event). The timed branch keeps its ±60s
 window and `dateTime` equality byte for byte, and the delete sweep — its other caller — passes
 no all-day flag, so its behaviour is unchanged.
+
+#### RECURRING events (create-only)
+A create order that asks for a **repeat** ("every Monday", "toda segunda", "every 2 weeks until
+August", "a cada 2 semanas até agosto", "5 times", "daily", "on the 5th every month") produces a
+**real recurring Google event** — an RRULE on `events.insert` — instead of a single occurrence.
+`start_iso` stays the **first** occurrence; the confirm and done bubbles state the repeat in
+words (en/pt), e.g. *"Every week on Mon, 5 times"* / *"A cada 2 semanas às seg, qua"* / *"Todo
+dia até 30 de ago. de 2026"*.
+
+- **The extracted shape** is `recurrence = {freq, interval, byday, count, until}` or `null` (a
+  one-off — the default). It is the **twelfth** `CAL_SCHEMA`/`manifest.inputs.fields` field, and
+  it rides `REVIEW_SCHEMA` too so the confirm step can add / change / **clear** it. It is kept
+  **RAW** on the draft — `toRRule` is its single validator, never `missingOf` (a null recurrence
+  is an ordinary one-off, never a missing field).
+- **The v1 patterns:** daily; weekly-by-day (`byday` = `["MO".."SU"]`, weekly only); an
+  `interval` (every N days/weeks/months); a `count` (N occurrences); an `until` end date; and
+  **day-of-month monthly** (repeats on `start_iso`'s day-of-month). **OUT of v1** (all →
+  `recurrence = null`, a one-off): monthly-by-weekday ("first Monday of the month"), yearly,
+  `EXDATE`/`RDATE`, and **series edit/delete**.
+- **The compile layer** is `toRRule(rec, {allDay, startIso})` / `toRRuleUntil(untilIso, allDay)`
+  (skill.js, exported, pinned offline by `scripts/calendar-recurrence-selftest.mjs`). Part order
+  is fixed `FREQ ; INTERVAL ; BYDAY ; (COUNT | UNTIL)`. **COUNT XOR UNTIL** — RRULE forbids both,
+  so a `count` wins and the `until` is dropped. A **past `until`** (at/before `start_iso`), an
+  unparseable `until`, an unknown `freq`, or a `null` rec all compile to `null` → the event is
+  written as a **one-off**, no error (confirm-first is the backstop). `recurrenceLineFor` gates
+  the confirm/done line on the SAME `toRRule` call, so the shown text and the written rule can
+  never diverge.
+- **All-day recurring is supported**, with a **value-type-correct `UNTIL`** (RFC 5545: `UNTIL`
+  must match `DTSTART`'s value type). All-day series (`start:{date}`) emit `UNTIL=YYYYMMDD` (a
+  DATE); timed series emit `UNTIL=YYYYMMDDTHHMMSSZ` (UTC, pinned to the inclusive end of the
+  local until-day). Passing a datetime `UNTIL` to an all-day series is a Google **400**, which
+  is why `recurrenceLineFor`/`createFromDraft` pass `allDay` through to `toRRule`.
+- **On the confirm step**, `applyDraftUpdate` reads `review.recurrence` **DIRECTLY** (not
+  `?? prev`): for recurrence `null` is the **clear** value ("actually just once" / "na verdade só
+  uma vez"), so `?? prev` would make clearing impossible. `buildCreateReviewSystem` therefore
+  instructs the model to **echo** the current recurrence on every non-clearing modify and return
+  `null` **only** to clear — a `null` it did not mean would drop the whole series.
+
+> ⚠️ **Known limitation — create-only.** Recurrence is written **only on create**. The existing
+> **edit and delete** flows operate on a **single event id** (`matchEventTargets` +
+> `events.update` / `events.delete`), so editing or cancelling a recurring event through the
+> current flow affects **one instance** (or behaves unpredictably), **not the series**. Series
+> edit/delete — "move every Monday standup to Tuesday", "cancel the whole series" — is a **future
+> card**, deliberately out of scope here.
 
 ### Task: DELETE — `handleDelete` + `resumeDelete`
 **Unchanged.** The target is found by **matching the event's captured identity against the

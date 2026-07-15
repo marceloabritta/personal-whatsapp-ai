@@ -68,7 +68,7 @@ through `@mary` cannot change what `@assistant` answers to. Set the tags with `S
 
 ## Skills (today)
 
-- **`calendar_action`** — reads the chat and **creates**, **edits/reschedules**, or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. On edit you reply to the invite with a change ("move it to 4pm", "add carlos@example.com", "rename to Kickoff") — it's confirm-first and stays open so you can keep refining before saving.
+- **`calendar_action`** — reads the chat and **creates**, **edits/reschedules**, or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees — and recognises **recurring** events ("every Monday", "every 2 weeks until August", "5 times", "daily"), writing a real repeating event (create-only). On edit you reply to the invite with a change ("move it to 4pm", "add carlos@example.com", "rename to Kickoff") — it's confirm-first and stays open so you can keep refining before saving.
 - **`transcribe_audio`** — reply to a voice message and type `@secretary transcribe`; it downloads the audio from WhatsApp, transcribes it with AssemblyAI and sends you the text.
 - **`task_action`** — your to-do inbox. Add todos (one or several at once — `@secretary add buy flight, book the dentist`), hear your list, check them off ("I bought the pizza and got my flights" checks off both), and **edit or delete** a task already on your list ("change the contract task's due to Monday", "delete the pizza one"). A single list-aware planner reads the chat and matches your words to tasks by meaning — asking which you mean, by name, when it's ambiguous. Completions and edits are **confirm-first** (`yes`); once an exchange is underway, follow-ups need **no re-tag** for a short window. A todo for **yourself** goes to your private **Google Tasks** list (created instantly); a todo assigned to **someone else** becomes a 5-minute **Calendar** invite so they're notified by email. Google Tasks due dates are date-only.
 - **`feature_request`** — capture a new feature idea by talking it through. Start with `@secretary I have a feature idea…`; the secretary becomes stateful and **interviews you** until the feature is clear, then writes a **Markdown spec** (from the user's point of view) and sends it as a saveable `.md` document you can drop into your repo. The conversation follows your language; the document is always written in English. The same spec also **lands on the project's kanban board as a card on the backlog by itself** (it is spooled before the send, pulled to the Mac, and ingested — see `Board Inbox/`).
@@ -148,7 +148,7 @@ Framing happens once, in the orchestrator's `send()` (`1. Orchestrator/lib/forma
 
 - More skills (reminders, lookups, etc.) — each a new folder under `2. Skills/`.
 - Reply privately when `@secretary` is called in a group.
-- Calendar backlog: conflict/availability check on create, read/query events ("what's on my calendar tomorrow?"), and recurring events.
+- Calendar backlog: conflict/availability check on create, read/query events ("what's on my calendar tomorrow?"), and series edit/delete for recurring events (create is shipped).
 
 ## Contributing
 

@@ -495,6 +495,20 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-15 — feat(calendar): create recurring events.** `calendar_action` **create** now
+  extracts a **recurrence** (daily, weekly-by-day, an interval, a count, an until, and
+  day-of-month monthly), carries it on the draft through gather/confirm/modify, states it in the
+  confirm and done bubbles in words (en+pt via `describeRecurrence`), and — on "yes" — writes a
+  real **RRULE** on `events.insert`. A new deterministic compile layer (`toRRule` /
+  `toRRuleUntil`, skill.js, exported) is the single validator: COUNT-XOR-UNTIL, and an
+  uncompilable / past-`until` recurrence degrades silently to a one-off. **All-day recurring** is
+  supported with a value-type-correct `UNTIL` (DATE `YYYYMMDD` for all-day, datetime-Z for timed —
+  RFC 5545). `recurrence` is the twelfth `CAL_SCHEMA`/`manifest.inputs.fields` field (T2.10 set
+  updated; three create-payload fixtures + the stale "ELEVEN"→"TWELVE" comments moved in lockstep)
+  and rides `REVIEW_SCHEMA` (`applyDraftUpdate` reads it directly so "just once" can clear it).
+  **Create-only**: series edit/delete is unchanged and still single-instance (documented
+  limitation; a future card). New offline test: `scripts/calendar-recurrence-selftest.mjs`. No
+  rails change, no new dependency, no Google scope change.
 - **2026-07-14 — The orchestrator holds the conversation (NEW flow), run in PARALLEL with the OLD
   flow, selected by summon tag (DEPLOYED to the droplet 2026-07-14 — `@assistant`/`@assistente` =
   OLD flow unchanged, `@mary` = NEW flow, both live; `SECRETARY_TAG_NEW="@mary"` added to compose;
