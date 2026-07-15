@@ -62,9 +62,14 @@ summon:
 ```
 
 `@assistant` is the stable daily driver and is exactly the committed behaviour; `@mary` is the new
-system, tested live without touching `@assistant`. The two are fully isolated — a tag change made
-through `@mary` cannot change what `@assistant` answers to. Set the tags with `SECRETARY_TAG` and
-`SECRETARY_TAG_NEW`. When the migration finishes, only the turn loop remains.
+system, tested live without touching `@assistant`. Each flow discovers its **own skill tree**:
+`@assistant` loads `secretary/2. Skills/` (each skill drives its own dialogue), and **`@mary` loads
+a second, fully-converted tree, `secretary/3. Mary Skills/`**, where the same seven skills are
+**pure tasks** — the orchestrator holds the conversation and each skill only validates its declared
+inputs, acts, and returns a value (calendar/tasks/flights use a READ-then-ACT contract). The two
+are fully isolated — a tag change, or any bug, in `@mary` cannot change what `@assistant` answers
+to. Set the tags with `SECRETARY_TAG` and `SECRETARY_TAG_NEW`. When the migration finishes and the
+default flips, only the converted tree + turn loop remains.
 
 ## Skills (today)
 
@@ -75,7 +80,7 @@ through `@mary` cannot change what `@assistant` answers to. Set the tags with `S
 - **`feedback`** — tell the secretary it got something **wrong** and it files itself a bug report. Reply to the offending message with `@secretary you made a mistake here`; the complaint, the bad output and its own recent logs become a report for triage. The only way a *confidently wrong* answer — the kind nothing throws on — ever gets caught. Say "…and fix it to 5pm" and it files the defect **and** does the fix.
 - **`flight_search`** — ask for a flight in a sentence (`@secretary find me a flight from São Paulo to Lisbon on the 14th, back on the 22nd`). It asks for anything missing, **confirms before it searches**, then shows the **3 cheapest options a person would actually pick** — the multi-stop, split-ticket, self-transfer itineraries the provider floats to the top of a cheapest-first list are **thrown away first** (which is why it sometimes shows fewer than three, and says so). Ask `link for option 2` and it sends that option's booking link. It **never buys**: say "book it" and it hands you the link and tells you the purchase is yours to make.
 
-Adding a skill is a drop-in: create a folder under `secretary/2. Skills/` with a `skill.js` that exports `{ manifest, run }`. The orchestrator discovers it at boot and the router starts offering it — no changes to the orchestrator or the router. A skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else). See `secretary/README.md`.
+Adding a skill is a drop-in: create a folder with a `skill.js` that exports `{ manifest, run }` under the tree for the flow you're extending — `secretary/2. Skills/` for `@assistant`, or `secretary/3. Mary Skills/` for `@mary` (a converted pure task: `manifest.conversation:"orchestrator"` + declared `inputs`). The orchestrator discovers it at boot into that flow's own map and the router starts offering it — no changes to the orchestrator or the router. In the old tree a skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else); the converted tree drops that coupling — the model chains skills itself. See `secretary/README.md`.
 
 ## Repository layout
 
@@ -87,7 +92,8 @@ Adding a skill is a drop-in: create a folder under `secretary/2. Skills/` with a
 ├── .gitignore
 ├── secretary/             # the "secretary" (Node.js) — orchestrator + skills  ← run this
 │   ├── 1. Orchestrator/
-│   └── 2. Skills/         #   (the earlier single-agent version lives in git history)
+│   ├── 2. Skills/         #   @assistant's tree (each skill drives its own dialogue)
+│   └── 3. Mary Skills/    #   @mary's tree — the same seven skills as converted pure tasks
 ├── Board Inbox/           # staging that turns pulled specs/plans into kanban backlog cards
 │   └── ledger.tsv         #   tracked — the exactly-once record (queue/ + delivered/ are runtime)
 └── evolution/             # the WhatsApp gateway (Docker)

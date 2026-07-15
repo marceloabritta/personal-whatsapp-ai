@@ -77,6 +77,10 @@ installLogBuffer();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS_DIR = path.join(__dirname, "..", "2. Skills");
+// The NEW (@mary) flow discovers its OWN isolated skill tree. Same discovery machinery
+// (loadSkills below is parametrized), a different folder — so @mary routes to the converted
+// pure-task stack while @assistant keeps loading "2. Skills/". See ARCHITECTURE.md.
+const NEW_SKILLS_DIR = path.join(__dirname, "..", "3. Mary Skills");
 
 // ---- Config -----------------------------------------------------------------
 const EVOLUTION_URL = process.env.EVOLUTION_URL || "http://api:8080";
@@ -130,20 +134,20 @@ const seen = new Set(); // dedup by messageId
 //    Capabilities are NEVER shown to the router; they let one skill compose another
 //    (e.g. task_action delegating a "task for someone" to calendar_action.startCreate)
 //    without importing its file — decoupled from folder paths, graceful when absent.
-async function loadSkills() {
+async function loadSkills(dir = SKILLS_DIR) {
   const skills = {};
   const catalog = [];
   const caps = {};
   let entries = [];
   try {
-    entries = await readdir(SKILLS_DIR, { withFileTypes: true });
+    entries = await readdir(dir, { withFileTypes: true });
   } catch (e) {
-    console.error("Could not read the skills folder:", SKILLS_DIR, e.message);
+    console.error("Could not read the skills folder:", dir, e.message);
     return { skills, catalog, caps };
   }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    const file = path.join(SKILLS_DIR, e.name, "skill.js");
+    const file = path.join(dir, e.name, "skill.js");
     try {
       const mod = await import(pathToFileURL(file).href);
       const id = mod.manifest?.id;
@@ -307,6 +311,11 @@ console.log(
   "available skills:",
   CATALOG.map((c) => c.id).join(", ") || "(none!)"
 );
+// The NEW (@mary) flow's OWN discovered tree (the converted pure-task stack). CAPS is NOT
+// discovered here on purpose — the caps-based Tasks→Calendar startCreate delegation is legacy
+// only, and the new tree exports no capabilities (see SCOPE Issue 2 / ARCHITECTURE.md).
+const { skills: NEW_SKILLS, catalog: NEW_CATALOG } = await loadSkills(NEW_SKILLS_DIR);
+console.log("mary skills:", NEW_CATALOG.map((c) => c.id).join(", ") || "(none!)");
 
 // ---- DUAL-TAG: the LEGACY view of the discovered skills ----------------------
 // The discovered SKILLS/CATALOG are the NEW flow's (assistant_settings is the CONVERTED pilot,
@@ -331,7 +340,7 @@ const LEGACY_CATALOG = CATALOG.map((c) =>
 
 // Per-flow context bits used to BUILD ctx (tags/catalog/settings). The dispatch code itself is the
 // NEW turn loop (inline in the webhook) and runLegacyFlow (the OLD frozen dispatch, below).
-const NEW_FLOW = { tags: NEW_TAGS, catalog: CATALOG, settings: newSettings };
+const NEW_FLOW = { tags: NEW_TAGS, catalog: NEW_CATALOG, settings: newSettings };
 const LEGACY_FLOW = { tags: TAGS, catalog: LEGACY_CATALOG, settings };
 
 const app = express();
@@ -648,7 +657,7 @@ app.post("/webhook", async (req, res) => {
         // dispatched) is "I didn't understand" — keep today's alarm. A later `done` (a read-back
         // close, or "forget it") is an ordinary ending.
         if (turnIndex === 0 && !thisTurnIsReadback && !reply.say && !reply.skills.length) {
-          const names = CATALOG.map((c) => c.id).join(", ");
+          const names = NEW_CATALOG.map((c) => c.id).join(", ");
           await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
           await closeMarker();
           await fireCapture(ctx, { phase: "unrouted", taskId: "router", unroutedOrder: ctx.order });
@@ -677,10 +686,10 @@ app.post("/webhook", async (req, res) => {
 
       // Dispatch the batch — deduped, order preserved (exactly as today's dual-intent dispatch).
       const batch = [...new Set(reply.skills)];
-      const dispatchable = batch.filter((s) => SKILLS[s]);
+      const dispatchable = batch.filter((s) => NEW_SKILLS[s]);
       if (!dispatchable.length) {
         // Only "other" / unknown ids — the router ran fine and understood nothing. Today's path.
-        const names = CATALOG.map((c) => c.id).join(", ");
+        const names = NEW_CATALOG.map((c) => c.id).join(", ");
         await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
         await closeMarker();
         await fireCapture(ctx, { phase: "unrouted", taskId: "router", unroutedOrder: ctx.order });
@@ -688,7 +697,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       const primary = dispatchable[0];
-      const primaryEntry = CATALOG.find((c) => c.id === primary);
+      const primaryEntry = NEW_CATALOG.find((c) => c.id === primary);
       const info = reply.info;
 
       // WHICH tier gates the dispatch is read off the declaration, not guessed:
@@ -698,20 +707,27 @@ app.post("/webhook", async (req, res) => {
       //    incomplete or not; shape-invalid is withheld and the skill re-extracts for itself.
       let infoFor = null;
       if (primaryEntry?.conversation === "orchestrator") {
-        const g = checkPayload(primaryEntry.inputs, info);
-        if (!g.ok) {
-          repairs++;
-          if (repairs >= MAX_REPAIRS) {
-            await send(number, orch(ctx.lang, "repairGiveUp"), ctx.lang);
-            await closeMarker();
-            await fireCapture(ctx, { phase: "repair_giveup", taskId: primary, repairProblems: g.problems });
-            return;
+        if (primaryEntry.inputs == null) {
+          // A converted skill with NO declared inputs (e.g. transcribe_audio) has nothing to
+          // validate or hand over — dispatch it directly and let it run its own check. Without
+          // this, checkPayload(null,…).ok===false would trap it in the repair loop forever.
+          infoFor = null;
+        } else {
+          const g = checkPayload(primaryEntry.inputs, info);
+          if (!g.ok) {
+            repairs++;
+            if (repairs >= MAX_REPAIRS) {
+              await send(number, orch(ctx.lang, "repairGiveUp"), ctx.lang);
+              await closeMarker();
+              await fireCapture(ctx, { phase: "repair_giveup", taskId: primary, repairProblems: g.problems });
+              return;
+            }
+            pendingRepair = describeProblems(g.problems);
+            console.log("ORCHESTRATOR repair:", g.problems.join("; "));
+            continue; // re-turn — NOT a dispatch (turns already counted; dispatches untouched)
           }
-          pendingRepair = describeProblems(g.problems);
-          console.log("ORCHESTRATOR repair:", g.problems.join("; "));
-          continue; // re-turn — NOT a dispatch (turns already counted; dispatches untouched)
+          infoFor = primary;
         }
-        infoFor = primary;
       } else {
         const g = checkPayload(primaryEntry?.inputs, info);
         infoFor = g.shapeOk ? primary : null;
@@ -721,7 +737,7 @@ app.post("/webhook", async (req, res) => {
       let skippedConverted = false;
       let result = undefined;
       for (const task of dispatchable) {
-        const entry = CATALOG.find((c) => c.id === task);
+        const entry = NEW_CATALOG.find((c) => c.id === task);
         // Flag (a): a NON-PRIMARY converted skill cannot run in a batch (no extractor, and the one
         // dispatch/message is spent by the primary). Skip it and tell the owner below; do NOT stash
         // a read-back note — it would never fire when the primary is unconverted (B2).
@@ -729,7 +745,7 @@ app.post("/webhook", async (req, res) => {
           skippedConverted = true;
           continue;
         }
-        const run = SKILLS[task];
+        const run = NEW_SKILLS[task];
         ctx._turn.skill = task; // so a soft report names the skill, not just "soft"
         // The pre-extracted payload, for the ONE task it belongs to and no other. Every other skill
         // sees null and extracts for itself — today's behaviour, unchanged.

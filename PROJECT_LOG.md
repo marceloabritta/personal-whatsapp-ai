@@ -58,6 +58,15 @@ Seven skills exist today:
   confirmed list is **persisted** (Redis, no TTL) and **wins over `SECRETARY_TAG`**, which is now
   only the seed. See `secretary/2. Skills/7. Assistant Settings/SKILL.md`.
 
+**Two skill trees run in parallel (A/B), selected by summon tag** (see §2 and `ARCHITECTURE.md`).
+The seven descriptions above are the OLD (`@assistant`) tree, `secretary/2. Skills/` — each skill
+holds its own propose/confirm dialogue. **`@mary` routes to a second, fully-converted tree,
+`secretary/3. Mary Skills/`**, where the same seven skills are **pure tasks**: the orchestrator
+model runs every conversation and each skill only validates its declared `inputs`, acts, and
+returns a value (calendar/tasks/flights use a READ-then-ACT contract; the calendar↔tasks
+`startCreate` coupling exists only in the old tree). Both trees are discovered at boot into their
+own maps; a bug in one cannot reach the other. See each `3. Mary Skills/<N>/SKILL.md`.
+
 ---
 
 ## 2. Current status (read this first)
@@ -77,6 +86,13 @@ Seven skills exist today:
   cloned at `/opt/personal-whatsapp-ai`; `/opt/secretary` is a **symlink** to `secretary`, so
   `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
   (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
+
+- **@mary now runs a fully-converted stack (2026-07-15).** The `@mary` flow discovers its own
+  isolated tree `secretary/3. Mary Skills/` (all seven skills converted to pure tasks — the
+  orchestrator holds every conversation; calendar/tasks/flights are READ-then-ACT). `@assistant`
+  is unchanged (OLD `2. Skills/` tree + legacy flow). This is an **A/B parallel run**; the default
+  flip (retiring the old tree) is a later card, and it is gated on the human's live
+  `router-selftest.mjs` against the new catalog.
 
 **What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
 Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
@@ -495,6 +511,30 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-15 — New Architecture: @mary's full isolated skill stack — all seven skills
+  converted to pure tasks.** `@mary` now discovers and routes to its OWN skill tree,
+  `secretary/3. Mary Skills/` — a byte-isolated copy of `2. Skills/` in which every skill is a
+  **pure task**: `manifest.conversation:"orchestrator"`, declared `inputs`, and a `run(ctx)` that
+  only validates → acts → sends ONE outcome → **RETURNS** a JSON value the orchestrator reads back.
+  No new-tree skill imports `lib/confirm.js` or opens a session; the orchestrator model runs every
+  propose/ask/confirm dialogue over `listen` turns. `calendar_action`, `task_action` and
+  `flight_search` adopt a **READ-then-ACT** contract (a `find`/`list`/`search` READ returns
+  id-bearing candidates the model reads back; a later ACT targets one by id). The calendar↔tasks
+  `startCreate` coupling is **dropped in the new tree** (new calendar exports no
+  `capabilities.startCreate`; new tasks makes no `ctx.callSkill` — a to-do for someone else is now
+  the model chaining a `calendar_action` create). `transcribe_audio` stays `inputs:null`, and its
+  `noAudio` branch is plain `ctx.send` (guidance, not a malfunction — the server.js:490 rule).
+  **Two additive `server.js` rails changes:** (a) **per-flow discovery** — `loadSkills(dir =
+  SKILLS_DIR)` is parametrized, a second `loadSkills(NEW_SKILLS_DIR)` builds `NEW_SKILLS`/
+  `NEW_CATALOG`, and `NEW_FLOW.catalog` + the six NEW-loop refs repoint to them; `SKILLS`/
+  `CATALOG`/`CAPS` stay on the OLD tree, so the legacy Tasks→Calendar `startCreate` delegation
+  still resolves. (b) an **`inputs:null ⇒ dispatch-without-validation`** branch in the orchestrator
+  dispatch gate, so `transcribe_audio` dispatches instead of repair-looping. **@assistant (the OLD
+  `2. Skills/` tree + legacy flow) is byte-for-byte unchanged.** New offline test:
+  `scripts/mary-skills-selftest.mjs`. The **live router check** against the new catalog
+  (`ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs`, after repointing its hardcoded
+  `2. Skills` path to `3. Mary Skills`) is the human's real-money gate — NOT run by the build. No
+  new dependency, no new env, no Google scope change.
 - **2026-07-15 — feat(calendar): create recurring events.** `calendar_action` **create** now
   extracts a **recurrence** (daily, weekly-by-day, an interval, a count, an until, and
   day-of-month monthly), carries it on the draft through gather/confirm/modify, states it in the

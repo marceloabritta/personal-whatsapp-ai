@@ -56,12 +56,24 @@ webhook → filter → build context ─┤
 
 **The isolation is structural and load-bearing.** The two flows share only the invariant rails
 (message I/O, sessions, formatting, the wrapped Anthropic client, self-learning). They do **not**
-share the router, the input contract, or `assistant_settings`. The NEW flow's tag list (`NEW_TAGS`,
-mutated by `setNewTags`) and its durable store (`secretary:settings:new:tags`) are separate from the
-OLD flow's (`TAGS`/`setTags`, `secretary:settings:tags`). So **a tag change — or a bug — in the
+share the router, the input contract, `assistant_settings`, or — as of 2026-07-15 — **the skill
+tree itself.** Skill discovery is **per-flow**: `loadSkills(dir)` is parametrized, and `server.js`
+calls it twice at boot — once on `SKILLS_DIR` (`2. Skills/`) → `SKILLS`/`CATALOG`/`CAPS` for
+`@assistant`, and once on `NEW_SKILLS_DIR` (`3. Mary Skills/`) → `NEW_SKILLS`/`NEW_CATALOG` for
+`@mary` (`NEW_FLOW.catalog` and the NEW turn loop read these). **`CAPS` is discovered only on the
+old tree** — the caps-based Tasks→Calendar `startCreate` delegation is legacy-only, and the new
+tree exports no capabilities. `3. Mary Skills/` is a byte-isolated copy of `2. Skills/` in which
+every skill is a **pure task** (see "Adding a skill" and the per-skill `SKILL.md`s): the
+orchestrator model runs the whole dialogue, and each `run(ctx)` only validates its declared
+`inputs`, acts, and **returns** a value. `calendar_action`, `task_action` and `flight_search` use a
+**READ-then-ACT** contract — a `find`/`list`/`search` READ returns id-bearing candidates the model
+reads back, and a later ACT targets one by id (which is why the new calendar/tasks need no
+in-skill session and no `startCreate` coupling). The NEW flow's tag list (`NEW_TAGS`, mutated by
+`setNewTags`) and its durable store (`secretary:settings:new:tags`) are likewise separate from the
+OLD flow's (`TAGS`/`setTags`, `secretary:settings:tags`). So **a change — or a bug — anywhere in the
 `@mary` path cannot alter what `@assistant` answers to.** This parallel run is temporary scaffolding
 for a live A/B of the new architecture; when the migration completes, the legacy subtree and the
-dual-tag branch are removed and only the turn loop remains.
+dual-tag branch are removed and only the converted tree + turn loop remains.
 
 ### 1. Evolution → secretary (incoming webhook)
 
@@ -352,7 +364,13 @@ docker exec evolution_redis redis-cli DEL secretary:settings:tags
 
 ## Adding a skill
 
-Create `secretary/2. Skills/<Your Skill>/skill.js`:
+There are now **two skill trees**, one per flow (see "Two flows in parallel", above): `secretary/2.
+Skills/` for `@assistant`, and `secretary/3. Mary Skills/` for `@mary`. Discovery is per-flow —
+`server.js` runs `loadSkills(dir)` on each — so a skill folder is picked up by whichever flow's tree
+it sits in. **No `server.js` or router edit is needed to add a skill; it is a drop-in into the right
+tree.** (Adding a *new tree* — the per-flow split itself — was the one authorized rails change.)
+
+Create `secretary/2. Skills/<Your Skill>/skill.js` (OLD-flow, self-driven dialogue):
 ```js
 export const manifest = {
   id: "unique_id",
@@ -363,6 +381,25 @@ export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, 
 export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — see "Composing skills"
 ```
 The orchestrator discovers it at boot; the router starts routing to it. No other changes.
+
+**A converted (`@mary`) skill is a PURE TASK** — `secretary/3. Mary Skills/<Your Skill>/skill.js`:
+```js
+export const manifest = {
+  id: "unique_id",
+  conversation: "orchestrator",   // the MODEL runs the dialogue; the skill never asks/confirms
+  description: "what it does (reworded: no 'she proposes/asks' — the orchestrator does)",
+  inputs: { /* a declaration — see below; or null, e.g. transcribe_audio */ },
+};
+// validate ctx.info defensively → act → send ONE outcome → RETURN a JSON value (the read-back)
+export async function run(ctx) { /* ...; return { ok, ... }; */ }
+// NO `capabilities` export in the converted tree; NO lib/confirm.js; NO sessions.set.
+```
+For a read-then-act skill (calendar/tasks/flights), a discriminator value that only READS carries
+**no** `requiredWhen`, every non-discriminator field is `nullable`, and the READ step **returns**
+structured candidates carrying a stable id which the model reads back before dispatching the ACT.
+A converted skill with **no** declared inputs (`inputs:null`, e.g. `transcribe_audio`) is dispatched
+directly — the orchestrator's dispatch gate treats `inputs == null` as "nothing to validate, run it"
+rather than trapping it in the repair loop.
 
 ### Declaring your inputs (`manifest.inputs`) — one fewer round-trip
 

@@ -63,7 +63,7 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    leaves it alone. The wrapper is a `Proxy`, not a spread — the SDK client is a class instance and
    a spread would drop its prototype. `scripts/turn-latency-selftest.mjs` T1.5 lints that exactly
    one client exists and that it is wrapped.
-3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
+3. **`loadSkills(dir = SKILLS_DIR)`** — scans `<dir>/*/skill.js`, dynamically `import()`s each,
    and requires `manifest.id` + `run()`. Builds `SKILLS = { [id]: run }` and
    `CATALOG = [{id, description, inputs, conversation}]` (the router's menu — `inputs` is the
    skill's declared input contract, `manifest.inputs`, or `null`; **`conversation` is
@@ -73,6 +73,17 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    internal skill-to-skill API (see "Composing skills" below). Logs each
    `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit
    here to add one.
+
+   **RAILS CHANGE (a) — per-flow discovery (2026-07-15).** `loadSkills` is now **parametrized**
+   (`dir` defaults to `SKILLS_DIR = "2. Skills/"`, so the existing zero-arg call is unchanged), and
+   boot calls it **twice**: `loadSkills()` → `SKILLS`/`CATALOG`/`CAPS` for `@assistant`, and
+   `loadSkills(NEW_SKILLS_DIR = "3. Mary Skills/")` → `NEW_SKILLS`/`NEW_CATALOG` for `@mary`
+   (`NEW_FLOW.catalog = NEW_CATALOG`, and the six NEW-loop `SKILLS`/`CATALOG` references are
+   repointed to the NEW maps). Boot logs both `available skills:` (old) and `mary skills:` (new).
+   **`CAPS` is discovered only on the OLD tree and is NOT repointed** — its sole consumers are the
+   shared `ctx.hasSkill`/`ctx.callSkill` closure (built before the flow split), which the legacy
+   Tasks→Calendar `startCreate` delegation depends on; the converted tree exports no capabilities
+   and needs none (the model chains skills itself).
 4. **Express:** `GET /` health check; `POST /webhook`; `listen(3000)`.
 
 ### The webhook pipeline — `POST /webhook` (per message)
@@ -193,6 +204,13 @@ see today's exact bytes. The labelled transcript is a plain webhook-handler loca
 three `checkPayload` tiers) — a failure is the **repair loop**, *not* a dispatch: the problems are
 rendered back to the model (`describeProblems`), which retries; after `MAX_REPAIRS` consecutive
 failures it gives up (`repairGiveUp`). A `"skill"` primary keeps today's **`shapeOk`** gate.
+
+**RAILS CHANGE (b) — `inputs:null ⇒ dispatch-without-validation` (2026-07-15).** An `"orchestrator"`
+primary that declares **no** inputs (`manifest.inputs == null`, e.g. `transcribe_audio`) is
+dispatched **directly** (`infoFor = null`) instead of being gated on `ok`. Without it,
+`checkPayload(null, …).ok === false` would trap such a skill in the repair loop forever. The
+declared-inputs path is unchanged — the existing `checkPayload` gate is simply moved verbatim into
+the `else` branch, so `assistant_settings` and every declared skill behave exactly as before.
 
 **Read-back vs repair — two different follow-up turns, two different prompts.** A read-back
 (`turn.readback`) shows the model a dispatch's result and **forbids** executing again (the write

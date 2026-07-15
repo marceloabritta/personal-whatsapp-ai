@@ -48,25 +48,45 @@ secretary/
         └── prompt.js        #   3 schemas + prompts, the option/confirm renderers, localized reply() strings
 ```
 
+## Two skill trees (one per flow)
+
+As of 2026-07-15 there are **two** skill trees, discovered **per-flow** at boot
+(`loadSkills(dir)` runs once per tree):
+
+- **`2. Skills/`** — the OLD (`@assistant`) tree. Each skill drives its own
+  propose/confirm/clarify dialogue (`conversation:"skill"`) and may export `capabilities`.
+- **`3. Mary Skills/`** — the NEW (`@mary`) tree: the **same seven skills as converted PURE
+  TASKS** (`conversation:"orchestrator"`, declared `inputs`, a `run(ctx)` that validates →
+  acts → sends one outcome → **returns** a JSON value the model reads back). No new-tree skill
+  imports `lib/confirm.js`, opens a session, or exports `capabilities`. `calendar_action`,
+  `task_action` and `flight_search` use a READ-then-ACT contract; the `startCreate` coupling
+  exists only in the old tree.
+
+The two trees load into separate maps (`SKILLS`/`CATALOG`/`CAPS` vs `NEW_SKILLS`/`NEW_CATALOG`)
+and are byte-isolated copies, so a bug in one cannot reach the other. When the migration's
+default flip lands (a later card), the old tree is retired.
+
 ## How a skill is discovered
 
-At boot, the orchestrator scans `2. Skills/*/skill.js`. Each skill exports:
+At boot, the orchestrator scans each tree's `*/skill.js`. Each skill exports:
 
 ```js
 export const manifest = { id: "my_id", description: "what it does" };
 export async function run(ctx) { /* ... */ }
 ```
 
-The `manifest.id` goes into the catalog the router uses to classify; `run(ctx)` is
-called when the router picks that id. **Adding a new skill = create a folder here
-with a `skill.js`. You don't edit `server.js` or the router.**
+The `manifest.id` goes into that flow's catalog the router uses to classify; `run(ctx)` is
+called when the router picks that id. **Adding a new skill = create a folder in the right tree
+with a `skill.js`. You don't edit `server.js` or the router.** (A converted skill also sets
+`manifest.conversation:"orchestrator"` and declares its `inputs`.)
 
-A skill may also export an optional `capabilities` object — an internal API other
-skills can call via `ctx.callSkill(id, name, …)` (never seen by the router). This is how
+A skill **in the old tree** may also export an optional `capabilities` object — an internal API
+other skills can call via `ctx.callSkill(id, name, …)` (never seen by the router). This is how
 one skill composes another without importing its file: e.g. `task_action` turns a to-do
-assigned to someone else into a calendar invite by calling
-`calendar_action.startCreate`. Guard with `ctx.hasSkill(id, name)` for a friendly
-fallback when a capability isn't loaded. See "Composing skills" in `ORCHESTRATOR.md`.
+assigned to someone else into a calendar invite by calling `calendar_action.startCreate`. Guard
+with `ctx.hasSkill(id, name)` for a friendly fallback when a capability isn't loaded. See
+"Composing skills" in `ORCHESTRATOR.md`. The converted tree drops this — the orchestrator model
+chains skills itself.
 
 The `ctx` object handed to skills carries everything they need (no imports back to
 the orchestrator): `owner, anthropic, model, order, transcript, nowStr, contact,
