@@ -496,7 +496,9 @@ purpose — this list went stale once already by counting.*
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
 - **2026-07-14 — The orchestrator holds the conversation (NEW flow), run in PARALLEL with the OLD
-  flow, selected by summon tag (BUILT; awaits the live router check + a droplet deploy).** Two
+  flow, selected by summon tag (DEPLOYED to the droplet 2026-07-14 — `@assistant`/`@assistente` =
+  OLD flow unchanged, `@mary` = NEW flow, both live; `SECRETARY_TAG_NEW="@mary"` added to compose;
+  live router check deferred — the owner validates `@mary` by live test).** Two
   changes shipped together. (1) A new orchestrator **turn loop**: the model drives a three-state
   cycle — `listen` (ask / propose / stay silent), `execute` (run skill(s)), `done` (close) — and
   `execute` is non-terminal (a converted skill's return value drives a READ-BACK turn). `route(ctx,

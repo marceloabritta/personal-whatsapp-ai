@@ -63,6 +63,9 @@ services:
       # Trigger tags (comma-separated, lowercase). This is the single source of
       # truth for what starts the secretary. @brain is intentionally retired.
       SECRETARY_TAG: "@assistente,@assistant"
+      # NEW-flow trigger tag (orchestrator conversation loop). Runs in parallel
+      # with the OLD flow above; @mary summons the new loop, @assistant the old.
+      SECRETARY_TAG_NEW: "@mary"
     networks:
       - evolution-net
 
