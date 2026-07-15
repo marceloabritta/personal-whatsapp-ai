@@ -71,6 +71,9 @@ export const capabilities = {
 // rulebook, not requiredWhen.
 export const manifest = {
   id: "calendar_action",
+  // This skill runs its OWN dialogue (it confirms create/edit/delete for itself). Default value;
+  // written explicitly so the migration state is a grep and a new author's silence stays safe.
+  conversation: "skill",
   description:
     "create, edit/reschedule, or delete/cancel a meeting or event in Google Calendar and notify the participants; also read/list what's on the calendar (answer questions like what's on tomorrow, anything Friday afternoon, or what's my next meeting)",
   inputs: {

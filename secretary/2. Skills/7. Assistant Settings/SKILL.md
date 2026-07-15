@@ -26,11 +26,19 @@
 > is no tag→language table anywhere in the product; she reasons about it from the words, in the
 > moment, every time.
 >
+> **Who runs that conversation changed (card 55e00052).** This skill is now a **converted skill**
+> (`conversation: "orchestrator"`): the *orchestrator's model* runs the proposal and the
+> confirmation, and only dispatches this skill once you've agreed. This skill no longer asks or
+> confirms anything — it just applies the change, tells you the outcome, and is done. From your
+> side the exchange above is unchanged.
+>
 > **What's guarded:**
-> - **Nothing is applied without a yes.** Anything ambiguous is a no-op (`lib/confirm.js`
->   returns `"unrelated"` on any doubt) and the proposal just stands until it expires.
+> - **Nothing is applied without a yes.** The model proposes and waits; it only executes this
+>   skill after your agreeing message. A read-back turn can never trigger a second write (the
+>   orchestrator's write invariant).
 > - **She can't be left unsummonable.** A tag with no `@`, a tag under 3 characters, a tag with
->   a space, an empty list — all rejected, with the reason, and nothing changes.
+>   a space, an empty list — all rejected by `normalizeTags()`, and the payload never even
+>   reaches this skill (the orchestrator gates on it before dispatch).
 > - **She never claims a save she didn't get.** If the settings store is unreachable she says
 >   the change is live *but not saved* and will not survive a restart. See "Persistence".
 >
@@ -49,21 +57,44 @@
 ## Contract
 
 ```
-manifest = { id: "assistant_settings", inputs: null, description: … }
-run(ctx)
+manifest = {
+  id: "assistant_settings",
+  conversation: "orchestrator",          // the model runs the dialogue; this skill just acts
+  inputs: {                              // the ONE thing it needs, declared for the turn call
+    fields: { tags: { type: "array", of: { type: "string" }, desc: … } },
+    consistency: [{ name: …, test: (info) => normalizeTags(info.tags).ok }],
+    rulebook: () => …,
+  },
+  description: …,
+}
+run(ctx) -> { ok, persisted, tags, retired }   // the return value is read back by the model
 ```
 
 Auto-discovered by the orchestrator (`server.js` `loadSkills()`); no orchestrator or router
 edit is needed to reach it — the router's menu is built from the discovered catalog.
 
-- **Fresh (tagged) order** → one LLM call (`prompt.js`, schema `{ tags, reasoning }`) given the
-  **live** tag list (`ctx.tags`, never `process.env`) and the order. The model returns the
-  **complete** new list — never a delta — plus the prose reasoning. The list is validated with
-  `normalizeTags()`; invalid → she sends the reason and asks again (**guidance, not a
-  malfunction** — plain `ctx.send`, not `ctx.sendFailure`). Valid → a 15-minute session
-  (`stage: "await_confirmation"`, `awaitFrom: "owner"`) and the proposal.
-- **Continuation** → `classifyConfirmation()`. `"confirm"` applies; `"decline"` clears and
-  acknowledges; `"unrelated"` does **nothing at all** (the safe no-op) and the proposal stands.
+**A converted skill (`conversation: "orchestrator"`).** The proposal, the reasoning about the
+other language's tag, and the confirmation are all run by the **orchestrator's model** (see
+`../../1. Orchestrator/ORCHESTRATOR.md` → "The conversation loop"). By the time `run(ctx)` is
+called, the model has proposed and the owner has agreed, and the **validated** tag list arrives in
+`ctx.info.tags` (the orchestrator gated it on `checkPayload`'s `ok` tier — shape *and*
+`normalizeTags` consistency — before dispatching). So `run()` does exactly this:
+
+1. `normalizeTags(ctx.info.tags)` — a defensive re-check (belt to the gate's braces); a failure is
+   a genuine malfunction and goes through `ctx.sendFailure` (`thinkingError`).
+2. Snapshot the **retired** tags against the **live** list (`ctx.tags`, never `process.env`).
+3. `settings.saveTags()` (persist) then `setNewTags()` (apply live) — in that order. **Dual-tag
+   run:** as the NEW (@mary) flow's pilot, this converted skill mutates the NEW tag list
+   (`NEW_TAGS` via `setNewTags`) and its own namespaced store, **never** the legacy (@assistant)
+   `TAGS`/`setTags` — that separation is what lets @mary be tested without touching @assistant. `ctx.tags`
+   and `ctx.settings` are already the new flow's (the orchestrator builds `ctx` per flow). The frozen
+   legacy propose/confirm skill under `1. Orchestrator/legacy/` is the one that still calls `setTags`.
+4. Send **exactly one** outcome message (`applied` / `appliedNotSaved`), then **return**
+   `{ ok, persisted, tags, retired }` for the model to read back.
+
+No session, no `classifyConfirmation`, no propose/resume machinery, no LLM call of its own — all of
+that moved to the orchestrator, and the dead code + dead reply keys (`propose`, `invalid`,
+`declined`, `PROPOSE_SCHEMA`, `buildProposeSystem/User`) were deleted from `skill.js` / `prompt.js`.
 
 ## Persistence
 

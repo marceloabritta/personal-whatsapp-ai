@@ -23,6 +23,23 @@ function seed() {
     .filter(Boolean);
 }
 
+// ── DUAL-TAG (card: run OLD + NEW in parallel) ──────────────────────────────
+// A SECOND, independent accepted-tag list, seeded from SECRETARY_TAG_NEW (default "@mary").
+// It is the summon list for the NEW orchestrator flow, run side-by-side with the legacy one
+// so the owner can test the new system live without touching @assistant. This list and its
+// setter/matcher are a SEPARATE state from TAGS: setNewTags mutates only NEW_TAGS, so a
+// tag-change made through the NEW flow can NEVER alter what the OLD (@assistant) flow answers
+// to. That structural separation is what makes the parallel run safe to deploy unattended.
+// Additive: TAGS, setTags, matchedTag below are untouched — every existing caller is unchanged.
+export const NEW_TAGS = newSeed();
+
+function newSeed() {
+  return (process.env.SECRETARY_TAG_NEW || "@mary")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 // Minimum viable tag: "@" + 2 chars. Below that a stray "@a" in a sentence would start
 // hijacking orders, and she can never be left unsummonable.
 const MIN_TAG_LEN = 3;
@@ -68,6 +85,17 @@ export function setTags(list) {
   if (!ok) return false;
   TAGS.length = 0;
   TAGS.push(...tags);
+  return true;
+}
+
+// The NEW-flow counterpart of setTags — mutates NEW_TAGS in place (same in-place contract, for
+// the same reason: readers that snapshot the binding still see the change). It NEVER touches
+// TAGS, so the OLD flow is unaffected by a NEW-flow tag change. Refuses an invalid list.
+export function setNewTags(list) {
+  const { ok, tags } = normalizeTags(list);
+  if (!ok) return false;
+  NEW_TAGS.length = 0;
+  NEW_TAGS.push(...tags);
   return true;
 }
 
@@ -136,6 +164,20 @@ export function matchedTag(text) {
   const low = (text || "").toLowerCase();
   return (
     [...TAGS]
+      .sort((a, b) => b.length - a.length)
+      .find((t) => low.startsWith(t) && endsTag(low.charAt(t.length))) || null
+  );
+}
+
+// The NEW-flow counterpart of matchedTag — matches against NEW_TAGS only (same longest-first +
+// tag-must-end rules). server.js checks both matchers per message: a NEW_TAGS hit routes to the
+// new orchestrator loop, a TAGS hit to the legacy dispatch. The two lists are meant to be
+// disjoint (e.g. "@assistant" vs "@mary"); if a message somehow matched both, server.js resolves
+// it to the OLD flow, so @assistant is never starved by a NEW-flow tag collision.
+export function matchedTagNew(text) {
+  const low = (text || "").toLowerCase();
+  return (
+    [...NEW_TAGS]
       .sort((a, b) => b.length - a.length)
       .find((t) => low.startsWith(t) && endsTag(low.charAt(t.length))) || null
   );

@@ -52,6 +52,8 @@ import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
 // accuracy, and adopting ctx.info here needs its own accuracy check.
 export const manifest = {
   id: "flight_search",
+  // This skill runs its own dialogue (default; explicit so the migration state is a grep).
+  conversation: "skill",
   description:
     "search for flights and show the cheapest sensible options (origin, destination, dates, passengers, cabin), and send the booking link for a flight option ALREADY shown in this conversation (e.g. 'link for option 2'); it only SEARCHES and never buys — it is NOT for adding a flight-related to-do or reminder to the task list",
   inputs: {

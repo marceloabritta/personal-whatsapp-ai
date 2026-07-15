@@ -3,6 +3,7 @@
 //  Text extraction, quoted-audio detection, in-memory buffer and transcript
 //  building. No agent logic lives here.
 // ============================================================================
+import { isOwnMessage } from "./identity.js";
 
 // Extracts the text from an Evolution `message` object (several possible shapes).
 export function extractText(msg) {
@@ -95,6 +96,24 @@ export function combine(remoteJid, hist, limit = 30) {
 // Builds the transcript in "ME: ..." / "OTHER: ..." format.
 export function buildTranscript(conv) {
   return conv.map((m) => `${m.fromMe ? "ME" : "OTHER"}: ${m.text}`).join("\n");
+}
+
+// Builds the transcript with THREE speakers, for the orchestrator's turn call — which must be
+// able to tell the secretary's OWN past messages from the owner's, because both arrive with
+// fromMe=true (she sends from his account). The discriminator is isOwnMessage (the reply header),
+// the same one server.js uses to avoid re-consuming her own messages:
+//   fromMe && isOwnMessage(text) -> SECRETARY   (her own reply, echoed back by Evolution)
+//   fromMe                       -> OWNER
+//   otherwise                    -> CONTACT
+// ADDITIVE: buildTranscript (and therefore ctx.transcript) is unchanged, so all seven skills'
+// own LLM prompts see today's exact bytes. Only the orchestrator's turn call uses this renderer.
+export function buildLabeledTranscript(conv) {
+  return conv
+    .map((m) => {
+      const who = m.fromMe ? (isOwnMessage(m.text) ? "SECRETARY" : "OWNER") : "CONTACT";
+      return `${who}: ${m.text}`;
+    })
+    .join("\n");
 }
 
 // Finds the contact name of this conversation (last pushName from OTHER).

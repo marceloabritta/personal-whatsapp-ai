@@ -1,43 +1,64 @@
 // ============================================================================
 //  Skill "Assistant Settings" — CHANGE HOW THE OWNER SUMMONS HER.
-//  "@assistant, change your tag to @assist" — she deduces whether the other language's
-//  call should change too, states the reasoning and the COMPLETE new tag list in prose,
-//  and asks. On yes: applied live, persisted, and the old tags stop working.
+//  "@assistant, change your tag to @assist" — the ORCHESTRATOR runs the dialogue now: it
+//  reasons about the other language's call, proposes the complete new tag list, and gets his
+//  agreement before it dispatches this skill. By the time run() is called, the model has already
+//  proposed and he has already agreed.
 //
-//  Confirm-first on the existing rails (lib/confirm.js + ctx.sessions), like every other
-//  write-flow in the product. Two things here are deliberate and load-bearing:
+//  CONVERTED SKILL (conversation: "orchestrator"). It does NOT ask, NOT confirm, NOT extract:
+//    - the model runs the conversation and hands the validated payload in ctx.info;
+//    - run() does exactly two things — it ACTS (saves + applies the tags), and it SENDS exactly
+//      one outcome message. Then it RETURNS what it did, for the model to read back.
 //
-//  1. SHE PROPOSES FROM THE LIVE TAGS (ctx.tags), never from process.env. Change the tag a
-//     second time and she reasons about the tags actually in force, not the boot seed.
+//  Two things here are deliberate and load-bearing:
 //
-//  2. SUCCESS IS ONLY EVER REPORTED BY THE CODE PATH THAT WROTE THE STORE. saveTags()
-//     returns true only on a real write; if it merely reached the memory fallback she says
-//     so — the change is live but unsaved, and a restart will undo it. She never claims a
-//     persistence she did not get.
+//  1. SHE APPLIES FROM THE LIVE TAGS (ctx.tags), never from process.env — so the "retired" list
+//     she reports is computed against the tags actually in force.
+//
+//  2. SUCCESS IS ONLY EVER REPORTED BY THE CODE PATH THAT WROTE THE STORE. saveTags() returns
+//     true only on a real write; if it merely reached the memory fallback she says so — the
+//     change is live but unsaved, and a restart will undo it. She never claims a persistence she
+//     did not get.
 //
 //  Skill contract (read by the orchestrator):
-//    export const manifest = { id, description }
-//    export async function run(ctx)
-//  Localized scaffolding lives in prompt.js (reply(ctx.lang)); the REASONING is generated
-//  in-language by the model. ctx.send is pre-bound to the conversation language.
+//    export const manifest = { id, description, conversation, inputs }
+//    export async function run(ctx) -> a JSON-serializable value (the read-back)
+//  Localized OUTCOME strings live in prompt.js (reply(ctx.lang)); the conversational prose (the
+//  proposal, the reasoning) is written by the model, in-language, and never enters the repo.
 // ============================================================================
-import {
-  buildProposeSystem,
-  buildProposeUser,
-  PROPOSE_SCHEMA,
-  reply,
-  fmtTags,
-} from "./prompt.js";
-import { jsonFormat, readReply } from "../../1. Orchestrator/lib/llm.js";
-import { classifyConfirmation } from "../../1. Orchestrator/lib/confirm.js";
-import { normalizeTags, setTags } from "../../1. Orchestrator/lib/identity.js";
+import { reply } from "./prompt.js";
+// setNewTags (NOT setTags): this converted skill is the NEW (@mary) flow's pilot, and it must
+// mutate the NEW_TAGS list only. Using setTags here would change the LEGACY (@assistant) summon
+// tag from the new flow — the exact cross-flow leak the parallel run must never allow. ctx.tags
+// and ctx.settings are already the new flow's (server.js builds ctx per-flow).
+import { normalizeTags, setNewTags } from "../../1. Orchestrator/lib/identity.js";
 
-// `inputs: null` — NO declared inputs (see 1. Orchestrator/lib/inputs.js). The proposal call
-// needs the LIVE tag list to reason against, which the router has no business pre-extracting,
-// so there is nothing to hand over: a task with no declaration is never given a payload.
+// `conversation: "orchestrator"` — the model runs the dialogue; this skill just acts and returns.
+// `inputs` declares the ONE thing it needs: the COMPLETE new tag list (an array of strings). The
+// orchestrator extracts it in the turn call and gates it on `ok` (all three tiers) before it ever
+// dispatches this skill, so ctx.info is guaranteed shape- and consistency-valid on arrival.
 export const manifest = {
   id: "assistant_settings",
-  inputs: null,
+  conversation: "orchestrator",
+  inputs: {
+    discriminator: null,
+    fields: {
+      tags: {
+        type: "array",
+        of: { type: "string" },
+        desc: "the COMPLETE new list of trigger tags in force after the change, each with its leading @",
+      },
+    },
+    requiredWhen: {},
+    consistency: [
+      { name: "tags are valid trigger tags", test: (info) => normalizeTags(info.tags).ok },
+    ],
+    rulebook: () =>
+      "Return the COMPLETE tag list the owner should summon the assistant with afterwards, never a delta. " +
+      "Each tag starts with @, is lowercase, has no spaces, and is at least 3 chars. Carry over every tag " +
+      "he did not ask to retire. If a new tag is a natural short form of the tags in more than one language, " +
+      "you may collapse to it and retire the old ones — but say so before you execute.",
+  },
   description:
     "change HOW THE OWNER SUMMONS THE ASSISTANT — the trigger tag(s) he types to call her: " +
     "'change your tag to @assist', 'I want to call you @x', 'stop answering to @assistant'. " +
@@ -46,139 +67,41 @@ export const manifest = {
     "(calendar_action).",
 };
 
-// The confirmation window she NAMES in the proposal. Keep the two in step (prompt.js).
-const SESSION_TTL = 900; // 15 min
-
+// The model has already proposed and he has already agreed (the orchestrator gated on `ok` before
+// dispatching). run() validates defensively, applies live, persists, reports ONE outcome, RETURNS.
 export async function run(ctx) {
-  const { session } = ctx;
+  const { number, lang, settings } = ctx;
 
-  // CONTINUATION owned by this skill (set by the orchestrator on an untagged follow-up).
-  if (
-    session?.skill === "assistant_settings" &&
-    session.stage === "await_confirmation"
-  )
-    return resumeConfirm(ctx, session);
-
-  // FRESH (tagged) order.
-  return propose(ctx);
-}
-
-// ---- Fresh order: reason about the tags, propose, open the confirmation ------
-async function propose(ctx) {
-  const {
-    anthropic,
-    model,
-    owner,
-    order,
-    transcript,
-    tags,
-    lang,
-    number,
-    send,
-    sessions,
-    remoteJid,
-  } = ctx;
-
-  // ctx.tags is the LIVE array by reference — snapshot it so what she reasons from and what
-  // she quotes back are the same list, whatever happens to it later in the turn.
-  const current = [...tags];
-
-  let out;
-  try {
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 1000,
-      system: buildProposeSystem(owner, lang),
-      output_config: jsonFormat(PROPOSE_SCHEMA),
-      messages: [
-        {
-          role: "user",
-          content: buildProposeUser({ currentTags: current, order, transcript }),
-        },
-      ],
-    });
-    out = readReply(msg, "assistant_settings");
-  } catch (e) {
-    console.error("assistant_settings/propose error:", e?.message || e);
+  const tags = ctx.info?.tags; // the orchestrator hands the validated payload
+  const norm = normalizeTags(tags);
+  if (!norm.ok) {
+    // ctx.info is guaranteed valid by the `ok` gate; this is belt-and-braces. A failure here is a
+    // genuine malfunction, so it goes through sendFailure (declared, self-learning captures it).
     await ctx.sendFailure(number, reply(lang).thinkingError());
-    return;
-  }
-  if (!out) {
-    await ctx.sendFailure(number, reply(lang).thinkingError());
-    return;
-  }
-  console.log("SETTINGS PROPOSE RAW:", JSON.stringify(out));
-
-  // Same validation the store enforces — she can never PROPOSE something she could not apply.
-  const { ok, tags: next, problem } = normalizeTags(out.tags);
-  if (!ok) {
-    // GUIDANCE, not a malfunction: she understood the order and is asking again, and nothing
-    // was applied. Plain send() — ctx.sendFailure would file this as a bug report (server.js:345).
-    await send(number, reply(lang).invalid({ problem, current }));
-    return;
+    return { ok: false };
   }
 
-  await sessions.set(
-    remoteJid,
-    {
-      skill: "assistant_settings",
-      stage: "await_confirmation",
-      awaitFrom: "owner",
-      lang,
-      data: { tags: next },
-    },
-    SESSION_TTL
-  );
-
-  await send(
-    number,
-    reply(lang).propose({ reasoning: out.reasoning, tags: next })
-  );
-}
-
-// ---- The follow-up: yes / no / neither --------------------------------------
-async function resumeConfirm(ctx, session) {
-  const { number, send, sessions, remoteJid, lang, settings, tags } = ctx;
-
-  const next = session.data?.tags || [];
-  if (!next.length) {
-    await sessions.clear(remoteJid); // nothing pending; drop the stale session
-    return;
-  }
-
-  const decision = await classifyConfirmation(ctx, {
-    action: `change the tag(s) the owner summons the assistant with to ${next.join(", ")}`,
-    who: "settings",
-  });
-
-  // The SAFE no-op: normal chatter, or any doubt at all. The proposal stands until it expires.
-  if (decision === "unrelated") return;
-
-  if (decision === "decline") {
-    await sessions.clear(remoteJid);
-    await send(number, reply(lang).declined({ current: [...tags] }));
-    return;
-  }
-
-  // CONFIRM. Snapshot the OUTGOING tags before they are replaced — ctx.tags is the live array,
-  // so after setTags() there is nothing left to tell him he can no longer use.
-  const retired = [...tags].filter((t) => !next.includes(t));
+  // Snapshot the OUTGOING tags BEFORE setTags replaces them — ctx.tags is the live array.
+  const retired = [...ctx.tags].filter((t) => !norm.tags.includes(t));
 
   // The store first, then live. `persisted` is the ONLY thing that decides what she claims.
-  const persisted = await settings.saveTags(next);
-  setTags(next);
-  await sessions.clear(remoteJid);
+  // settings is the NEW flow's namespaced store; setNewTags mutates NEW_TAGS — neither touches
+  // the legacy (@assistant) tag or its store.
+  const persisted = await settings.saveTags(norm.tags);
+  setNewTags(norm.tags);
 
   console.log(
-    `settings: tags -> ${next.join(", ")} (persisted: ${persisted}, retired: ${
+    `settings: tags -> ${norm.tags.join(", ")} (persisted: ${persisted}, retired: ${
       retired.join(", ") || "none"
     })`
   );
 
-  await send(
+  await ctx.send(
     number,
     persisted
-      ? reply(lang).applied({ tags: next, retired })
-      : reply(lang).appliedNotSaved({ tags: next, retired })
+      ? reply(lang).applied({ tags: norm.tags, retired })
+      : reply(lang).appliedNotSaved({ tags: norm.tags, retired })
   );
+
+  return { ok: true, persisted, tags: norm.tags, retired };
 }

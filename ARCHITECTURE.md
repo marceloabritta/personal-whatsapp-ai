@@ -23,6 +23,46 @@ Only `8080` is published to the internet.
 webhook  ->  filter (start on fromMe + @secretary, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
 ```
 
+### Two flows in parallel, selected by summon tag (dual-tag run)
+
+The secretary currently runs **two** flows in one process, chosen by the trigger tag on each
+message, branched as early as possible in the webhook handler:
+
+```
+                                  ┌─ tag ∈ SECRETARY_TAG      (@assistant) ─→ OLD flow: route → dispatch (linear, above)
+webhook → filter → build context ─┤
+                                  └─ tag ∈ SECRETARY_TAG_NEW  (@mary)      ─→ NEW flow: the orchestrator TURN LOOP (below)
+```
+
+- **`@assistant` — the OLD flow.** The linear `route → dispatch` above, run on **frozen copies** of
+  the pre-migration code under `secretary/1. Orchestrator/legacy/` (its own router, prompt,
+  input-contract and the self-driven propose/confirm `assistant_settings`). It is byte-for-byte the
+  committed behaviour and is the owner's daily driver.
+- **`@mary` — the NEW flow.** The model **holds the conversation** and drives a three-state cycle:
+
+  ```
+  message → route(ctx, turn) → { say, next, skills, info, lang, awaitFrom }
+                                  │
+        next = "listen"  ── ask / propose / stay silent, keep the marker open, wait for awaitFrom
+        next = "execute" ── run skill(s); a CONVERTED skill returns a value → a READ-BACK turn
+        next = "done"    ── close the conversation
+  ```
+  `execute` is **non-terminal**: a converted skill (`manifest.conversation:"orchestrator"`) returns
+  a JSON-serialisable value which the orchestrator feeds back to the model as a **read-back** turn
+  (the model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`,
+  `MAX_DISPATCHES`, `MAX_REPAIRS`, enforces the **write invariant** (a read-back may not execute),
+  makes deliberate silence free, and runs a **repair loop** (a payload that fails validation is
+  re-prompted with `buildRepairUser`, which invites a corrected execute — NOT a dispatch).
+
+**The isolation is structural and load-bearing.** The two flows share only the invariant rails
+(message I/O, sessions, formatting, the wrapped Anthropic client, self-learning). They do **not**
+share the router, the input contract, or `assistant_settings`. The NEW flow's tag list (`NEW_TAGS`,
+mutated by `setNewTags`) and its durable store (`secretary:settings:new:tags`) are separate from the
+OLD flow's (`TAGS`/`setTags`, `secretary:settings:tags`). So **a tag change — or a bug — in the
+`@mary` path cannot alter what `@assistant` answers to.** This parallel run is temporary scaffolding
+for a live A/B of the new architecture; when the migration completes, the legacy subtree and the
+dual-tag branch are removed and only the turn loop remains.
+
 ### 1. Evolution → secretary (incoming webhook)
 
 Configured once via `POST /webhook/set/secretaria` (the instance name). On every message Evolution sends:
@@ -289,7 +329,11 @@ endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store **and** the durab
 store; defaults to `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
 `EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tags —
 **comma-separated**, default `@secretaria,@secretary`; both trigger the secretary. The old
-`@brain` tag is **retired** — a message using it is silently ignored).
+`@brain` tag is **retired** — a message using it is silently ignored), and `SECRETARY_TAG_NEW`
+(the **NEW-flow** trigger tags, comma-separated, default `@mary`; see the dual-tag parallel run
+under **Flow** — a message with one of these runs the orchestrator turn loop instead of the
+legacy dispatch. Its own stored list wins over the seed at `secretary:settings:new:tags`,
+independently of `SECRETARY_TAG`).
 
 `SECRETARY_TAG` is now the **SEED, not the last word**. The owner can change the tags by asking
 her (`assistant_settings`); the confirmed list is stored in Redis under

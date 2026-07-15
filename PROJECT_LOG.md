@@ -495,6 +495,41 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-14 — The orchestrator holds the conversation (NEW flow), run in PARALLEL with the OLD
+  flow, selected by summon tag (BUILT; awaits the live router check + a droplet deploy).** Two
+  changes shipped together. (1) A new orchestrator **turn loop**: the model drives a three-state
+  cycle — `listen` (ask / propose / stay silent), `execute` (run skill(s)), `done` (close) — and
+  `execute` is non-terminal (a converted skill's return value drives a READ-BACK turn). `route(ctx,
+  turn)` returns `{ say, next, skills, info, lang, awaitFrom }`; the loop enforces the caps
+  (`MAX_TURNS=10`, `MAX_DISPATCHES=3`, `MAX_REPAIRS=2`), the write invariant (a read-back may not
+  execute), silence-is-free, and a repair loop for validation failures. `assistant_settings` is the
+  converted **pilot** (`manifest.conversation:"orchestrator"`, declares `inputs`); the other six
+  skills declare `conversation:"skill"` (or default to it) and are unchanged. (2) **Dual-tag
+  parallel run** so the owner can test the NEW system live without touching his real one:
+  **`@assistant` (`SECRETARY_TAG`) → the OLD flow, byte-for-byte the committed behaviour**;
+  **`@mary` (`SECRETARY_TAG_NEW`) → the NEW turn loop.** Both live in one running server, branched
+  on the summon tag as early as possible in the webhook handler. The OLD flow runs entirely on
+  **frozen copies** of the pre-card code under `secretary/1. Orchestrator/legacy/` (its own router,
+  prompt, input-contract and the deleted propose/confirm `assistant_settings`) that the NEW flow
+  never imports; the NEW flow's `assistant_settings` mutates a **separate** tag list (`NEW_TAGS` via
+  `setNewTags`) persisted to a **separate** settings key (`secretary:settings:new:tags`). That
+  structural separation is the invariant: **a bug anywhere in the `@mary` path is incapable of
+  changing what `@assistant` does.** Also folded in: the **repair-prompt fix** — a repair turn now
+  gets its own `buildRepairUser` prompt that INVITES a corrected execute (the read-back prompt that
+  forbids executing was fighting the repair loop it was reused for). **Rails:** `server.js` (the
+  turn loop + the dual-tag branch), `router/router.js` + `router/prompt.js` (three-state contract,
+  `CONVERSATION:` catalog line, `buildReadbackUser`/`buildRepairUser`), `lib/inputs.js` (additive:
+  scalar-`of`, `describeProblems`, the `CONVERSATION:` render), `lib/whatsapp.js` (additive
+  `buildLabeledTranscript`), `lib/identity.js` (additive `NEW_TAGS`/`setNewTags`/`matchedTagNew`),
+  `lib/settings.js` (additive `ns` namespace) — all authorized, additive except the caps/loop that
+  are new code; **no existing signature changed and no existing caller altered.** Because
+  `router/prompt.js` and every catalog entry changed, **a live `scripts/router-selftest.mjs` run is
+  required** (human-gated, costs money) before this is trusted in production. Tests: a new
+  `scripts/settings-selftest.mjs` (three-state cycle end-to-end + write invariant + caps + repair
+  loop + a **dual-tag** assertion pair proving OLD and NEW run isolated in one server); the four
+  offline suites stay green. **Deploy:** the owner sets `SECRETARY_TAG=@assistant` and
+  `SECRETARY_TAG_NEW=@mary` and runs the usual `git pull` + `docker compose restart secretary`.
+
 - **2026-07-14 — Feature specs & triaged bugfix plans land on the kanban backlog by themselves
   (BUILT; feature half awaits a droplet deploy).** The self-learning loop gained an end. The
   `feature_request` skill now spools every generated spec to `secretary/specs/` (timestamped

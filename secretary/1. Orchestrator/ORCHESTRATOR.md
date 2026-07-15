@@ -26,6 +26,14 @@ problems (all prefixed with the language-aware header from `headerFor(lang)`):
 - The router call failed → *"I hit an error understanding the request. Try again?"*
 - A skill threw while running → *"I failed to run that task. Error in the log."*
 - A continuation's skill threw → *"I failed to continue that. Error in the log."*
+- **A conversation loops without closing (the turn cap) → *"I'm going in circles…"*** (`turnCap`)
+- **Too many skills fired in one conversation (the dispatch cap) → *"I've done a few things in a row…"*** (`dispatchCap`)
+- **A converted skill's payload failed validation twice → *"I couldn't get that right…"*** (`repairGiveUp`)
+- **A second converted skill was asked for in one batch and can't run there → *"…send me the other part on its own."*** (`dispatchSkipped`)
+
+> **Flow diagram note:** the end-to-end flow diagram in `../../ARCHITECTURE.md` and `../../README.md`
+> is **pending** — those docs are owned by another card's in-flight work and were not touched here.
+> This file is the authoritative description of the new turn loop until they catch up.
 
 ---
 
@@ -57,8 +65,10 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    one client exists and that it is wrapped.
 3. **`loadSkills()`** — scans `../2. Skills/*/skill.js`, dynamically `import()`s each,
    and requires `manifest.id` + `run()`. Builds `SKILLS = { [id]: run }` and
-   `CATALOG = [{id, description, inputs}]` (the router's menu — `inputs` is the skill's declared
-   input contract, `manifest.inputs`, or `null`). Also collects each skill's
+   `CATALOG = [{id, description, inputs, conversation}]` (the router's menu — `inputs` is the
+   skill's declared input contract, `manifest.inputs`, or `null`; **`conversation` is
+   `"orchestrator"` if the manifest declares it, else `"skill"`** — the safe default, see
+   "The conversation loop" below). Also collects each skill's
    **optional** `capabilities` export into `CAPS = { [id]: { [name]: fn } }` — the
    internal skill-to-skill API (see "Composing skills" below). Logs each
    `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit
@@ -140,6 +150,126 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
       that a *declared field that is absent* is INVALID, not defaulted. That distinction is the
       whole safety net: a skill that adds a schema field and forgets its declaration gets a slow
       turn, not a silently un-shipped feature.
+
+### The conversation loop (card 55e00052) — the orchestrator holds the conversation
+
+The dispatch above is the **legacy path**, and it stays live for skills that run their own
+dialogue (`conversation: "skill"` — six of seven skills today). What changed is that a **fresh
+tagged order, and every untagged follow-up on a conversation the orchestrator itself owns, now go
+through a MULTI-TURN LOOP** in which the model drives a three-state cycle. The whole loop runs
+inside one `POST /webhook` request; only counters cross a message boundary.
+
+**`manifest.conversation` — a new, additive skill-contract field.** `"skill"` (default; absent ⇒
+`"skill"`) means the skill asks/confirms for itself, exactly as today. `"orchestrator"` means the
+skill has handed its conversation over: the model proposes/confirms; the skill just **acts, sends
+one outcome message, and returns**. It is rendered into the router prompt as **opaque text** (a
+`CONVERSATION:` line, `lib/inputs.js` `describeSkill`) and read in code for exactly two decisions:
+which `checkPayload` tier gates the dispatch, and whether a read-back happens.
+
+**`run(ctx)` return contract — additive.** `run()` may now **return** a JSON-serializable value.
+`undefined` (today's shape, all six unconverted skills) ⇒ no read-back, the cycle ends. Any other
+value ⇒ the orchestrator serializes it (truncated to `READBACK_CAP` bytes) and makes **one more
+turn call** — the *read-back* — showing the model the result and the prose the skill already sent.
+
+**`route(ctx, turn)` — the turn call.** `route` gained a second argument
+`turn = { labeledTranscript, readback? }` and now returns the control signal
+`{ say, next, skills, info, lang, awaitFrom }` (was `{ tasks, lang, info }`). Still **no
+`output_config`** — the reply shape is demanded in the prompt (`router/prompt.js`), and the
+read-back turn reuses the **same** system prompt (only the user message differs), so both calls stay
+on the generic path. The model reads a **labelled** transcript (`buildLabeledTranscript` —
+`OWNER`/`SECRETARY`/`CONTACT`, so it can tell her own past words from his); `ctx.transcript` (the
+unlabelled `ME:`/`OTHER:` string) is **unchanged**, so the six unconverted skills' own extractors
+see today's exact bytes. The labelled transcript is a plain webhook-handler local passed as the
+`route()` argument — **not** a `ctx` field, so the `ctx` surface is unchanged.
+
+**The three states, crossed with `say` (prose | null):**
+- **`listen`** — reply (or stay silent) and keep the conversation open; the model declares
+  `awaitFrom` (`owner`/`contact`/`any`) for who to listen to next.
+- **`execute`** — run `skills` now with `info` (the first skill's payload). Dispatch is the same
+  dual-intent batch as today: deduped, order preserved, **only `skills[0]` receives `info`**.
+- **`done`** — the conversation is over.
+
+**The tier is chosen by `conversation`:** an `"orchestrator"` primary is gated on **`ok`** (all
+three `checkPayload` tiers) — a failure is the **repair loop**, *not* a dispatch: the problems are
+rendered back to the model (`describeProblems`), which retries; after `MAX_REPAIRS` consecutive
+failures it gives up (`repairGiveUp`). A `"skill"` primary keeps today's **`shapeOk`** gate.
+
+**Read-back vs repair — two different follow-up turns, two different prompts.** A read-back
+(`turn.readback`) shows the model a dispatch's result and **forbids** executing again (the write
+invariant); a repair (`turn.repair`) shows the model its validation problems and **invites** a
+corrected execute. They are mutually exclusive and each has its own user prompt
+(`buildReadbackUser` vs `buildRepairUser` in `router/prompt.js`), sharing the same system prompt so
+both stay on the generic no-`output_config` path. (An earlier build reused the read-back prompt for
+the repair turn, so the prompt told the model it may NOT execute on the exact turn the repair loop
+needs it to — fixed here.)
+
+**The caps (module-locals in `server.js`) — the model can loop on skills, so the bound is code:**
+- **`MAX_TURNS = 10`** — *productive* turns only. **A deliberate-silence turn
+  (`{say:null, next:"listen"}`) is FREE** and does not count: the secretary listens to a real
+  human thread and must stay silent on chatter without the conversation dying.
+- **`MAX_DISPATCHES = 3`** — a **DISPATCH ceiling, NOT "3 writes".** Under a read-back design a
+  dispatch can be a *read* (a future calendar delete costs two dispatches for one write). Do not
+  re-document this as a write ceiling, and do not size the next card's constant against a pilot
+  that never reads.
+- **≤ 1 successful dispatch per incoming message — the WRITE INVARIANT.** A **read-back turn may
+  not `execute`**: the orchestrator refuses it, treats it as `done`, and files a report
+  (`readback_execute`). An autonomous write-loop is structurally impossible — a second write needs
+  a new owner message.
+
+**`ctx.send` / `ctx.sendFailure` now also record the body they sent onto `ctx._turn.said`** —
+additive, invisible to every caller — because that is the outcome message the read-back shows the
+model. `sendFailure` records too, so a *failing* read-back does not re-narrate.
+
+**Two kinds of open session — the coexistence gate.** A session with a **`skill` field** is a
+legacy skill session → the bypass at step 12, byte-for-byte unchanged. A session with **no `skill`
+field** is the orchestrator's own **conversation marker** (`{ open, awaitFrom, lang, turns,
+dispatches, expiresAt }`) → the turn loop. Before the orchestrator clears **or** writes the marker
+it **re-reads the key** and leaves it alone if a dispatched skill has taken it (its confirmation
+outranks the marker; `sessions.set` is a full overwrite). **This two-kinds gate is temporary
+machinery with a named end date: it is deleted by the last skill-conversion card.**
+
+**Orchestrator-owned failures** each fire a `fireCapture` (existing plumbing): `turn_cap`,
+`dispatch_cap`, `repair_giveup`, `readback_execute`, and `throw:readback` (a read-back call that
+threw — the orchestrator stays **silent**, because the skill already wrote and already told him).
+
+**One converted skill ships in this card: `assistant_settings`.** The other six are unchanged; each
+gains only a redundant explicit `conversation: "skill"` line (except Feature Requests, whose absent
+declaration correctly defaults to `"skill"`).
+
+### Dual-tag parallel run (@assistant = OLD, @mary = NEW) — temporary scaffolding
+
+The turn loop above does **not** replace the legacy dispatch in place. Both run in one process,
+chosen by the **summon tag** on each message, so the new architecture can be tested live without
+risking the owner's daily driver. The branch is made **as early as possible** in the webhook
+handler (server.js), before any flow-specific logic:
+
+- **`@assistant` (`SECRETARY_TAG`) → the LEGACY flow** (`runLegacyFlow`): the pre-card `route →
+  dispatch`, run on **frozen copies** of the pre-card code under `1. Orchestrator/legacy/`
+  (`router.js`, `prompt.js`, `inputs.js`, `assistant-settings.js`, `assistant-settings-prompt.js` —
+  the deleted propose/`classifyConfirmation` flow). None of it is imported by the NEW flow. This is
+  **byte-for-byte the committed (HEAD) behaviour.**
+- **`@mary` (`SECRETARY_TAG_NEW`) → the NEW flow**: the turn loop above.
+
+**How the branch is decided.** A *tagged* message: `matchedTagNew` hit → NEW, else `matchedTag` hit
+→ LEGACY (if a message somehow matched both disjoint lists, LEGACY wins, so @assistant is never
+starved). A *continuation*: a session **with a `skill` field** → LEGACY bypass (every skill-session
+continuation, including a NEW-flow-dispatched skill's own confirmation, is handed off through the
+shared run and behaves identically); a **marker** (no `skill` field) → the NEW turn loop. The NEW
+flow's converted `assistant_settings` never opens a skill session, so a `skill:"assistant_settings"`
+session can only be the legacy propose/confirm flow — the split is unambiguous.
+
+**The isolation is the whole point, and it is structural.** The NEW flow's `assistant_settings`
+mutates a **separate** tag list (`NEW_TAGS` via `setNewTags`, not `TAGS`/`setTags`) persisted to a
+**separate** settings key (`createSettings({ ns: "new" })` → `secretary:settings:new:tags`). `ctx`
+is built **per flow** — `tags`, `catalog`, `settings` all point at the active flow's own state. So a
+tag change (or any bug) in the `@mary` path is **incapable** of altering what `@assistant` answers
+to. The two flows share only the invariant rails (Evolution I/O, `sessions`, `format`, the wrapped
+Anthropic client, `logbuffer`, `selflearning`) — exactly what the legacy path used at HEAD.
+
+**Boot** loads each tag list over its own seed independently: `settings.loadTags()` → `setTags`
+(legacy), `newSettings.loadTags()` → `setNewTags` (new). The boot log prints both (`tags:` and
+`new-tags:`). **This whole dual-tag apparatus is temporary:** when the migration completes, the
+`legacy/` subtree, `NEW_TAGS`/`newSettings`, and the branch are removed and only the turn loop stays.
 
 ### Self-learning — the orchestrator's failure capture
 `installLogBuffer()` (`lib/logbuffer.js`) runs **first**, above everything that logs: it wraps

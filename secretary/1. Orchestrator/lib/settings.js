@@ -32,8 +32,14 @@
 const PREFIX = "secretary:settings:";
 const TAGS_KEY = "tags";
 
-// createSettings({ url }) -> { ready, loadTags, saveTags }
-export function createSettings({ url } = {}) {
+// createSettings({ url, ns }) -> { ready, loadTags, saveTags }
+// `ns` (optional) namespaces the Redis key so two independent settings stores can share one
+// Redis without colliding — used by the dual-tag run: the OLD flow keeps the bare key
+// (secretary:settings:tags, unchanged), the NEW flow passes ns:"new" (secretary:settings:new:tags)
+// so a @mary tag change is persisted separately and can NEVER overwrite @assistant's stored tags.
+// Additive: an absent ns reproduces the original key byte-for-byte.
+export function createSettings({ url, ns } = {}) {
+  const tagsKey = (ns ? ns + ":" : "") + TAGS_KEY;
   const mem = new Map(); // key -> value (fallback; no TTL — this is a setting)
   let redis = null;
 
@@ -74,7 +80,7 @@ export function createSettings({ url } = {}) {
     async loadTags() {
       if (live()) {
         try {
-          const s = await redis.get(PREFIX + TAGS_KEY);
+          const s = await redis.get(PREFIX + tagsKey);
           if (s) {
             const parsed = JSON.parse(s);
             if (Array.isArray(parsed) && parsed.length) return parsed;
@@ -84,17 +90,17 @@ export function createSettings({ url } = {}) {
           console.error("settings loadTags fell back to memory:", e.message);
         }
       }
-      return mem.get(TAGS_KEY) || null;
+      return mem.get(tagsKey) || null;
     },
 
     // TRUE only if the store really took it. The memory fallback still HOLDS the value
     // (so the change is live for this process) but reports false — she must never claim
     // a persistence she did not get.
     async saveTags(list) {
-      mem.set(TAGS_KEY, list);
+      mem.set(tagsKey, list);
       if (live()) {
         try {
-          await redis.set(PREFIX + TAGS_KEY, JSON.stringify(list));
+          await redis.set(PREFIX + tagsKey, JSON.stringify(list));
           return true;
         } catch (e) {
           console.error("settings saveTags fell back to memory:", e.message);

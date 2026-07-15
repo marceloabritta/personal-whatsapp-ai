@@ -469,6 +469,31 @@ const incomplete = g({ start_iso: null });
 check("T2.7f   an INCOMPLETE payload is shape-VALID (shapeOk=true, ok=false) — it is still handed over",
   incomplete.shapeOk === true && incomplete.ok === false, 2);
 
+// ---- T2.7 SCALAR ARRAY (card 55e00052) — inputs.js learned `of: { type: "string" }`. ----------
+// The pilot (assistant_settings) declares tags as an array of scalars, not an array of objects.
+// Both halves of that extension — describeFields's rendering AND checkType's element check — must
+// ship together, or a scalar `of` renders "array of {type: undefined}" and validates as objects.
+// These call checkPayload directly (no server, no model), same as the T2.7 block above.
+const SCALAR_ARR = { fields: { tags: { type: "array", of: { type: "string" } } } };
+check("T2.7g   scalar array — ['@assist'] (array of string) -> shapeOk:true",
+  gate(SCALAR_ARR, { tags: ["@assist"] }).shapeOk === true, 2);
+const notStrings = gate(SCALAR_ARR, { tags: [{ tag: "@assist" }] });
+check("T2.7h   scalar array — [{tag:'@assist'}] (objects, not strings) -> shapeOk:false, 'tags[0]: not a string' " +
+  `(problems=${JSON.stringify(notStrings.problems)})`,
+  notStrings.shapeOk === false && (notStrings.problems || []).some((p) => /tags\[0\].*not a string/i.test(String(p))), 2);
+check("T2.7i   scalar array — a bare string '@assist' (not an array) -> shapeOk:false",
+  gate(SCALAR_ARR, { tags: "@assist" }).shapeOk === false, 2);
+// The regression guard: an OBJECT `of` (calendar's participants) STILL validates its elements as
+// objects — the scalar branch must not swallow the discriminated object case.
+check("T2.7j   OBJECT array — calendar's participants still validate as OBJECTS (regression guard)",
+  g({ participants: [{ name: "Laura", email: "l@x.com" }] }).shapeOk === true &&
+    g({ participants: [{ name: "Laura", email: "not-an-email" }] }).ok === false, 2);
+// Note (do not "fix" here): {tags:null} is shape-VALID — checkType exempts arrays from the
+// not-nullable rule (checkType:127-129). Harmless: the pilot gates on `ok`, and normalizeTags(null)
+// is {ok:false}, so a null tag list can never be applied.
+check("T2.7k   scalar array — {tags:null} is shape-VALID (arrays are exempt from not-nullable)",
+  gate(SCALAR_ARR, { tags: null }).shapeOk === true, 2);
+
 // ---- T2.10 — THE STRUCTURAL LINT. The most valuable assertion in this file. --------------
 // This card exists because a field was added to CAL_SCHEMA (6c76dab: all_day, all_day_end_iso)
 // and the declaration did not follow. Step 2 binds manifest.inputs to CAL_SCHEMA's field
@@ -715,8 +740,11 @@ const child = spawn(
       REDIS_URL: "",
       OWNER_NAME: "Marcelo",
       // The reproduction (REPLICATION.md) used "@secretaria", and the orders below are its
-      // orders VERBATIM. Pinned here so the suite is immune to a rename of the live tag.
-      SECRETARY_TAG: "@secretaria",
+      // orders VERBATIM. This suite exercises the NEW orchestrator flow, so "@secretaria" is
+      // wired as the NEW-flow tag (SECRETARY_TAG_NEW); the legacy tag is parked on a disjoint
+      // "@legacy" so it can never intercept these orders. (Dual-tag parallel run.)
+      SECRETARY_TAG: "@legacy",
+      SECRETARY_TAG_NEW: "@secretaria",
       SELF_LEARNING_DIR: selfLearnDir,
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
@@ -853,12 +881,21 @@ const ROUTER = (lang = "pt") => ({
   json: JSON.stringify({ tasks: ["calendar_action"], lang, reason: "agendar" }),
 });
 const CALENDAR = (o = {}) => ({ kind: "calendar", json: JSON.stringify(cal(o)) });
-// The merged reply: the SAME payload, in the SAME field names, in ONE call. That field
-// identity is the whole point — it makes the merged payload a drop-in for interpret()'s
-// output, so handleCreate/handleDelete/handleEdit/handleList need zero changes.
+// The merged reply, RE-PINNED to the conversational three-state contract (card 55e00052):
+// route(ctx, turn) now returns { say, next, skills, info, lang }, not { tasks, lang, info }. A
+// fresh calendar order is the model saying "execute this skill now" — say:null, next:"execute",
+// skills:[…]. The `info` field identity is unchanged, so the merged payload is still a drop-in
+// for interpret()'s output. (One shape, one fixture — the router is NOT taught to accept both;
+// the stale ROUTER entries below simply go unclaimed, which is harmless.)
 const MERGED = (o = {}, { tasks = ["calendar_action"], lang = "pt", info } = {}) => ({
   kind: "route_extract",
-  json: JSON.stringify({ tasks, lang, info: info === undefined ? cal(o) : info }),
+  json: JSON.stringify({
+    say: null,
+    next: "execute",
+    skills: tasks,
+    lang,
+    info: info === undefined ? cal(o) : info,
+  }),
 });
 const resolve_ = (o = {}) =>
   ({ kind: "resolve", json: JSON.stringify({ decision: "modify", start_iso: null, participants: null, no_email_for: [], ...o }) });

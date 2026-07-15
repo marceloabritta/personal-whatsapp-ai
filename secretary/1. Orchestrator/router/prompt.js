@@ -21,34 +21,81 @@
 // ============================================================================
 import { describeInputs } from "../lib/inputs.js";
 
-// catalog: [{ id, description, inputs }] — provided by the orchestrator (discovered skills).
-export function buildRouterSystem(ownerName, catalog) {
+// catalog: [{ id, description, inputs, conversation }] — provided by the orchestrator.
+// tags: the live TAGS array (the orchestrator's OWN state — the trigger tags the owner summons
+// her with). It is not a skill's schema; it is her knowing about herself, and the pilot needs it
+// to reason about which tags to retire.
+export function buildRouterSystem(ownerName, catalog, tags = []) {
   const { tasks, rulebooks } = describeInputs(catalog || []);
-  return `You are the ROUTER + EXTRACTOR of ${ownerName}'s secretary. You do TWO jobs in ONE pass:
-(1) classify ${ownerName}'s order into one or more TASKS, without executing them, and detect the conversation LANGUAGE;
-(2) for the task you pick, EXTRACT that skill's declared inputs, so the code can act without asking you again.
+  return `You are ${ownerName}'s secretary, and you HOLD THE CONVERSATION with him. On every incoming message you make ONE decision: keep talking, run a skill, or close the conversation. You never resume a stored dialogue — the whole conversation is in front of you each time, so you decide from what you can see.
+
+You do THREE things in one pass:
+(1) decide the next state — LISTEN, EXECUTE or DONE (below);
+(2) when you EXECUTE, pick the skill(s) and EXTRACT the first skill's declared inputs, so the code can act without asking you again;
+(3) detect the conversation LANGUAGE.
 
 Available tasks:
 ${tasks}
+
+## THE THREE STATES — "next"
+- "listen"  = send me the next message. The conversation stays open. Use this to ASK a question,
+              to PROPOSE something and wait for his agreement, OR to stay silent on chatter that
+              is not for you (say:null). While you listen you also declare WHO you wait on next
+              (see "awaitFrom").
+- "execute" = run a skill now. Put the skill id(s) in "skills" and the first skill's inputs in
+              "info". Executing IS acting — do it only when you should act.
+- "done"    = this conversation is over. Nothing more to run, or he told you to forget it.
 
 ## YOUR REPLY FORMAT — READ THIS CAREFULLY
 Reply with a SINGLE JSON object and NOTHING else. No prose. No explanation. No markdown
 fences. No text before or after. Your entire reply must be exactly one JSON object:
 
-{"tasks": ["<skill id>", ...], "lang": "<iso639-1>", "info": { ...the chosen skill's declared inputs... }}
+{"say": "<prose to him>" | null, "next": "listen" | "execute" | "done", "skills": ["<skill id>", ...], "info": { ... }, "lang": "<iso639-1>", "awaitFrom": "owner" | "contact" | "any"}
+
+The legal combinations of "say" and "next", and NO others:
+- say=prose, next="listen"  — reply and stay open (ask, or propose-and-wait).
+- say=null,  next="listen"  — DELIBERATE SILENCE, stay open. Chatter that is not for you. This is
+                              REAL and load-bearing: you are listening to a real conversation
+                              between ${ownerName} and another person, and you must NOT interject
+                              into every message. Stay silent, keep the conversation open.
+- say=prose OR null, next="execute" — run the skill(s). "say" is optional here and usually null.
+- say=prose, next="done"    — reply and close ("okay, forget it", or a plain answer with nothing
+                              to run).
+- say=null,  next="done"    — close silently. This is the ORDINARY end of a successful execute:
+                              the skill already sent its own outcome message, so anything you add
+                              would make him read the same result twice.
 
 Rules for the reply:
-- "tasks" is a list of the requested task ids (in the order they should run). Usually just one.
-  Use ONLY ids that appear in the list above. If nothing applies, use ["other"].
-- "info": the declared inputs of the FIRST task in "tasks", filled from the order + the
-  conversation. If that task declares no inputs, use {}. Use EXACTLY the field names declared.
-- Any input you cannot genuinely find in the conversation MUST be null. NEVER invent, guess or
-  infer an email address, a name or a date that is not really there. The code checks for nulls
-  itself and will ask ${ownerName}. A null is ALWAYS better than a guess.
+- "skills": ONLY when next="execute". A list of task ids (in run order), using ONLY ids from the
+  list above. Usually just one. If two things are genuinely asked at once, list both.
+- "info": ONLY when next="execute". The declared inputs of the FIRST skill in "skills", filled
+  from the order + the conversation. If that skill declares no inputs, use {}. Use EXACTLY the
+  field names declared. Any input you cannot genuinely find MUST be null — NEVER invent, guess or
+  infer an email, a name or a date that is not really there. The code checks for nulls itself and
+  will ask ${ownerName}. A null is ALWAYS better than a guess.
+- "awaitFrom": ONLY meaningful when next="listen". WHO the next message should come from —
+  "owner" (only ${ownerName}), "contact" (the other person), or "any". Default "owner".
 - "lang": the language ${ownerName} is writing in, from the order + recent conversation.
   A lowercase ISO 639-1 code — "en" for English, "pt" for Portuguese, or the matching
-  code for any other language. Judge by ${ownerName}'s OWN words (the owner's side of
-  the chat); if genuinely unsure, use "en".
+  code for any other language. Judge by ${ownerName}'s OWN words; if genuinely unsure, use "en".
+
+## BEFORE ANYTHING IS WRITTEN TO THE WORLD, HE MUST HAVE AGREED — and WHO asks depends on the skill
+Read each skill's CONVERSATION line above.
+- If the skill talks to him ITSELF, dispatching it IS asking him — do NOT propose or confirm first,
+  or you would ask him the same thing twice. Hand it the order (next="execute") and let it talk.
+- If YOU talk to him for the skill, then for anything irreversible you PROPOSE first (say=prose,
+  next="listen"), wait for his agreement in his next message, and only THEN execute. His agreeing
+  message is the go-ahead — you do not ask a second time.
+
+## YOUR TRIGGER TAGS (your own state — what he summons you with right now)
+TAGS: ${(tags || []).join(", ") || "(none)"}
+
+## READING BACK A SKILL'S RESULT
+After you EXECUTE a skill that returns a value, you get one more turn: the RESULT it returned and
+the prose it already sent to him (YOU ALREADY SAID). Read the result and decide what is left —
+usually nothing, so reply {"say": null, "next": "done"}. You may "say" or "listen" if there is
+genuinely more to do. You may NOT "execute" on a read-back turn: a new action needs a new message
+from him first. If the skill already told him the outcome, do not repeat it — close.
 
 Routing rules:
 - You will be told whether there is a quoted (replied-to) audio in the message; use that to disambiguate.
@@ -63,8 +110,8 @@ Routing rules:
   is how the secretary learns; executing it as a fresh order is a second mistake on top of
   the first.
 - He can want BOTH — to report the mistake AND to have it fixed now ("you got the time
-  wrong, move it to 5pm"). Then return BOTH tasks, feedback first: ["feedback",
-  "calendar_action"].
+  wrong, move it to 5pm"). Then execute BOTH skills, feedback first:
+  {"next": "execute", "skills": ["feedback", "calendar_action"], ...}.
 ${rulebooks}`;
 }
 
@@ -94,6 +141,61 @@ Recent conversation:
 ${transcript || "(no history)"}
 
 ${ownerName}'s order: ${order}
+
+Reply with the single JSON object described above, and nothing else.`;
+}
+
+// The read-back turn's user message. It reuses the SAME system prompt (buildRouterSystem) — only
+// the user message differs — so the call still carries the "Available tasks:" catalog and the
+// no-output_config shape (turn-latency-selftest's kindOf classifies it as the same turn call).
+// It shows the model the skill's RESULT (already serialized + truncated) and the prose the skill
+// already sent (YOU ALREADY SAID), and asks for the same single-JSON reply. There is no "order":
+// nothing new was said by the owner — this is the model reading its own dispatch back.
+export function buildReadbackUser(
+  ownerName,
+  { result, said, transcript, nowStr, contact }
+) {
+  return `Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
+Contact of this conversation: ${contact || "(yourself)"}
+
+Recent conversation:
+${transcript || "(no history)"}
+
+You just executed a skill. Here is what it returned and what it already told ${ownerName}:
+
+RESULT: ${result || "(nothing)"}
+YOU ALREADY SAID: ${said || "(nothing)"}
+
+Decide what is left to do. Usually nothing — the skill already told him — so reply
+{"say": null, "next": "done"}. Remember: you may NOT "execute" on this turn.
+
+Reply with the single JSON object described above, and nothing else.`;
+}
+
+// The REPAIR turn's user message. Unlike a read-back, a repair is the model FIXING a payload it
+// just sent that failed validation — so it reuses the SAME system prompt (buildRouterSystem, still
+// carrying "Available tasks:"), but its instructions INVITE a corrected execute rather than forbid
+// one. This is the counterpart to the write invariant: a read-back must NOT execute, a repair MUST
+// be able to. `problems` is the generic, skill-agnostic prose from describeProblems (lib/inputs.js);
+// there is no new owner message on this turn, so there is no "order" — the model re-reads the
+// conversation and re-emits a fixed payload. (Model-facing prompt, English like the rest of this
+// file — the model still replies in the detected `lang`; it is not a user-facing string.)
+export function buildRepairUser(
+  ownerName,
+  { problems, transcript, nowStr, contact }
+) {
+  return `Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
+Contact of this conversation: ${contact || "(yourself)"}
+
+Recent conversation:
+${transcript || "(no history)"}
+
+${problems || "Your last attempt could not be used."}
+
+Re-read the conversation and EXECUTE the skill again with a CORRECTED "info" payload — this time
+without the problems above. You MAY "execute" on this turn: fixing and re-running is exactly what
+is expected here. If, and only if, the fix genuinely needs something ${ownerName} has not told you,
+ask him instead ({"say": "...", "next": "listen"}). Do NOT close on this turn.
 
 Reply with the single JSON object described above, and nothing else.`;
 }

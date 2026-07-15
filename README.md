@@ -48,6 +48,24 @@ You type "@secretary ..." in a chat
                           reply back on WhatsApp
 ```
 
+### Two flows in parallel (currently)
+
+The system is mid-migration to an architecture where the **model holds the conversation** instead of
+each skill driving its own dialogue. Both run side by side in one server, chosen by which tag you
+summon:
+
+```
+@assistant <order>  ─→  OLD flow: router classifies → skill runs (the diagram above)
+@mary <order>       ─→  NEW flow: the orchestrator runs a turn loop —
+                        the model decides each turn to  LISTEN (ask/propose) · EXECUTE (run a
+                        skill) · DONE (close), and reads a skill's result back before closing.
+```
+
+`@assistant` is the stable daily driver and is exactly the committed behaviour; `@mary` is the new
+system, tested live without touching `@assistant`. The two are fully isolated — a tag change made
+through `@mary` cannot change what `@assistant` answers to. Set the tags with `SECRETARY_TAG` and
+`SECRETARY_TAG_NEW`. When the migration finishes, only the turn loop remains.
+
 ## Skills (today)
 
 - **`calendar_action`** — reads the chat and **creates**, **edits/reschedules**, or **cancels/deletes** a Google Calendar event. On create it extracts participants, date, time and duration, creates the event and fires the invite email to the attendees. On edit you reply to the invite with a change ("move it to 4pm", "add carlos@example.com", "rename to Kickoff") — it's confirm-first and stays open so you can keep refining before saving.

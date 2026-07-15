@@ -18,6 +18,8 @@ import { frame } from "../../1. Orchestrator/lib/format.js";
 // router's merged call to pre-extract and nothing may be handed to it.
 export const manifest = {
   id: "transcribe_audio",
+  // This skill runs its own dialogue (default; explicit so the migration state is a grep).
+  conversation: "skill",
   inputs: null,
   description:
     "transcribe an audio message that the user REPLIED to (quoted) and asked to transcribe",

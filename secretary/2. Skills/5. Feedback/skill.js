@@ -40,6 +40,8 @@ import {
 // nothing may be handed to it: a task with no declaration is never given a payload.
 export const manifest = {
   id: "feedback",
+  // This skill runs its own dialogue (default; explicit so the migration state is a grep).
+  conversation: "skill",
   inputs: null,
   description:
     "the owner is telling you that YOU, the secretary, did something WRONG — a mistake, a " +

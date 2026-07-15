@@ -46,6 +46,8 @@ import { googleAuth } from "../../1. Orchestrator/lib/google.js";
 // check. The cost of declaring without consuming is a few wasted output tokens on these turns.
 export const manifest = {
   id: "task_action",
+  // This skill runs its own dialogue (default; explicit so the migration state is a grep).
+  conversation: "skill",
   description:
     "add one or more to-dos for the owner OR another person, list open tasks, complete/check off tasks, or edit/rename/reschedule/delete existing tasks",
   inputs: {

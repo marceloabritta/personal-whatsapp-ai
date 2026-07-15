@@ -1,4 +1,10 @@
 // ============================================================================
+//  legacy/inputs.js  —  FROZEN. Verbatim copy of lib/inputs.js as it was at HEAD (commit
+//  before card 55e00052). Pure (no imports). Provides describeInputs() + checkPayload() to
+//  the legacy (@assistant / OLD) path ONLY, so the OLD router prompt renders exactly as it
+//  did at HEAD — no CONVERSATION line, no scalar-`of` — and the OLD payload gate validates
+//  exactly as it did. The NEW flow uses the live lib/inputs.js. Do NOT edit.
+// ============================================================================
 //  lib/inputs.js  —  THE DECLARED-INPUTS CONTRACT. Generic, and it stays generic.
 //
 //  Each skill DECLARES the inputs it needs (manifest.inputs). The router asks for them in
@@ -59,21 +65,13 @@ function describeFields(fields, indent = "        ") {
     let t = f.type;
     if (f.type === "enum") t = `one of ${JSON.stringify(f.enum)}`;
     if (f.type === "array" && f.of) {
-      // A SCALAR element spec (`of: { type: "string" }`) renders "array of <type>"; an OBJECT
-      // element spec (`of: { name: {...}, email: {...} }`) keeps the "array of {sub}" shape.
-      // Both halves of this — here and checkType's `case "array"` — ship together or neither,
-      // or a scalar spec renders "array of {type: undefined}". See checkType below.
-      if (typeof f.of?.type === "string") {
-        t = `array of ${f.of.type === "enum" ? JSON.stringify(f.of.enum) : f.of.type}`;
-      } else {
-        const sub = Object.entries(f.of)
-          .map(
-            ([k, v]) =>
-              `${k}: ${v.type === "enum" ? JSON.stringify(v.enum) : v.type}${v.nullable ? "|null" : ""}`
-          )
-          .join(", ");
-        t = `array of {${sub}}`;
-      }
+      const sub = Object.entries(f.of)
+        .map(
+          ([k, v]) =>
+            `${k}: ${v.type === "enum" ? JSON.stringify(v.enum) : v.type}${v.nullable ? "|null" : ""}`
+        )
+        .join(", ");
+      t = `array of {${sub}}`;
     }
     lines.push(
       `${indent}${name}: ${t}${f.nullable ? "|null" : ""}${f.desc ? `   // ${f.desc}` : ""}`
@@ -82,36 +80,16 @@ function describeFields(fields, indent = "        ") {
   return lines.join("\n");
 }
 
-// WHO runs the conversation for a skill, as prompt text. Rendered opaquely, exactly like the
-// INPUTS block: the orchestrator reads one field with two values and never interprets a skill.
-// "skill" — the skill asks/confirms for itself (today's shape, the default). "orchestrator" —
-// the model runs the dialogue; the skill just acts and returns.
-const CONVERSATION_COPY = {
-  skill:
-    "this skill talks to him ITSELF. It will ask its own questions and get its own " +
-    "confirmation before it writes anything. Do NOT propose or ask before you dispatch it — " +
-    "you would be asking him the same thing twice. Hand it the order and let it talk.",
-  orchestrator:
-    "YOU talk to him for this skill. It does not ask and it does not confirm — it just acts. " +
-    "So before you dispatch it for anything irreversible, propose what you are about to do and " +
-    "get his agreement first.",
-};
-
 // One skill's declared inputs, as prompt text. A skill with no inputs says so out loud —
-// "(no inputs)" is an answer, and it stops the model inventing a payload for it. `conversation`
-// (opaque, two-valued; absent -> "skill") is appended as its own line so the model knows whether
-// dispatching the skill IS asking the owner or whether it must ask first.
-function describeSkill(spec, conversation) {
-  const conv =
-    conversation === "orchestrator" ? CONVERSATION_COPY.orchestrator : CONVERSATION_COPY.skill;
-  const convLine = `\n      CONVERSATION: ${conv}`;
+// "(no inputs)" is an answer, and it stops the model inventing a payload for it.
+function describeSkill(spec) {
   if (!spec || !spec.fields || !Object.keys(spec.fields).length)
-    return `        (no inputs — this skill reads the conversation itself)${convLine}`;
+    return `        (no inputs — this skill reads the conversation itself)`;
   const req = Object.entries(spec.requiredWhen || {})
     .filter(([, v]) => Array.isArray(v) && v.length)
     .map(([k, v]) => `${spec.discriminator}="${k}" requires ${v.join(" + ")}`)
     .join("; ");
-  return describeFields(spec.fields) + (req ? `\n        REQUIRED TO ACT: ${req}` : "") + convLine;
+  return describeFields(spec.fields) + (req ? `\n        REQUIRED TO ACT: ${req}` : "");
 }
 
 // The orchestrator's view of the catalog, as two blocks of OPAQUE TEXT:
@@ -120,13 +98,13 @@ function describeSkill(spec, conversation) {
 // Carrying the rulebooks matters and it is nearly free: input tokens are cheap, output tokens
 // are the clock. A lean prompt without them measurably DROPS people from terse orders, and a
 // dropped attendee is a person who is silently never invited.
-// catalog: [{ id, description, inputs, conversation }] — built by server.js loadSkills().
+// catalog: [{ id, description, inputs }] — built by server.js loadSkills().
 export function describeInputs(catalog) {
   const list = (catalog || [])
     .map(
       (t) =>
         `  - "${t.id}": ${t.description}\n` +
-        `      INPUTS (fill these into "info" if you pick this skill):\n${describeSkill(t.inputs, t.conversation)}`
+        `      INPUTS (fill these into "info" if you pick this skill):\n${describeSkill(t.inputs)}`
     )
     .join("\n");
 
@@ -183,22 +161,14 @@ function checkType(val, f, at, problems) {
         problems.push(`${at}: not an array`);
         break;
       }
-      // A SCALAR element spec (`of: { type: "string" }`) checks each element as that scalar —
-      // a null element then fails via the "null but not nullable" branch above, and enum/email
-      // element types come for free. An OBJECT element spec keeps the per-key sub-check. This is
-      // the second half of the scalar-`of` support; see describeFields above.
-      if (typeof f.of?.type === "string") {
-        val.forEach((item, n) => checkType(item, f.of, `${at}[${n}]`, problems));
-      } else {
-        val.forEach((item, n) => {
-          if (item === null || typeof item !== "object") {
-            problems.push(`${at}[${n}]: not an object`);
-            return;
-          }
-          for (const [k, sub] of Object.entries(f.of || {}))
-            checkType(item[k], sub, `${at}[${n}].${k}`, problems);
-        });
-      }
+      val.forEach((item, n) => {
+        if (item === null || typeof item !== "object") {
+          problems.push(`${at}[${n}]: not an object`);
+          return;
+        }
+        for (const [k, sub] of Object.entries(f.of || {}))
+          checkType(item[k], sub, `${at}[${n}].${k}`, problems);
+      });
       break;
   }
 }
@@ -263,12 +233,4 @@ export function checkPayload(spec, info) {
   }
 
   return { shapeOk, ok: problems.length === 0, problems };
-}
-
-// Render checkPayload().problems back into a short prose block the repair-loop turn shows the
-// model, so it can fix the payload it just sent. PURE — no AI, names no skill; it renders the
-// same generic problem strings checkPayload already produced.
-export function describeProblems(problems) {
-  const lines = (problems || []).map((p) => `- ${p}`).join("\n");
-  return `Your last attempt could not be used — it failed validation:\n${lines || "- (no detail)"}\nFix these and try again, or ask him for what you are missing.`;
 }
