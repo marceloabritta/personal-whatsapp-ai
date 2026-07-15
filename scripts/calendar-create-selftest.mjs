@@ -932,6 +932,37 @@ check(
 );
 
 // ============================================================================
+//  i. NAME FALLBACK — no topic -> the participants' names, joined with "/".
+//     When the conversation gives NO subject (title=null) the code builds the heading
+//     from the names: owner first, then each guest, "/"-separated -> "Marcelo/John".
+//     Before this card the separator was " & " ("Marcelo & John"). One guest WITH an
+//     email + a time = a COMPLETE draft, so the confirm bubble renders at once and the
+//     fallback string is visible in it (draftFromInfo's fallback only surfaces there).
+// ============================================================================
+console.log("\n=== i. name fallback ===\n");
+reset("5599999999999@s.whatsapp.net");
+
+scripted = [
+  ROUTE_CAL({
+    title: null,
+    participants: [{ name: "John", email: "john@example.com" }],
+    start_iso: "2026-07-14T16:00:00-03:00",
+    duration_min: 60,
+  }),
+];
+out = await say("@secretaria agendar amanha 16h com o john");
+console.log(`   owner    : @secretaria agendar amanha 16h com o john`);
+console.log(`   assistant: ${shown(out)}`);
+check(
+  "i1  no-topic fallback names the event Owner/Guest with '/'",
+  out.length === 1 && /Marcelo\/John/.test(body(out[0]))
+);
+check(
+  "i2  and NOT the old ' & ' separator",
+  out.length === 1 && !/Marcelo & John/.test(body(out[0]))
+);
+
+// ============================================================================
 //  h. HARNESS INTEGRITY (runtime). If any of these is red, NOTHING above can be
 //     trusted in either direction — a mis-routed or unanswered model call makes both a
 //     pass and a fail meaningless.

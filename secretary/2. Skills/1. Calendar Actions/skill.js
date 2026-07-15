@@ -697,7 +697,7 @@ async function advanceCreate(ctx, draft) {
 }
 
 // Normalize an interpret()/review() result into the draft we store, render, and
-// eventually insert. Applies the title fallback: inferred topic, else Owner & names.
+// eventually insert. Applies the title fallback: inferred topic, else Owner/names.
 function draftFromInfo(ctx, info) {
   const { owner, contact } = ctx;
   // noEmail rides along: it is the owner's ANSWER ("I don't have hers"), and it must
@@ -712,7 +712,7 @@ function draftFromInfo(ctx, info) {
   const names = participants.map((p) => p.name).filter(Boolean);
   const title =
     String(info.title || "").trim() ||
-    `${owner} & ${names.join(" & ") || contact || "Guest"}`;
+    `${owner}/${names.join("/") || contact || "Guest"}`;
   const duration_min = Number(info.duration_min) > 0 ? Number(info.duration_min) : 45;
 
   // ALL-DAY. `all_day_end_iso` is the LAST day the event still COVERS — INCLUSIVE. The two

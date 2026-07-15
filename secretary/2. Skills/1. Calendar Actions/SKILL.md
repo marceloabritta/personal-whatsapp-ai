@@ -100,9 +100,11 @@ in English, `[Secretaria IA do Marcelo]:` in Portuguese (from `headerFor(lang)`)
    Error in the log."* (Google error) · *"I didn't identify a calendar action. …"* (the
    order wasn't calendar-related) · *"I hit an error while thinking. Try again?"* (LLM error).
 
-The **title** is inferred from what the meeting is about (e.g. "Q3 budget review"); if
-the chat gives no subject it falls back to `Owner & <names>`. You can always fix it at
-the confirm step ("rename to …").
+The **title** is a meaningful **topic** — what the event is about (e.g. "Q3 budget
+review"). A participant-shaped label ("Meeting with John") does NOT count as a subject.
+Only when the chat gives **no subject** does it fall back to the participants' names,
+owner first, joined with "/": `Owner/<names>` (e.g. "Marcelo/John"). You can always fix
+it at the confirm step ("rename to …").
 
 ### Editing / rescheduling an event (confirm-first, and it stays open)
 
@@ -294,7 +296,7 @@ Required to create (everything else has a fallback and never blocks): a **date/t
 **email for every named guest the owner has not said he lacks one for**. **Zero guests is a
 complete, ordinary event** — an event has 0–n outside guests. `missingOf(draft)` /
 `isComplete(m)` compute this; `draftFromInfo` normalizes and applies fallbacks
-(title → inferred or `Owner & names`; `duration_min` → 45).
+(title → meaningful topic, else `Owner/names`; `duration_min` → 45).
 
 #### ALL-DAY events
 "o dia inteiro" / "o dia todo" / "all day" produces a **real Google all-day event** — the one

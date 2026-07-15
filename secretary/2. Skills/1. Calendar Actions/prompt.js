@@ -256,7 +256,17 @@ export function buildExtractionRules(OWNER_NAME) {
 - "other": none of the above.
 
 For action="create", fill these (for action="delete", ALSO fill participants and start_iso — see below):
-- title = the event's short calendar HEADING (a few words), INFERRED from what the meeting is ABOUT using the WHOLE conversation and the order — not only an explicitly stated name. E.g. a clearly-budget chat → "Q3 budget review"; a 1:1 catch-up → "Catch-up". If nothing indicates a subject, set title=null (a name-based fallback is used instead). Do NOT invent a subject the conversation doesn't support.
+- title = the event's short calendar HEADING (a few words). PRIORITY:
+  1. PREFER A MEANINGFUL TOPIC — what the event is ABOUT — inferred from the WHOLE
+     conversation and the order, not only an explicitly stated name. "Budget 2026",
+     "Q3 budget review", "Apartment viewing" are meaningful. A PARTICIPANT-SHAPED label is
+     NOT a topic and must NOT be produced here: "Meeting with John", "Call with Ana" name
+     WHO, not WHAT — they do not count as meaningful.
+  2. ONLY if the conversation genuinely gives NO subject, set title=null. The code then
+     falls back to the participants' names joined with "/", owner first (e.g. "Marcelo/John").
+     You do NOT build that string — just leave title=null.
+  Do NOT invent a subject the conversation doesn't support, and do NOT dress a participant
+  list up as a fake topic.
 - participants = ALL the people who will be in the meeting, BESIDES ${OWNER_NAME}. Use the context: if ${OWNER_NAME} talks to X about scheduling a meeting with Y, decide from context who will actually attend (it may be only Y, or X and Y). Include each person's name.
 - For each participant, include the email if it appears in the conversation; otherwise email=null.
 - You will receive the name of the contact ${OWNER_NAME} is currently talking to; use it when it makes sense.
