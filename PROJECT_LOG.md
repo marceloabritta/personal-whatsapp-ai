@@ -84,6 +84,13 @@ Google OAuth token re-minted + consent screen published, see §8) and **cancel/d
 `transcribe_audio` — reply-detection bug fixed (see §8); verify end-to-end when convenient.
 The stateful session layer (Redis) is live; see §6.
 
+> **Awaiting deploy (2026-07-14):** the "specs & plans auto-land on the kanban backlog" card is
+> BUILT. Its **Mac-side half is live with no deploy** (a triaged `bugfix-*.md` becomes a card
+> tonight). Its **droplet-side half needs a deploy** — the `feature_request` skill now spools each
+> spec to `secretary/specs/` before sending, and that runs in the container: a plain `git pull` +
+> `docker compose restart secretary` (§2 runbook). Until then the malfunction half runs and the
+> feature half does not.
+
 > ✅ **DONE 2026-07-10 — folder-flatten migration (kept for reference).** The repo
 > dropped the `brain/v2.0/` level — `secretary/` is the app root. The droplet's `/opt/secretary`
 > symlink was re-pointed from `brain/v2.0` to `secretary/` and the secretary restarted (a fresh
@@ -148,16 +155,27 @@ ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v
 ├── PROJECT_LOG.md         # this file — the project registry
 ├── LICENSE                # MIT
 ├── .gitignore
-├── New Features Plans/    # per-feature implementation plans
+├── New Features Plans/    # per-feature implementation plans; ALSO the pulled feature-spec spool
 │   ├── calendar-actions.md     #   calendar backlog (conflict-check, query, recurring)
 │   ├── message-summarizer.md
 │   ├── reminders-followups.md
+│   ├── board-inbox-auto-cards.md #  plan: specs/plans auto-land on the kanban backlog
 │   └── task-improvements.md    #   NEXT for tasks: batch create/complete + edit existing
 │                               #   (task-capture.md retired + deleted after task_action shipped)
+├── Board Inbox/           # staging between the two funnels and the kanban board
+│   ├── ledger.tsv         #   TRACKED — the exactly-once authority; losing it re-opens old cards
+│   ├── README.md          #   what the queue / ledger / delivered / lock are
+│   └── .gitignore         #   queue/, delivered/, .drain.lock are runtime state (ledger is kept)
+├── scripts/               # Mac-side automation (pull, triage, board ingest, self-tests)
+│   ├── board-ingest.mjs   #   seed / enqueue / drain — spec+plan -> backlog card, over the board HTTP API
+│   ├── board-ingest.sh    #   thin node wrapper (PATH + cd) for the daily job and the timer
+│   └── com.marcelo.board-ingest.plist  # launchd drain timer (every 5 min)
 ├── secretary/             # the app — run this (v1.0 removed; in git history)
 │   ├── package.json       #   at the secretary/ ROOT (shared node_modules for orchestrator+skills)
 │   ├── .env.example
 │   ├── README.md
+│   ├── improvements/      #   runtime failure-report spool (pulled to Bugs and Malfunctions/)
+│   ├── specs/             #   runtime feature-spec spool (pulled to New Features Plans/)
 │   ├── 1. Orchestrator/
 │   │   ├── server.js      #   webhook, start/continue gate, context, dispatch
 │   │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
@@ -439,6 +457,18 @@ purpose — this list went stale once already by counting.*
 - `node scripts/history-selftest.mjs` — offline. Fails if anyone drops the **dual-JID** history
   query (`remoteJid` + `remoteJidAlt`): WhatsApp addresses the same 1:1 chat under both a phone
   JID and a LID, and reading only one of them made the secretary blind to half the conversation.
+- `node scripts/board-ingest-selftest.mjs` — offline (stub board, no network, no keys). The
+  exactly-once / nothing-dropped core of the board ingest: a lost POST ack is reconciled by the
+  `source:` footer (never a second card), the drain is single-flight (a dead lock is broken, a live
+  one blocks), the seed+ledger interlock stops an unseeded run opening a card for every file on
+  disk, the owner-reported predicate is checked against **what the real `captureFailure` writes**,
+  and the wrong-board tripwire catches a board that stopped honouring `kind` (guards `./update.sh`
+  swapping the vendored board out from under us).
+- `node scripts/pull-archive-selftest.mjs` — offline (runs the **live** `self-learning-pull.sh`
+  against stub `ssh`/`rsync`). Exists to catch the **silent-drop bug**: a file written into the
+  spool mid-pull must stay in the spool, not be archived out having never transferred; the two
+  funnels stay independent (one empty/failing spool never stops the other); and
+  `rsync --remove-source-files` is never passed.
 - `node scripts/identity-selftest.mjs` — offline. Asserts the trigger tag and reply header values
   in `lib/identity.js` (`TAGS` defaults to `@assistente,@assistant`; `headerFor()` returns the
   Assistant pair; the old tags no longer match) **and** — the one that protects something — that
@@ -465,6 +495,33 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-14 — Feature specs & triaged bugfix plans land on the kanban backlog by themselves
+  (BUILT; feature half awaits a droplet deploy).** The self-learning loop gained an end. The
+  `feature_request` skill now spools every generated spec to `secretary/specs/` (timestamped
+  filename + a `title`/`one_liner`/`when` frontmatter header) **before** the WhatsApp send, so a
+  failed send never loses it; the attachment itself is byte-for-byte unchanged. The Mac's daily
+  pull now pulls **two** spools independently (reports → `Bugs and Malfunctions/inbox/`, specs →
+  `New Features Plans/`), and a new deterministic ingest (`scripts/board-ingest.mjs`: `seed` /
+  `enqueue` / `drain`) turns each new spec, each triaged `bugfix-*.md`, and each **owner-reported**
+  failure no plan claims into one card on the board's **backlog**, typed (`kind: feature|maintenance`)
+  and unrouted — over the board's existing HTTP API, **without modifying the board** and at **zero
+  LLM cost** (a valid `kind` skips the board's triage call). Staging lives in `Board Inbox/` (a
+  `queue/`, a **tracked** `ledger.tsv`, a `delivered/` archive, a single-flight `.drain.lock`); the
+  ledger is what makes it exactly-once and what stops anything predating this card from becoming a
+  card. A launchd timer (`com.marcelo.board-ingest.plist`) drains every 5 min. Two new offline
+  self-tests: `board-ingest-selftest.mjs` and `pull-archive-selftest.mjs`.
+  **This also closed a pre-existing SILENT-DROP bug that had already shipped:** the old
+  `self-learning-pull.sh:38` archived with a blind `mv *.md _synced/` **after** the rsync, so any
+  report written into the droplet spool in the window between the transfer and the archive was moved
+  out of the spool **having never been transferred** — destroyed, unreported. Latent for reports; it
+  would have been on the happy path for specs. The restructured pull now captures the file list
+  **before** the transfer and archives only those exact names (`xargs mv`, never a glob, never
+  `rsync --remove-source-files`); a file that appears mid-pull stays in the spool and is pulled next
+  run. `pull-archive-selftest.mjs` reproduces the bug against the live script and locks the fix.
+  Rails: **none** — no `ctx` field, no `lib/` module, no `manifest.description` change (so no live
+  router check, no API spend). **Deploy:** the spec spool is a droplet-side skill change and needs a
+  `git pull` + `docker compose restart secretary`; until then the malfunction half runs and the
+  feature half does not.
 - **2026-07-13 — Editing an all-day event: move it, change its range, flip it to timed and back
   (SHIPPED, DEPLOYED — expedited card 64ff1f1d).** Closes the OPEN GAP card 0822a8e0 left behind.
   Reply to a biópsia invite with *"move a biópsia para quarta"* and the bubble reads **"15 de jul. de

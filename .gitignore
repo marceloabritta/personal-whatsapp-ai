@@ -22,6 +22,12 @@ _deprecated_zapi_scaffold/
 secretary/improvements/*.md
 secretary/improvements/_synced/
 
+# Feature-spec spool (same load-bearing reason as improvements/ above): the skill writes specs
+# here at runtime, they are pulled to the top-level New Features Plans/, and are kept out of the
+# production checkout so `git pull --ff-only` on the droplet stays unblocked.
+secretary/specs/*.md
+secretary/specs/_synced/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

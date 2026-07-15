@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Board-ingest drain timer. Polls every 5 minutes and delivers any queued cards to the
+  kanban board. A down board is a clean no-op, so this is safe to leave running; it just
+  means a plan/spec becomes a card within ~5 min of the board being up, instead of at the
+  next 09:00 daily run.
+
+  Install with:
+      cp scripts/com.marcelo.board-ingest.plist ~/Library/LaunchAgents/
+      launchctl unload ~/Library/LaunchAgents/com.marcelo.board-ingest.plist 2>/dev/null
+      launchctl load  ~/Library/LaunchAgents/com.marcelo.board-ingest.plist
+  Run it once, right now:
+      launchctl start com.marcelo.board-ingest
+  Stop it for good:
+      launchctl unload ~/Library/LaunchAgents/com.marcelo.board-ingest.plist
+  Watch it:
+      tail -f ~/Library/Logs/board-ingest.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.marcelo.board-ingest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/marceloabritta/Desktop/Coding/Personal Whatsapp AI/scripts/board-ingest.sh</string>
+        <string>drain</string>
+    </array>
+
+    <!-- Poll every 5 minutes. The drain is single-flight (a lockfile) and a no-op when the
+         queue is empty or the board is down, so a frequent tick is cheap. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Drain once as soon as the job is loaded (e.g. at login), then every 5 min after. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/marceloabritta/Library/Logs/board-ingest.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/marceloabritta/Library/Logs/board-ingest.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/marceloabritta/Desktop/Coding/Personal Whatsapp AI</string>
+</dict>
+</plist>

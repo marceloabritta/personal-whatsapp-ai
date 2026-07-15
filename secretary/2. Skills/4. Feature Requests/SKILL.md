@@ -95,16 +95,32 @@ unrelated chatter.
   The model is told to finalize **only** on an explicit done-signal (or a complete draft
   + confirm) and to keep question batches small.
 - **`finalize`** → `generateDoc` (a second call, **plain prose, no schema**, system prompt
-  hard-pinned to **English** + a fixed skeleton) → base64 the markdown →
+  hard-pinned to **English** + a fixed skeleton) → **spool a copy of the spec to
+  `secretary/specs/` BEFORE the send** (`spoolSpec`) → base64 the markdown →
   `ctx.evolution.sendMedia({ mediatype:"document", mimetype:"text/markdown", media,
   fileName:"feature-<slug>.md", caption })`. The caption carries the language-aware header
   (`headerFor(lang)`; media framing is the caller's job, like `sendText`). Session is cleared after send; a
   **render** failure keeps the session so the owner can retry the write without
-  re-speccing, a **send** failure replies `reply().sendFailed()`.
+  re-speccing, a **send** failure replies `reply().sendFailed()`, and a send that succeeds
+  **but a spool that failed** replies `reply().specFileFailed()` (sent, but won't reach the board).
+
+### The spool — the spec also lands on the kanban board
+`spoolSpec` writes the same markdown to `secretary/specs/` **before** the WhatsApp send, so a
+failed send never loses it. The spooled file is `feature-<slug>-<YYYY-MM-DDTHH-MM-SS>.md` and
+**opens with a frontmatter header** (`title` / `one_liner` / `when`) that the board ingest reads.
+**The attachment is byte-for-byte unchanged** — it is still `feature-<slug>.md`, with no timestamp
+and no header; only the spooled copy carries them (the timestamp is a *suffix* so the name still
+matches the `feature-*.md` pull/enqueue glob). It is exclusive-create (`wx`) with a numeric suffix
+on a same-second collision — the `writeUnique` *shape* from `1. Orchestrator/lib/selflearning.js`,
+copied, not imported — and it **never throws**: a spool failure must not break the send. Because
+`skill.js` is an ES module, it builds `__dirname` from `import.meta.url` (a bare `__dirname` would
+throw at import and stop the skill loading). From the Mac, `self-learning-pull.sh` pulls the spool
+into `New Features Plans/` and `board-ingest.mjs` turns each spec into a backlog card. No rails
+change — the skill writes with `node:fs/promises` and reads its spool path from `process.env`.
 
 ### Localization
 - **Scaffolding** strings (`thinkingError`, `firstFallback`, `continueFallback`,
-  `cancelled`, `renderError`, `sendFailed`, `docCaption`) come from `reply(ctx.lang)`
+  `cancelled`, `renderError`, `sendFailed`, `specFileFailed`, `docCaption`) come from `reply(ctx.lang)`
   (en + pt); any other language is translated from `en` by the orchestrator's `send()`
   fallback.
 - **The per-turn question** is generated in-language by the model (the language name is

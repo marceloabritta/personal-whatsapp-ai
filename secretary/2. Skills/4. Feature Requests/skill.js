@@ -33,6 +33,74 @@ import {
 import { headerFor } from "../../1. Orchestrator/lib/identity.js";
 import { frame } from "../../1. Orchestrator/lib/format.js";
 import { jsonFormat, readReply, readText } from "../../1. Orchestrator/lib/llm.js";
+// ESM PRELUDE — REQUIRED. secretary/package.json is "type": "module", so this file is an ES
+// module and `__dirname` DOES NOT EXIST. It must be built, and node:fs/promises + node:path +
+// node:url imported, EXACTLY as 1. Orchestrator/lib/selflearning.js:20-27 does. Omitting any of
+// these throws `ReferenceError: __dirname is not defined` at IMPORT time, and the orchestrator
+// then fails to load the whole feature_request skill at boot.
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Spool dir. Same shape as REPORTS_DIR in 1. Orchestrator/lib/selflearning.js:31-33 — env
+// override, else inside secretary/. The `../../specs` arithmetic resolves from
+// secretary/2. Skills/4. Feature Requests/ to secretary/specs. The container only mounts
+// /opt/secretary:/app, so the spool MUST live inside secretary/.
+const SPEC_DIR =
+  process.env.FEATURE_SPEC_DIR || path.join(__dirname, "..", "..", "specs");
+
+// "2026-07-14 09:12:03" — sv-SE (ISO-shaped, no parsing games) in the owner's wall-clock,
+// the same shape selflearning.js uses for its report timestamps.
+function saoPauloStamp(d = new Date()) {
+  return d.toLocaleString("sv-SE", { timeZone: "America/Sao_Paulo" });
+}
+
+// The machine-readable frontmatter header (D2) the board ingest parses. Newlines in the
+// title / one-liner are collapsed to single spaces so the ingest's line-based parser can
+// never be broken by a multi-line title.
+function specHeader(draft, when) {
+  const oneLine = (s) => String(s || "").replace(/\s*\n\s*/g, " ").trim();
+  return [
+    "---",
+    `title: ${oneLine(draft.title)}`,
+    `one_liner: ${oneLine(draft.one_liner)}`,
+    `when: ${when} (America/Sao_Paulo)`,
+    "---",
+  ].join("\n");
+}
+
+// Spool the spec to secretary/specs BEFORE the WhatsApp send, so a failed send never loses it.
+// Filename: feature-<slug>-<YYYY-MM-DDTHH-MM-SS>.md (D1 — the timestamp is a SUFFIX so the name
+// still matches the enqueue glob `feature-*.md`). Exclusive-create ("wx") + numeric suffix on
+// collision, the writeUnique shape from selflearning.js:164-177 (its shape is copied, the module
+// is NOT imported). Returns the absolute path written, or null. NEVER THROWS — a spool failure
+// must not break the send.
+async function spoolSpec(draft, md) {
+  try {
+    await mkdir(SPEC_DIR, { recursive: true });
+    const when = saoPauloStamp();
+    const stamp = when.replace(" ", "T").replace(/:/g, "-");
+    const base = `feature-${slugify(draft.title)}-${stamp}`;
+    const contents = `${specHeader(draft, when)}\n${md}`;
+    for (let i = 0; i < 50; i++) {
+      const full = path.join(SPEC_DIR, i === 0 ? `${base}.md` : `${base}-${i + 1}.md`);
+      try {
+        await writeFile(full, contents, { encoding: "utf8", flag: "wx" });
+        return full;
+      } catch (e) {
+        if (e?.code === "EEXIST") continue; // same second, different spec — take the next name
+        throw e;
+      }
+    }
+    console.error("feature_request: could not find a free spec filename for", base);
+    return null;
+  } catch (e) {
+    console.error("feature_request/spoolSpec error:", e?.message || e);
+    return null;
+  }
+}
 
 // `inputs: null` — NO declared inputs (see 1. Orchestrator/lib/inputs.js). This skill opens its
 // own clarifying conversation, so there is nothing for the router's merged call to pre-extract,
@@ -223,7 +291,10 @@ async function finalize(ctx, draft) {
   }
 
   const slug = slugify(draft.title);
-  const fileName = `feature-${slug}.md`;
+  const fileName = `feature-${slug}.md`; // THE ATTACHMENT NAME — unchanged
+  // Spool the spec to secretary/specs BEFORE the send (scope: "written before it is sent"), so a
+  // failed send never loses it. Never throws; a null return means the copy was not filed.
+  const spooled = await spoolSpec(draft, md);
   const base64 = Buffer.from(md, "utf8").toString("base64");
   // sendMedia bypasses the orchestrator's send(), so frame the caption here — same
   // bold header + italic body as every other secretary message.
@@ -247,7 +318,10 @@ async function finalize(ctx, draft) {
   }
 
   await sessions.clear(remoteJid);
+  // D3: if both fail, the send-failure wins and the owner gets exactly one reply — he needs to
+  // know he never received the file, not that it merely wasn't filed.
   if (!ok) await ctx.sendFailure(number, reply(ctx.lang).sendFailed());
+  else if (!spooled) await ctx.sendFailure(number, reply(ctx.lang).specFileFailed());
 }
 
 // ---- Document generation (ALWAYS English; returns markdown PROSE, not JSON) ---

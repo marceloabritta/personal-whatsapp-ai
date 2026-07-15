@@ -1,0 +1,8 @@
+# Feature-spec spool.
+#
+# The Feature Requests skill writes a copy of each generated spec here at runtime, BEFORE it
+# sends the file on WhatsApp (see 2. Skills/4. Feature Requests/skill.js). This file is tracked
+# ONLY so the directory exists on the droplet after a git pull; the specs themselves are
+# gitignored and are pulled to the top-level New Features Plans/ by scripts/self-learning-pull.sh,
+# which then archives them into ./_synced/. Must live inside secretary/: the container only
+# mounts /opt/secretary:/app, so nothing outside secretary/ is writable at runtime.

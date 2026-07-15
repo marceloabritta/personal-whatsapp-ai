@@ -25,6 +25,8 @@ secretary/
 │       │                    #     inputs. No output_config — the format is demanded in the prompt, which is
 │       │                    #     what keeps the orchestrator from having to know what a calendar is.
 │       └── router.js        #     ONE Claude call; returns { tasks, lang, info }
+├── improvements/           # runtime failure-report spool (gitignored; pulled to Bugs and Malfunctions/)
+├── specs/                  # runtime feature-spec spool (gitignored; pulled to New Features Plans/)
 └── 2. Skills/               # one folder per skill; the orchestrator scans this at boot
     ├── 1. Calendar Actions/
     │   ├── skill.js         #   export { manifest, run, capabilities.startCreate } — create/cancel a Calendar event

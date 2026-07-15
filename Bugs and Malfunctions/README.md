@@ -25,3 +25,25 @@ the logs, a real root cause, a fix that names the files and lines, and an honest
 what the fix does *not* guarantee.
 
 Reports marked `Source: OWNER-REPORTED` are triaged first: they're the only human-verified ones.
+
+## The plan header — and how a plan becomes a card
+
+**Every plan opens with a frontmatter header**, above its `# H1`. It is the machine-readable
+contract the board ingest (`scripts/board-ingest.mjs`) reads to file the plan as a card:
+
+```
+---
+title: <becomes the card's title on the board>
+one_liner: <one sentence — becomes the card's description>
+reports:
+  - _reports/<the raw report this plan was written from>
+  - _reports/<…and any other it was merged from>
+---
+```
+
+After triage, `enqueue` + `drain` turn each new `bugfix-*.md` into a card on the kanban board's
+**backlog**, typed `kind: maintenance`, over the board's HTTP API (the board is never modified).
+The `reports:` list is what stops a report that a plan already covers from *also* earning its own
+card. **A report you decline to plan is still filed to `_reports/`** — and because it is named by
+no plan, an **owner-reported** one earns its own maintenance card (a machine report stays a filed
+no-op). See `Board Inbox/README.md`.

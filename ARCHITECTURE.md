@@ -231,6 +231,15 @@ Body: { "number": "5531999...", "mediatype": "document", "mimetype": "text/markd
         "media": "<base64 of the .md>", "fileName": "feature-<slug>.md",
         "caption": "*[Marcelo's AI Secretary]:*\n\n_..._" }
 ```
+**Before the send, the same markdown is spooled to `secretary/specs/`** — a timestamped file
+(`feature-<slug>-<YYYY-MM-DDTHH-MM-SS>.md`) opening with a YAML-shaped frontmatter header
+(`title` / `one_liner` / `when`). This happens *first*, so a failed send never loses the spec;
+that spooled copy is what the Mac later pulls and turns into a card on the kanban backlog (see
+"Self-learning" below). The **attachment is byte-for-byte unchanged** — its `fileName` is still
+`feature-<slug>.md`, no timestamp, no header — only the spooled copy carries them. If the spool
+write fails but the send succeeds, the owner gets one extra reply (`specFileFailed`, via
+`ctx.sendFailure`) telling him it will not reach the board.
+
 The caption carries the language-aware header (`headerFor(ctx.lang)`; media framing is the caller's job, like
 `sendText`, so it calls `frame()` itself to get the same bold-header/italic-body treatment). The **conversation** follows `ctx.lang`, but the **document body is always
 English** by design — it's destined for the owner's (English) codebase; only the caption
@@ -516,10 +525,25 @@ the owner's testimony.
   and they are **gitignored** because `/opt/secretary` symlinks into the production git tree.
 
 **The loop:** `scripts/self-learning-daily.sh` runs at 09:00 daily (launchd): it pulls the
-reports (Mac → droplet over SSH; pull-based because the droplet's deploy key is read-only) into
-`Bugs and Malfunctions/inbox/`, then runs `/triage-failures` headless, which writes a
-`Bugs and Malfunctions/bugfix-<slug>.md` plan per report and commits it. **It never pushes and
-never deploys** — `git push`/`ssh`/`docker` are denied to it. The owner reviews and ships.
+reports **and the feature specs** (Mac → droplet over SSH; pull-based because the droplet's
+deploy key is read-only) into `Bugs and Malfunctions/inbox/` and `New Features Plans/`, then
+runs `/triage-failures` headless, which writes a `Bugs and Malfunctions/bugfix-<slug>.md` plan
+per report and commits it. **It never pushes and never deploys** — `git push`/`ssh`/`docker`
+are denied to it. The owner reviews and ships.
 
-Self-tests: `scripts/selflearning-selftest.mjs` (capture invariants, offline) and
-`scripts/router-selftest.mjs` (that a *complaint* is filed, not executed — needs an API key).
+**The loop now gains an end: the plan (and the spec) becomes a card on the kanban backlog by
+itself.** After triage, the daily job runs `scripts/board-ingest.mjs enqueue` then `drain`
+(and a launchd timer drains every 5 min): each new feature spec (`feature-*.md`), each triaged
+bugfix plan (`bugfix-*.md`), and each **owner-reported** failure no plan claims becomes one card
+on the board's **backlog**, typed (`kind: feature|maintenance`) and unrouted. The staging state
+lives in `Board Inbox/` — a `queue/`, a **tracked** `ledger.tsv` (which stops a card being opened
+twice, and stops anything predating the feature from ever becoming a card), and a `delivered/`
+archive. **The board is consumed over its existing HTTP API and is never modified**, and a card
+created with a valid `kind` costs the board nothing (no LLM triage call). A down board is a clean
+no-op — the queue is retained and retried. See `Board Inbox/README.md`.
+
+Self-tests: `scripts/selflearning-selftest.mjs` (capture invariants, offline),
+`scripts/board-ingest-selftest.mjs` (the exactly-once / nothing-dropped ingest, offline against a
+stub board), `scripts/pull-archive-selftest.mjs` (the restructured pull's archive fix and funnel
+independence, offline against stub `ssh`/`rsync`) and `scripts/router-selftest.mjs` (that a
+*complaint* is filed, not executed — needs an API key).

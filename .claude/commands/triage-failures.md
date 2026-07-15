@@ -34,11 +34,30 @@ For each report:
 2. **Investigate the codebase and find the real root cause.** Read the actual call chain; do
    not pattern-match on the error string. Verify every claim against the code before writing
    it down.
-3. Write the plan to **`Bugs and Malfunctions/bugfix-<slug>.md`**.
-4. Move the raw report to `Bugs and Malfunctions/_reports/`.
+3. Write the plan to **`Bugs and Malfunctions/bugfix-<slug>.md`**, opening with the frontmatter
+   header in §3. **If that filename already exists, take the next free one —
+   `bugfix-<slug>-2.md`, then `-3`, and so on. NEVER overwrite an existing plan.** (The two
+   archived reports already share a slug; a fresh plan must not clobber an old one.)
+4. Move the raw report to `Bugs and Malfunctions/_reports/`. **A report you DECLINE to plan is
+   still moved to `_reports/` — it is simply named by no plan.** (An owner-reported one that no
+   plan claims later earns its own card; a machine one stays a filed no-op.)
 5. `git add` + `git commit` each plan separately, with a descriptive message.
 
 ## 3. What a plan looks like
+
+**Every plan, every time, OPENS WITH this frontmatter header**, above the `# H1` — it is what
+the board ingest reads to file the card (`title` becomes the card's title, `one_liner` its
+description, and `reports:` links the raw report(s) so they are not re-carded):
+
+```
+---
+title: <the plan's title — this becomes the card's title on the board>
+one_liner: <one sentence — this becomes the card's description>
+reports:
+  - _reports/<the raw report file this plan was written from>
+  - _reports/<…and any other it was merged from>
+---
+```
 
 **`Bugs and Malfunctions/bugfix-task-false-positive.md` is the reference — match it.** What
 makes it good, and what yours must have:
