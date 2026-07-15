@@ -10,7 +10,9 @@
     workerchat   the per-worker conversation: its own session, journalled, rename-safe
     backlog      the backlog, the card type, and the expedited fast lane
     decouple     the manager goes IDLE while a worker runs — and keeps the card's context
-    ship         drain → wait → stop → migrate → start, WITHOUT killing live work
+    boardchat    the manager's own chat runs in LIVE mode (regression: missing _real_board)
+    pause        stop everything safely — and stay stopped, across a kill. Shipping calls this
+    ship         pause → wait → stop → migrate → start, WITHOUT killing live work
     restart      kill -9 the real server mid-run and start it again
     recovery     the incident's acceptance test: killed mid-run, it resumes ITSELF
     ui           drive the real page in headless Chrome  (skipped if Chrome isn't there)
@@ -31,6 +33,8 @@ SUITES = [
     "workerchat_test.py",
     "backlog_test.py",
     "decouple_test.py",
+    "boardchat_test.py",
+    "pause_test.py",
     "ship_test.py",
     "restart_test.py",
     "recovery_test.py",

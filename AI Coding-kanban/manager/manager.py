@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import shutil
+import time
 
 from . import policy
 from .agents import (
@@ -82,7 +83,7 @@ Then STOP. Do not route it, do not start any work, do not ask the human anything
 tell you when to start. Reply with one short line saying what you typed it as and why."""
 
 SAVE_AND_STOP = """\
-[STOP — the system is restarting. You are being wound down mid-task, on purpose.]
+[STOP — you are being wound down mid-task, on purpose. Nothing is wrong.]
 
 Do NOT start anything new. Do not begin another file, another test, another command.
 
@@ -94,19 +95,22 @@ Do NOT start anything new. Do not begin another file, another test, another comm
     landed on disk or not.
   * **Next** — precisely what remains, in the order you would have done it.
 
-Then end your turn. **You will be resumed in this same conversation after the restart**, with
-everything you know still in front of you — so write this for yourself, not for a stranger.
+Then end your turn. **You will be resumed in this same conversation**, with everything you know
+still in front of you — so write this for yourself, not for a stranger.
 Nothing you have done is being thrown away."""
 
-CONTINUE_AFTER_RESTART = """\
-[AUTOMATIC — the system restarted. You were part-way through this card.]
+# One wording for both ways a card gets wound down — the human pausing the board, and an
+# update shipping — because from inside the conversation they are the same event: you were
+# stopped, you saved your place, and now you are being picked back up.
+CONTINUE_AFTER_PAUSE = """\
+[AUTOMATIC — you were wound down part-way through this card, and are being picked back up.]
 
-You were asked to wind down before an update: you finished what was in your hands and
-stopped, rather than starting the next column. Nobody has said anything new to you.
+You were asked to stop: you finished what was in your hands and saved your place, rather than
+starting the next column. Nobody has said anything new to you.
 
 Pick up exactly where you left off. Read the card folder on disk first — trust it, not your
-memory of what you had dispatched — and continue the supervision loop from the column the
-card is actually in. Do not tell the human about the restart; they know. Do not start over."""
+memory of what you had dispatched — and carry the supervision loop on from the column the
+card is actually in. Do not tell the human about the pause; they know. Do not start over."""
 
 APPROVE_WORDS = (
     "approve", "approved", "go ahead", "lgtm", "build it", "ship it", "ship",
@@ -184,6 +188,19 @@ class Manager:
         self.stopping = False
         self.pending = PendingQueue(config.data_dir)
 
+        # PAUSED — draining because a HUMAN asked for it, rather than because an update is
+        # shipping. Both wind the board down the same way; the difference is who resumes it.
+        # An update resumes itself on the other side of the restart. A pause waits to be told.
+        #
+        # So it is DURABLE. A pause held only in memory would quietly undo itself the next
+        # time the process started — you would come back to a board you had deliberately
+        # stopped, running. The marker on disk is what makes "paused" mean paused.
+        self._pause_marker = os.path.join(config.data_dir, ".paused")
+        self.paused = os.path.exists(self._pause_marker)
+        if self.paused:
+            self.draining = True
+            log.warning("the board is PAUSED — starting nothing until it is resumed")
+
         # What the manager asked for on his last turn, and which cards have a worker running
         # right now. `_workers_running` is what makes "the manager is idle while a worker
         # works" checkable rather than merely intended.
@@ -225,10 +242,72 @@ class Manager:
         self.stopping = False
         log.warning("drain cancelled: accepting work again")
 
+    # ---- pause: ONE wind-down, and shipping is just a caller of it ----
+    async def pause(self, remember: bool = True) -> dict:
+        """Stop the board where it stands. Start nothing new; tell what is running to stop.
+
+        This is THE wind-down, and there is only one — an update ships by calling it (see
+        server.restart_for_update). That is deliberate: pausing and shipping want exactly the
+        same thing from the board, and two implementations of "stop safely" would be one too
+        many. The difference between them is not what they stop, it is who resumes it.
+
+        Nothing is killed. Each worker is told to stop, writes `WIP.md`, and hands back; the
+        card remembers the session it was thinking in, so it is RESUMED in that conversation
+        rather than started over, and a carry-on note is queued for whenever work resumes.
+
+        `remember=False` for an update — the restart resumes itself on the other side, so it
+        must NOT leave a pause marker behind, or the board would come back up stopped.
+        """
+        runs = self.begin_drain()
+        stopped = await self.stop_workers()
+        if remember:
+            self.paused = True
+            with open(self._pause_marker, "w", encoding="utf-8") as fh:
+                fh.write(str(int(time.time())))
+        log.warning(
+            "paused (remembered=%s): told %d worker(s) to stop; %d run(s) winding down",
+            remember, stopped, len(runs),
+        )
+        return {"stopped": stopped, "inflight": len(runs)}
+
+    def unpause(self) -> None:
+        """Willing to take work again — and that is ALL this does.
+
+        It is half of resuming, and the less important half. The cards that were wound down
+        are waiting on carry-on notes in the pending queue, and any run that was cut off is in
+        the journal. Whoever calls this has to pick that held work back up (the server does —
+        see `_take_work_again`), or the board sits there looking idle and perfectly healthy
+        with everything it was doing quietly abandoned.
+
+        It has to happen BEFORE that, though, not after: work picked up while the board is
+        still draining would simply wind itself down again.
+        """
+        if os.path.exists(self._pause_marker):
+            os.remove(self._pause_marker)
+        self.paused = False
+        self.end_drain()
+
+    async def _wind_down_card(self, card_id: str, worker_name: str | None = None) -> None:
+        """Stop this card where it stands, remember its place, and queue its carry-on.
+
+        The carry-on is what makes a pause reversible rather than a quiet abandonment: it is
+        the durable record that this card is owed a "pick it back up" when work resumes.
+        """
+        self._wound_down.discard(card_id)
+        self._interrupted.discard(card_id)
+        if worker_name:
+            await self.board.set_stopped_worker(card_id, worker_name, None)
+        await self.board.set_working(card_id, "")
+        self.pending.add(CARD, card_id, CONTINUE_AFTER_PAUSE, from_human=False)
+        log.warning("wound down %s; it resumes when the board takes work again", card_id)
+
     async def _queue_while_draining(self, kind: str, target_id: str, text: str) -> None:
         """Write the message down, tell the human it is safe, and start nothing."""
         self.pending.add(kind, target_id, text)
         note = (
+            "⏸ The board is paused, so I am not starting anything new. **Your message is "
+            "saved** — I will pick it up the moment you resume."
+            if self.paused else
             "⏳ The system is being updated, so I am not starting anything new. **Your "
             "message is saved** — I will pick it up the moment I am back, in a few seconds."
         )
@@ -669,10 +748,12 @@ class Manager:
                 # worker that is already running; we CAN stop putting more work into the pipe.
                 self._wound_down.add(card_id)
                 return ok(
-                    "**The system is restarting. Do NOT dispatch anything.** Wind down: judge "
-                    "what you already have, file it with `note`, and END YOUR TURN. This card "
-                    "is remembered and picks itself back up automatically after the restart — "
-                    "nothing is lost, and you do not need to tell the human."
+                    ("**The board is PAUSED. Do NOT dispatch anything.**" if self.paused
+                     else "**The system is restarting. Do NOT dispatch anything.**")
+                    + " Wind down: judge what you already have, file it with `note`, and END "
+                    "YOUR TURN. This card is remembered and picks itself back up automatically "
+                    "when the board takes work again — nothing is lost, and you do not need to "
+                    "tell the human."
                 )
             if card_id in self._workers_running or self._turn_kind.get(card_id) == "chat":
                 return ok(
@@ -928,11 +1009,9 @@ class Manager:
             kind = "drive"  # every turn after the first is the machine waking him, not you
             if not delegation:
                 # Did he stop because the card is done, or because we told him to wind down?
-                # Only the second one is owed a "carry on" on the other side of the restart.
+                # Only the second one is owed a "carry on" when the board takes work again.
                 if card_id in self._wound_down:
-                    self._wound_down.discard(card_id)
-                    self.pending.add(CARD, card_id, CONTINUE_AFTER_RESTART, from_human=False)
-                    log.warning("wound down %s mid-pipeline; it will resume after the restart", card_id)
+                    await self._wind_down_card(card_id)
                 return
             worker, instructions = delegation
             report = await self._run_worker(card_id, worker, instructions)
@@ -940,10 +1019,7 @@ class Manager:
             # We told it to stop. Do not make the manager judge a half-finished report — end
             # the run cleanly and let the card pick itself back up on the other side.
             if card_id in self._interrupted:
-                self._interrupted.discard(card_id)
-                self._wound_down.discard(card_id)
-                self.pending.add(CARD, card_id, CONTINUE_AFTER_RESTART, from_human=False)
-                log.warning("stopped the worker on %s; it resumes after the restart", card_id)
+                await self._wind_down_card(card_id)
                 return
 
             next_input = (
@@ -1148,8 +1224,8 @@ class Manager:
         report = "\n\n".join(chunks).strip() or "(the worker returned nothing)"
         if card_id in self._interrupted:
             report = (
-                "[STOPPED for a restart — it saved its place and will be RESUMED in this same "
-                "conversation, with everything it knew.]\n\n" + report
+                "[STOPPED — it saved its place and will be RESUMED in this same conversation, "
+                "with everything it knew.]\n\n" + report
             )
         await self.board.append_message(card_id, "worker", f"**{rt['name']}** reports:\n\n{report}")
         return report
@@ -1162,14 +1238,14 @@ class Manager:
         self._interrupted.add(card_id)
         try:
             await client.interrupt()
-            log.warning("interrupted the worker on %s (restarting)", card_id)
+            log.warning("interrupted the worker on %s (winding down)", card_id)
             return True
         except Exception as e:  # noqa: BLE001 — it may have finished as we asked
             log.warning("could not interrupt the worker on %s: %s", card_id, e)
             return False
 
     async def stop_workers(self) -> int:
-        """**Tell every running worker to stop.** This is what makes a restart take a minute
+        """**Tell every running worker to stop.** This is what makes winding down take a minute
         instead of ten: the alternative is waiting for jobs that run for many minutes, none of
         which anyone is waiting on any more."""
         ids = list(self._worker_clients)
@@ -1179,10 +1255,10 @@ class Manager:
                 stopped += 1
                 await self.board.append_note(
                     card_id,
-                    "⏸ Told the worker to stop for a restart. It is writing `WIP.md` — what it "
-                    "finished, what it was mid-way through, what is left — and it will be "
-                    "RESUMED in the same conversation afterwards, with everything it knew. "
-                    "Nothing it did is thrown away.",
+                    "⏸ Told the worker to stop. It is writing `WIP.md` — what it finished, what "
+                    "it was mid-way through, what is left — and it will be RESUMED in the same "
+                    "conversation when work starts again, with everything it knew. Nothing it "
+                    "did is thrown away.",
                 )
         return stopped
 
@@ -1422,6 +1498,42 @@ class Manager:
             "Add your key to `.env` and I'll actually rewrite this contract for you.",
         )
 
+    async def _real_board(self, manager_id: str, text: str) -> None:
+        """The manager's OWN chat — about the board as a whole, not any one card.
+
+        The board-level twin of `_manager_turn`: one `query()` on the manager's own session,
+        with the board-wide tools (list/create/move/trash cards, read/write workers) and his
+        board prompt. His prose is a reply to the human, because on this chat a human is always
+        who woke him — there is no silent supervision here.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions, query
+
+        m = self.board.managers.get(manager_id)
+        if not m:
+            return
+        options = ClaudeAgentOptions(
+            cwd=self.config.repo_dir,
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": board_prompt_for(
+                    m, self.board.pipelines, self.board.workers, self.board.data_dir
+                ),
+            },
+            mcp_servers={"board": self._board_tools(manager_id)},
+            permission_mode=self.config.permission_mode,
+            model=self.config.model,
+            resume=m.session_id,
+        )
+        await self._pump(
+            query(prompt=text, options=options),
+            on_session=lambda sid: self.board.set_manager_session(manager_id, sid),
+            on_text=lambda t: self.board.append_manager_message(manager_id, "manager", t),
+            on_system=lambda t: self.board.append_manager_message(manager_id, "system", t),
+            on_worker=lambda t: self.board.append_manager_message(manager_id, "worker", t),
+            on_activity=lambda t: self.board.append_manager_message(manager_id, "activity", t),
+        )
+
     async def _mock_board(self, manager_id: str, text: str) -> None:
         cols = self._columns_json()
         flows = "\n".join(
@@ -1529,6 +1641,14 @@ class Manager:
             if not col:
                 return
             worker = self.board.workers.ensure(col)
+
+            # The board is winding down — paused, or shipping. Stop before starting another
+            # column, exactly as the real manager does when `delegate` refuses. Mock mode is
+            # only worth having if it winds down like the real thing; it is what the tests
+            # drive, so a mock that worked straight through a pause would assert nothing.
+            if self.draining:
+                await self._wind_down_card(card_id, worker.agent_name)
+                return
 
             await self.board.set_stage(card_id, col.slug)
             await self.board.append_message(

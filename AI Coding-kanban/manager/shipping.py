@@ -60,6 +60,23 @@ def _api(base: str, path: str, method: str = "GET", payload: dict | None = None,
     return json.loads(body) if body else {}
 
 
+def _api_or_older(base: str, path: str, older: str, payload: dict | None = None) -> dict:
+    """Call `path`; if the running board has never heard of it, call `older` instead.
+
+    AN UPGRADE PATH HAS TO SURVIVE ITS OWN INTRODUCTION. Shipping always runs the NEW client
+    against the OLD server that is still up — that is the whole shape of `./ship.sh` — so the
+    release that renames an endpoint is the one release that cannot use it. `/api/pause`
+    replaced `/api/drain` in 0.16; a board running 0.15 answers 404, and without this the very
+    ship that installs the pause would fall over on it.
+    """
+    try:
+        return _api(base, path, method="POST", payload=payload)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        return _api(base, older, method="POST")
+
+
 def is_running(base: str) -> bool:
     try:
         _api(base, "/api/config", timeout=3.0)
@@ -81,13 +98,21 @@ def drain_and_stop(
         say("  nothing running — starting clean")
         return False
 
-    state = _api(base, "/api/drain", method="POST")
+    # The same pause the human's button uses. `remember=False` — this one comes straight back
+    # up and resumes itself, so it must not leave a pause marker for the new process to boot
+    # on. Every running worker is TOLD TO STOP: it saves its place and is resumed in the same
+    # conversation afterwards. That is the difference between shipping in seconds and waiting
+    # half an hour for jobs nobody is waiting on — and nothing is killed either way.
+    state = _api_or_older(base, "/api/pause", older="/api/drain", payload={"remember": False})
     n = state["count"]
-    say(f"  draining: no new runs will start ({n} still in flight)")
+    stopped = state.get("stopped", 0)
+    say(f"  pausing: no new runs will start ({n} still in flight)")
+    if stopped:
+        say(f"  told {stopped} worker(s) to stop — each is saving its place, and resumes after")
     for r in state["runs"]:
         say(f"    · {r['label']} — running {r['seconds']}s")
     if n:
-        say("  waiting for them to FINISH. Nothing is being killed.")
+        say("  waiting for them to WIND DOWN. Nothing is being killed.")
 
     deadline = time.time() + timeout
     last = -1
@@ -105,7 +130,12 @@ def drain_and_stop(
             if not force:
                 # Do NOT ship. An update that kills a live run is exactly the thing we are
                 # here to stop doing, and a timeout is not permission to do it anyway.
-                _api(base, "/api/undrain", method="POST")
+                #
+                # RESUME, rather than merely un-drain: the pause above told the workers to
+                # stop, so there are cards holding a saved place and a carry-on note. Leaving
+                # the board merely "willing to work" would abandon them mid-card, and the
+                # abort path is the last place that can afford to lose work.
+                _api_or_older(base, "/api/resume", older="/api/undrain")
                 raise ShipError(
                     f"still running after {int(timeout)}s: {names}\n"
                     "  The board is accepting work again; nothing was shipped and nothing was lost.\n"

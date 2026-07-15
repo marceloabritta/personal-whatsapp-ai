@@ -129,21 +129,42 @@ def create_app() -> FastAPI:
     app.state.workspace = WORKSPACE
     app.state.journal = journal
 
+    async def _take_work_again() -> int:
+        """Pick up everything that was being held: the runs that were cut off, then the queue.
+
+        Both halves, in that order, and the same two halves whether the board is coming back
+        from a restart or from a pause — which is why this is one function and not two.
+        """
+        notes = await Recovery(board, manager, journal).run(spawn)
+        for n in notes:
+            log.warning("recovery: %s", n)
+        if not notes:
+            log.info("recovery: nothing was in flight")
+
+        # Anything the human sent while the board was down or stopped was written to disk
+        # rather than started, and every card that was wound down is owed a carry-on. Send it.
+        pend = await manager.dispatch_pending(spawn)
+        for n in pend:
+            log.warning("pending: %s", n)
+        return len(notes) + len(pend)
+
     @app.on_event("startup")
     async def recover_interrupted_runs():
         """A run that was in flight when the process died is resumed here, before anyone can
         touch the board. This is the whole point of the journal: without it, a killed run was
         simply gone, and the card span 'working' forever with nothing behind it."""
-        notes = await Recovery(board, manager, journal).run(spawn)
-        for n in notes:
-            log.warning("recovery: %s", n)
-        if not notes:
-            log.info("recovery: nothing was in flight — clean start")
-
-        # Anything the human sent WHILE we were being updated was written to disk rather
-        # than started. Now that we are back, send it.
-        for n in await manager.dispatch_pending(spawn):
-            log.warning("pending: %s", n)
+        # ...unless the board is PAUSED, in which case it starts nothing: not the interrupted
+        # runs, not the queue. That is what a durable pause is FOR. The human stopped this
+        # board on purpose, and the process restarting is not them changing their mind —
+        # recovery would otherwise cheerfully resume every run and hand it straight back to
+        # work. The held work keeps: it is on disk, and Resume picks it up.
+        if manager.paused:
+            log.warning(
+                "PAUSED: %d interrupted run(s) and %d queued message(s) held until resumed",
+                len(journal.all()), len(manager.pending),
+            )
+            return
+        await _take_work_again()
 
     def err(msg: str, code: int = 400):
         return JSONResponse({"error": msg}, status_code=code)
@@ -174,6 +195,7 @@ def create_app() -> FastAPI:
         now = time.time()
         return {
             "draining": manager.draining,
+            "paused": manager.paused,
             "count": len(runs),
             "pending": len(manager.pending),
             "runs": [
@@ -237,12 +259,14 @@ def create_app() -> FastAPI:
         Returns immediately — the board stays up and usable while this happens, and the
         manager keeps answering you.
         """
-        runs = manager.begin_drain()
-        stopped = await manager.stop_workers()
+        # The SAME wind-down the Pause button uses — shipping is a caller of it, not a second
+        # implementation of it. `remember=False`: this one resumes itself on the other side of
+        # the restart, so it must not leave a pause marker for the new process to come up on.
+        state = await manager.pause(remember=False)
         await hub.broadcast({"type": "draining", "draining": True, "restarting": True})
         log.warning(
             "restart requested: told %d worker(s) to stop; %d run(s) winding down",
-            stopped, len(runs),
+            state["stopped"], state["inflight"],
         )
 
         async def _wait_then_restart():
@@ -268,17 +292,37 @@ def create_app() -> FastAPI:
         asyncio.create_task(_wait_then_restart())
         return JSONResponse(_inflight_json())
 
-    @app.post("/api/drain")
-    async def start_drain():
-        manager.begin_drain()
-        await hub.broadcast({"type": "draining", "draining": True})
-        return JSONResponse(_inflight_json())
+    @app.post("/api/pause")
+    async def pause_the_board(payload: dict | None = None):
+        """Stop everything, safely, and stay up.
 
-    @app.post("/api/undrain")
-    async def stop_drain():
-        manager.end_drain()
-        await hub.broadcast({"type": "draining", "draining": False})
-        return JSONResponse(_inflight_json())
+        The button the human presses, and the step `./ship.sh` and the restart both call. Every
+        running worker is told to stop and save its place; nothing new is started; the board
+        stays up and the manager keeps answering you.
+
+        `remember` is what separates a pause from a ship: a pause is written to disk, so the
+        board comes back paused if the process stops. A ship must not, or it would come back
+        up refusing to work.
+        """
+        remember = bool((payload or {}).get("remember", True))
+        state = await manager.pause(remember=remember)
+        await hub.broadcast(
+            {"type": "draining", "draining": True, "paused": manager.paused}
+        )
+        return JSONResponse({**_inflight_json(), "stopped": state["stopped"]})
+
+    @app.post("/api/resume")
+    async def resume_the_board():
+        """Take work again, and pick back up everything the pause was holding.
+
+        Unpause FIRST, then pick the work up — in the other order the resumed runs would find
+        the board still draining and immediately wind themselves down again.
+        """
+        manager.unpause()
+        await hub.broadcast({"type": "draining", "draining": False, "paused": False})
+        resumed = await _take_work_again()
+        log.warning("resumed: %d card(s)/run(s) picked back up", resumed)
+        return JSONResponse({**_inflight_json(), "resumed": resumed})
 
     @app.post("/api/shutdown")
     async def shutdown(payload: dict | None = None):

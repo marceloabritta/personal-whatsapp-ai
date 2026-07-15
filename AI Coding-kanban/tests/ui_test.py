@@ -103,6 +103,10 @@ sock.onopen = async () => {
   out.cmd_on_screen = await evaluate(
     `[...document.querySelectorAll('#c-thread .msg')].filter(e=>e.offsetParent!==null).some(e=>e.textContent.includes('delegating'))`);
 
+  // the toggle lives IN THE CARD now, beside the chat it reveals — not in the top bar
+  out.work_in_header = await evaluate(`!!document.querySelector('header #work-btn')`);
+  out.work_in_card = await evaluate(`!!document.querySelector('#c-tabs #work-btn')`);
+
   // 🔧 brings the working-out back
   await evaluate(`document.getElementById('work-btn').click()`); await sleep(200);
   out.act_visible_after = await evaluate(visible('#c-thread .msg.activity'));
@@ -157,6 +161,7 @@ sock.onopen = async () => {
   out.backlog_new_btn = await evaluate(`!!document.querySelector('.backlog .bl-new')`);
   out.no_add_in_pipelines = await evaluate(`document.querySelectorAll('.pipe .add-card').length`);
   out.pipelines_rendered = await evaluate(`[...document.querySelectorAll('.pipe .pipe-h .name')].map(e=>e.textContent).join(' | ')`);
+  out.col_counters = await evaluate(`document.querySelectorAll('.col-h .count').length`);
 
   // --- a decision is FILED, not said: the chat only carries what he needs you for ------
   await evaluate(`openCardDrawer('${CARD_ID}')`); await sleep(400);
@@ -316,6 +321,115 @@ sock.onopen = async () => {
   out.build_card_bgs = await evaluate(`JSON.stringify(
     [...document.querySelectorAll('.card')].map(e=>[e.dataset.kind, getComputedStyle(e).backgroundColor]))`);
 
+  // --- PAUSE, clicked for real ---------------------------------------------------------
+  // The server semantics are asserted in pause_test.py. What is asserted HERE is the thing the
+  // human actually touches — and the thing they complained about: pressing Pause does not make
+  // the board paused, it makes it START STOPPING, and the box has to say so and stay up until
+  // the workers have actually handed back.
+  //
+  // So put a REAL run in flight first. Pressing Pause on an idle board proves nothing about
+  // the state that was wrong.
+  await evaluate(`ws.send(JSON.stringify({type:'message', card_id:'${CARD_ID2}', text:'start'}))`);
+  await sleep(900);
+  out.running_before_pause = await evaluate(`fetch('/api/inflight').then(r=>r.json()).then(s=>s.count)`);
+
+  out.pause_label_before = await evaluate(`document.getElementById('pause-btn').textContent.trim()`);
+  await evaluate(`document.getElementById('pause-btn').click()`); await sleep(300);
+  out.pause_asks_first = await evaluate(`modalOpen()`);
+  await evaluate(`document.getElementById('modal-ok').click()`);
+
+  // Catch the PAUSING state while it is happening. It is short-lived on purpose — the worker
+  // only has to finish the column it is in — so poll for it rather than sleeping past it.
+  out.pausing_text = ''; out.pausing_rows = 0; out.pausing_label = ''; out.pausing_disabled = null;
+  for (let i = 0; i < 60; i++) {
+    const t = await evaluate(`document.getElementById('pause-banner').textContent`);
+    if (t && t.includes('Pausing')) {
+      out.pausing_text = t;
+      out.pausing_rows = await evaluate(`document.querySelectorAll('#pause-banner .wind-list div').length`);
+      out.pausing_label = await evaluate(`document.getElementById('pause-btn').textContent.trim()`);
+      out.pausing_disabled = await evaluate(`document.getElementById('pause-btn').disabled`);
+      break;
+    }
+    await sleep(50);
+  }
+  out.paused_class = await evaluate(`document.body.classList.contains('paused')`);
+  out.pause_banner_shown = await evaluate(
+    `getComputedStyle(document.getElementById('pause-banner')).display`);
+
+  // NOTHING ON A PAUSED BOARD MAY BLINK. A card still pulsing "🔨 planning" says work is
+  // happening on it, and none is. The badge is animated off the card's `busy` flag, which
+  // outlives the run that set it — so a paused board full of blinking cards was the board
+  // lying about itself, in the one place the human is actually looking.
+  out.blink_while_pausing = await evaluate(`document.querySelectorAll('.card .badge.busy .dot').length`);
+  out.held_while_pausing = await evaluate(`document.querySelectorAll('.card .badge.held').length`);
+  out.held_says_stopping = await evaluate(
+    `[...document.querySelectorAll('.card .badge.held')].map(e=>e.textContent).join(' | ')`);
+  // ...and the SHIP banner stays down: paused and shipping are different facts, and the board
+  // is draining in both, so a naive rule would show both at once.
+  out.ship_banner_hidden = await evaluate(
+    `getComputedStyle(document.getElementById('ship-banner')).display`);
+
+  // It must STAY on "Pausing" until the work has actually stopped — and then change by itself,
+  // without the human touching anything.
+  for (let i = 0; i < 60 && (await evaluate(`document.getElementById('pause-btn').disabled`)); i++)
+    await sleep(250);
+  out.settled_label = await evaluate(`document.getElementById('pause-btn').textContent.trim()`);
+  out.settled_text = await evaluate(`document.getElementById('pause-banner').textContent`);
+  out.settled_count = await evaluate(`fetch('/api/inflight').then(r=>r.json()).then(s=>s.count)`);
+  out.server_says_paused = await evaluate(
+    `fetch('/api/inflight').then(r=>r.json()).then(s=>s.paused)`);
+  await sleep(1200);   // let the poll catch up with the settled board
+  out.blink_when_paused = await evaluate(`document.querySelectorAll('.card .badge.busy .dot').length`);
+  out.blink_anywhere_when_paused = await evaluate(`document.querySelectorAll('.card .dot').length`);
+
+  // and back. Resume does NOT ask — there is nothing to warn about in starting work again.
+  await evaluate(`document.getElementById('pause-btn').click()`); await sleep(1200);
+  out.unpaused_class = await evaluate(`document.body.classList.contains('paused')`);
+  out.pause_label_after = await evaluate(`document.getElementById('pause-btn').textContent.trim()`);
+  out.server_says_working = await evaluate(
+    `fetch('/api/inflight').then(r=>r.json()).then(s=>s.paused)`);
+
+  // The wind-down box, rendered against a known state — so what it SAYS is pinned, not left to
+  // whatever the mock happened to be doing: it names each thing that is still stopping, and
+  // how long it has been at it.
+  await evaluate(`setPaused({paused:true, draining:true, pending:0, count:2, runs:[
+    {label:'Rewrite the parser (Coding)', seconds:65},
+    {label:'Flaky test (Tests)', seconds:9}]})`);
+  await sleep(120);
+  out.render_text = await evaluate(`document.getElementById('pause-banner').textContent`);
+  out.render_rows = await evaluate(`[...document.querySelectorAll('#pause-banner .wind-list div')].map(e=>e.textContent).join(' | ')`);
+  await evaluate(`pollWind()`); await sleep(400);   // put the real state back
+  out.render_restored = await evaluate(`document.body.classList.contains('paused')`);
+
+  // --- board layout rules, driven against a KNOWN board -------------------------------
+  // Destructive (it replaces BOARD.cards/managers and re-renders), so it is the last thing the
+  // driver does. It pins the four layout rules at once: a full shipped column condenses, a
+  // full WORKING column does not, a card waiting on you shows a corner dot not a pill, and the
+  // manager count is active-only (shipped + backlog excluded).
+  // Stop the live board snapshots from clobbering the synthetic BOARD we are about to set —
+  // the mock manager is still pushing updates. Neutralise the message handler (not the socket,
+  // which would auto-reconnect) so nothing overwrites what we render.
+  await evaluate(`ws.onmessage=null`);
+  await evaluate(`(()=>{
+    const exp = BOARD.pipelines.find(p=>p.id==='exped');
+    const ship = exp.columns.find(c=>c.slug==='shipped');
+    const work = exp.columns.find(c=>c.slug!=='shipped');
+    BOARD.managers=[{id:'mA',name:'Ada',emoji:'🧭',busy:false}];
+    BOARD.cards=[
+      ...Array.from({length:5},(_,i)=>({id:'sh'+i,title:'Shipped '+i,kind:'feature',column:ship.id,pipeline:'exped',manager_id:'mA',artifacts:{}})),
+      ...Array.from({length:6},(_,i)=>({id:'wk'+i,title:'Work '+i,kind:'feature',column:work.id,pipeline:'exped',manager_id:'mA',artifacts:{}})),
+      {id:'gcard',title:'Gate me',kind:'feature',column:work.id,pipeline:'exped',manager_id:'mA',gate:true,artifacts:{}},
+      {id:'bl',title:'Backlogged',kind:'feature',column:'',pipeline:'backlog',manager_id:'mA',artifacts:{}},
+    ];
+    renderHeader(); renderBoards();
+  })()`); await sleep(150);
+  out.condensed_cols   = await evaluate(`document.querySelectorAll('.col.condensed').length`);
+  out.condensed_cards  = await evaluate(`document.querySelectorAll('.col.condensed .card').length`);
+  out.condensed_meta_shown = await evaluate(visible('.col.condensed .card .meta'));
+  out.gate_dots        = await evaluate(`document.querySelectorAll('.card .gate-dot').length`);
+  out.awaiting_pills   = await evaluate(`document.querySelectorAll('.card .badge.gate').length`);
+  out.mgr_active_n     = await evaluate(`document.querySelector('.mgr-chip .n')?.textContent || '0'`);
+
   console.log(JSON.stringify(out));
   sock.close();
   process.exit(0);
@@ -450,6 +564,8 @@ def main() -> int:
         check("...no '⌘'/'delegating' line is visible", not out["cmd_on_screen"])
         check("worker reports are hidden too", out["worker_visible"] == 0)
 
+        check("the 🔧 toggle is NOT in the top bar", out["work_in_header"] is False)
+        check("...it lives in the card, beside its chat", out["work_in_card"] is True)
         check("🔧 brings the working-out back", out["act_visible_after"] >= 1)
         check("...including the worker reports", out["worker_visible_after"] >= 1)
         check("...and clicking it again hides them", out["act_hidden_again"] == 0)
@@ -575,6 +691,66 @@ def main() -> int:
             "a maintenance card is a DIFFERENT colour from a feature card",
             "maintenance" not in bgs or bgs["maintenance"] != bgs["feature"],
         )
+
+        section("the Pause button, clicked in a real browser")
+        check("there was real work in flight to stop", out["running_before_pause"] >= 1)
+        check("it starts out offering to pause", out["pause_label_before"] == "⏸ Pause")
+        check("it ASKS before stopping the board", out["pause_asks_first"] is True)
+        check("clicking it puts the page in the paused state", out["paused_class"] is True)
+        check("the box is up", out["pause_banner_shown"] == "block")
+        check("...and the shipping banner is NOT", out["ship_banner_hidden"] == "none")
+
+        section("...and it says PAUSING, not paused, until the work has actually stopped")
+        check("the box says it is still pausing", "Pausing" in out["pausing_text"])
+        check("...and names what it is waiting for", out["pausing_rows"] >= 1)
+        check("the button says Pausing…", out["pausing_label"] == "⏸ Pausing…")
+        check("...and does NOT offer Resume yet", out["pausing_disabled"] is True)
+        check("it stays up until nothing is running", out["settled_count"] == 0)
+        check("...and only THEN says it is paused", "Paused." in out["settled_text"])
+        check("...and only then offers Resume", out["settled_label"] == "▶ Resume")
+        check("the server agrees it is paused", out["server_says_paused"] is True)
+
+        section("a paused board does not blink")
+        check("no card pulses a worker while the board is stopping", out["blink_while_pausing"] == 0)
+        check("...the stopping card says so, and holds still", out["held_while_pausing"] >= 1)
+        check("...and says which worker, and that it is stopping",
+              "stopping" in out["held_says_stopping"])
+        check("NOTHING on any card blinks once it is paused", out["blink_anywhere_when_paused"] == 0)
+        check("...and no card claims to be busy", out["blink_when_paused"] == 0)
+
+        section("the wind-down box, rendered against a known state")
+        check("it says how many are still stopping", "2 workers are still winding down" in out["render_text"])
+        check("it names each one", "Rewrite the parser (Coding)" in out["render_rows"]
+              and "Flaky test (Tests)" in out["render_rows"])
+        check("...and how long each has been stopping", "1m 5s" in out["render_rows"]
+              and "9s" in out["render_rows"])
+        check("...and promises nothing is being killed", "Nothing is being killed" in out["render_text"])
+        check("the real state is restored afterwards", out["render_restored"] is False)
+
+        section("and Resume puts it back to work")
+        check("clicking Resume unpauses the page", out["unpaused_class"] is False)
+        check("...and the server agrees it is working", out["server_says_working"] is False)
+        check("...and the button offers to pause again", out["pause_label_after"] == "⏸ Pause")
+
+        section("board layout")
+        check("the Express pipeline rides at the top",
+              out["pipelines_rendered"].startswith("Expedited pipeline"))
+        check("columns no longer carry a card counter", out["col_counters"] == 0)
+
+        section("a full SHIPPED column condenses; a working column never does")
+        check("exactly one column condensed — the shipped one", out["condensed_cols"] == 1)
+        check("...and it holds all its cards", out["condensed_cards"] == 5)
+        check("...as thin rows: their badges are hidden", out["condensed_meta_shown"] == 0)
+        # the 6-card working column proves working columns are exempt: if they weren't, there
+        # would be two condensed columns, not one.
+
+        section("waiting-on-you is a corner dot, not a pill")
+        check("the gated card shows a red corner dot", out["gate_dots"] == 1)
+        check("...and the 'awaiting you' pill is gone", out["awaiting_pills"] == 0)
+
+        section("the manager count is active-only")
+        # 5 shipped + 1 backlog are NOT active; 6 working + 1 gated ARE. So 7, not 13.
+        check("it counts only cards still in flight", out["mgr_active_n"] == "7")
 
         section("and the frames actually reached the server")
         time.sleep(2.0)

@@ -111,12 +111,17 @@ def main() -> int:
         check("...and the run was NOT killed", busy(port) == 1)
 
         # -------------------------------------------------------------
-        section("draining: no new work starts, and nothing you send is lost")
-        _, st = api(port, "/api/drain", "POST")
+        section("pausing: no new work starts, and nothing you send is lost")
+        # Shipping does not have its own wind-down — it calls the PAUSE, the same one the
+        # human's button calls. `remember: False` is the only difference: an update comes
+        # straight back up and resumes itself, so it must not leave a pause marker behind for
+        # the new process to boot on, or the board would come back up refusing to work.
+        _, st = api(port, "/api/pause", "POST", {"remember": False})
         check("it is draining", st["draining"] is True)
+        check("...but NOT left paused — an update resumes itself", st["paused"] is False)
         check("...and reports what it is waiting for", st["count"] == 1)
 
-        # A DRAIN IS NOT A GAG. While it winds down, the manager is idle and the human can
+        # A WIND-DOWN IS NOT A GAG. While it winds down, the manager is idle and the human can
         # still talk to him and still be answered — the queue is only for the seconds in which
         # the process is actually going down, when there is nothing left to act on a message.
         send_ws_sync(port, {"type": "message", "card_id": cid, "text": "one more thing"})
@@ -126,9 +131,12 @@ def main() -> int:
                 m["text"] == "one more thing" for m in get(port, f"/api/card/{cid}")["thread"]
             )),
         )
+        # Not "the queue is empty" — the queue legitimately holds the card's own carry-on note,
+        # which is what picks it back up on the other side. What must NOT be in there is what a
+        # HUMAN said while the board was still up and able to answer them.
         check(
             "...and it was ACTED ON, not parked in a queue",
-            len(PendingQueue(ws_dir)) == 0,
+            not any("one more thing" in m.text for m in PendingQueue(ws_dir).all()),
         )
         check(
             "...so I was never told 'saved for later' while the board was still up",
@@ -140,17 +148,18 @@ def main() -> int:
         )
 
         # -------------------------------------------------------------
-        section("the in-flight run is allowed to FINISH — never cut off")
-        check("it finished on its own", wait_for(lambda: busy(port) == 0, timeout=40))
+        section("the in-flight run WINDS DOWN — never cut off")
+        check("it wound down on its own", wait_for(lambda: busy(port) == 0, timeout=40))
         _, st = api(port, "/api/inflight")
         check("nothing is in flight now", st["count"] == 0)
 
         card = get(port, f"/api/card/{cid}")
         check("it did real work before we stopped it", len(card["artifacts"]) > 0)
         check(
-            "...and reached a gate, not an interruption",
+            "...and it finished the column it was in, rather than being cut off",
             not any("cut off" in m["text"] or "killed" in m["text"] for m in card["thread"]),
         )
+        check("...and is owed a carry-on for the other side", len(PendingQueue(ws_dir)) >= 1)
 
         # -------------------------------------------------------------
         section("now it stops cleanly")

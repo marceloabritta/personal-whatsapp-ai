@@ -50,7 +50,23 @@
      ignored — say so, or they will reasonably assume both. */
   .ship-banner{display:none;margin:12px 16px 0;padding:10px 13px;border-radius:10px;font-size:12.5px;
                background:#2e2415;color:#e8c88a;border:1px solid #5c4620;line-height:1.5}
-  body.draining .ship-banner{display:block}
+  body.draining:not(.paused) .ship-banner{display:block}
+
+  /* PAUSED is a different fact from "shipping", and says so. Shipping is a thing that will
+     end by itself; a pause ends when the human says. Only one banner is ever up. */
+  .pause-banner{display:none;margin:12px 16px 0;padding:10px 13px;border-radius:10px;font-size:12.5px;
+                background:#16283a;color:#9fc7ea;border:1px solid #24506f;line-height:1.5}
+  body.paused .pause-banner{display:block}
+  .icon-btn.paused{border-color:#24506f;color:#9fc7ea;background:#16283a}
+  .icon-btn.paused:hover{border-color:#4d9fd8;color:#fff}
+  .icon-btn:disabled{opacity:.6;cursor:default}
+  /* what is still winding down, listed by name — "2 still stopping" is not an answer to
+     "stopping WHAT?", and that is the question you actually have while you wait. */
+  .wind-list{margin:7px 0 6px;padding-left:2px;font-size:12px;opacity:.92}
+  .wind-list div{padding:1px 0;font-variant-numeric:tabular-nums}
+  .wind-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;
+            margin-right:7px;vertical-align:middle;animation:windpulse 1.1s ease-in-out infinite}
+  @keyframes windpulse{0%,100%{opacity:.25}50%{opacity:1}}
 
   /* ---- boards ---- */
   /* NEVER scrolls sideways. The board is a thing you look at, not a thing you drive. */
@@ -75,7 +91,6 @@
   .col-h .t{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:650;flex:1;
             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .col.gate .col-h .t{color:var(--gate)}
-  .col-h .count{background:var(--panel2);border-radius:20px;padding:0 7px;font-size:11px;color:var(--muted)}
   .col-h .tool{opacity:0;cursor:pointer;color:var(--muted);font-size:12px;padding:1px 3px;border-radius:4px}
   .col:hover .col-h .tool{opacity:1}
   .col-h .tool:hover{color:var(--text);background:var(--panel2)}
@@ -86,17 +101,31 @@
      They are custom properties, not inline background/border, for one specific reason:
      inline styles beat stylesheet rules, and that would kill the .open-chat highlight.
      As a var, .open-chat is simply a later rule of equal weight — and still wins. */
-  .card{background:var(--c-bg,var(--panel2));border:1px solid var(--c-line,var(--line));
+  .card{position:relative;background:var(--c-bg,var(--panel2));border:1px solid var(--c-line,var(--line));
         box-shadow:inset 3px 0 0 var(--c-accent,transparent);
         border-radius:9px;padding:9px 10px;margin-bottom:8px;cursor:pointer}
   .card:hover{border-color:var(--accent)}
   .card.open-chat{background:var(--card-open);border-color:var(--card-open-line)}
+  /* Waiting for you: a red dot in the corner, like an unread badge — no number, it is a yes/no.
+     It replaces the old "awaiting you" pill; the dot reads at a glance across the whole board. */
+  .card .gate-dot{position:absolute;top:7px;right:8px;width:9px;height:9px;border-radius:50%;
+        background:#ff4d4d;box-shadow:0 0 0 2px var(--c-bg,var(--panel2)),0 0 5px rgba(255,77,77,.7)}
+  /* A SHIPPED column past a handful: cards become thin one-line rows — title only, no badges —
+     so a growing pile of done work does not eat the board's height. */
+  .col.condensed .card{padding:3px 9px 3px 10px;margin-bottom:4px;border-radius:7px}
+  .col.condensed .card .t{margin:0;font-weight:500;font-size:11.5px;line-height:1.5;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .col.condensed .card .meta{display:none}
+  .col.condensed .card .gate-dot{display:none}
   .badge.maint{background:#2e2415;color:var(--maint);border-color:var(--maint-line)}
   .card .t{font-weight:600;margin-bottom:6px;line-height:1.35}
   .card .meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
   .badge{font-size:10px;padding:2px 6px;border-radius:6px;background:#232833;color:var(--muted);border:1px solid var(--line)}
   .badge.gate{background:#3a2410;color:var(--gate);border-color:#5a381a}
   .badge.busy{background:#132c1a;color:var(--ok);border-color:#204a2b}
+  /* stopped or stopping, on a paused board. It has NO dot, and that is the entire point: it
+     is the badge that does not pretend anything is happening. */
+  .badge.held{background:#16283a;color:#9fc7ea;border-color:#24506f}
   .badge.err{background:#3a1414;color:#ff6b6b;border-color:#5a1f1f}
   .badge.mgr{background:var(--panel3)}
   /* The "+ column" tile is gone. It sat at the end of every row and was what forced the
@@ -246,7 +275,12 @@
                 max-width:100%;white-space:pre-wrap;opacity:.75}
   body:not(.showwork) .msg.activity,
   body:not(.showwork) .msg.worker{display:none}
-  #work-btn.on{border-color:var(--accent);color:var(--text)}
+  /* The working-out toggle, sitting at the right end of the card's tab row. Pushed away from
+     the tabs so it does not read as a third tab, and quietly lit when it is on. */
+  #c-tabs .worktoggle{margin-left:auto;align-self:center;border:1px solid var(--line);
+     border-radius:7px;padding:2px 9px;font-size:11px;color:var(--muted)}
+  #c-tabs .worktoggle:hover{color:var(--text);border-color:var(--accent)}
+  #c-tabs .worktoggle.on{color:var(--text);border-color:var(--accent);background:var(--panel2)}
   /* An update does NOT stop the board. It offers itself, and waits to be asked. */
   .icon-btn.upd{border-color:#5c4620;color:#e8c88a;background:#2e2415}
   .icon-btn.upd:hover{border-color:var(--maint);color:#fff}
@@ -320,7 +354,7 @@
   <div class="managers" id="managers"></div>
   <div class="right">
     <button class="icon-btn upd" id="update-btn" style="display:none">⬆ Update ready — restart</button>
-    <button class="icon-btn" id="work-btn" title="Show the manager's working out — the commands he runs and the workers' reports. Off by default: the chat is for what he says to you.">🔧 Work</button>
+    <button class="icon-btn" id="pause-btn" title="Stop everything, safely.">⏸ Pause</button>
     <button class="icon-btn" id="trash-btn">🗑 Trash <span id="trash-n"></span></button>
     <span class="mode" id="mode">…</span>
     <span class="repo" id="repo"></span>
@@ -333,7 +367,16 @@
   same conversation. <b>Keep using the board</b>: the manager is free and will still answer
   you. Only in the last few seconds, as it actually goes down, is a message held and delivered
   on the way back.
+  <!-- Shipping IS the pause, so it gets the same live list: what is still stopping, by name.
+       "Winding down" with no sign of progress is the thing that made this box feel broken. -->
+  <div id="ship-what"></div>
 </div>
+<!-- Filled live from /api/inflight. Pressing Pause does not make the board paused — it starts
+     it stopping, and the workers take a moment to write down where they got to. Saying
+     "Paused" while three of them are still winding down is a lie, and it is the same lie the
+     board used to tell about restarting. So this box reports the wind-down AS IT HAPPENS, and
+     only claims to be paused once nothing is running. -->
+<div class="pause-banner" id="pause-banner"></div>
 <div class="boards" id="boards"></div>
 
 <div class="modal-scrim" id="m-scrim"></div>
@@ -369,6 +412,9 @@
   <div class="tabs" id="c-tabs">
     <button id="tab-chat" class="on">Chat</button>
     <button id="tab-notes">Decisions <span class="n" id="c-nnotes"></span></button>
+    <!-- The working-out toggle lives HERE, beside the chat it reveals — not in the top bar,
+         where it was a global switch nowhere near the thing it changed. -->
+    <button id="work-btn" class="worktoggle" title="Show the manager's working-out in this chat — the commands he ran and the workers' reports. Off by default: the chat is for what he SAID to you.">🔧 Work</button>
   </div>
   <div class="quick" id="c-quick"></div>
   <div class="thread" id="c-thread"></div>
@@ -544,6 +590,9 @@
 <script>
 let BOARD = {pipelines:[], cards:[], managers:[], trash_count:0};
 let ws=null, openCard=null, openMgr=null, seenTs=0, colCtx=null;
+// Is the board paused, and which cards actually have a run in flight? The badges need both:
+// see workBadge(). Owned by setPaused(), which reads them from the server and never guesses.
+let PAUSED=false, WINDING=new Set();
 
 /* ---------- socket ---------- */
 function connect(){
@@ -551,10 +600,11 @@ function connect(){
   ws.onopen  = ()=>{
     $('conn').classList.add('on');
     // Reconnected — so the update is over and this is the NEW server. Clear the banner, and
-    // then ask, in case we connected to a board that is draining right now.
+    // then ask, in case we connected to a board that is draining or PAUSED right now. The
+    // server is the authority on that, not this tab: a pause outlives the process, so a
+    // fresh page on a fresh server can perfectly well be looking at a paused board.
     document.body.classList.remove('draining');
-    fetch('/api/inflight').then(r=>r.json())
-      .then(s=>document.body.classList.toggle('draining', !!s.draining)).catch(()=>{});
+    fetch('/api/inflight').then(r=>r.json()).then(setPaused).catch(()=>{});
     checkUpdate();   // we may have just come back ON the new version
   };
   ws.onclose = ()=>{$('conn').classList.remove('on'); setTimeout(connect,1200);};
@@ -591,7 +641,7 @@ function handle(m){
       if(m.message.role==='manager' && chat.refresh) chat.refresh();  // he may have just rewritten the file
     }
   }
-  else if(m.type==='draining'){ document.body.classList.toggle('draining', !!m.draining); }
+  else if(m.type==='draining'){ setPaused(m); }
   else if(m.type==='shutdown'){
     // It is going down ON PURPOSE, drained. Say so, rather than letting the socket just die
     // and leaving the human staring at a dead board wondering what broke.
@@ -603,13 +653,20 @@ function handle(m){
 /* ---------- header ---------- */
 function renderHeader(){
   const box=$('managers'); box.innerHTML='';
+  // "Active" = a card this manager still has to move: routed into a pipeline and not yet
+  // shipped. The count used to be every card he owned, backlog and finished alike, so it only
+  // ever went up — a number that never falls tells you nothing about the load right now.
+  const shipped=new Set();
+  for(const p of BOARD.pipelines) for(const col of p.columns) if(col.slug==='shipped') shipped.add(col.id);
+  const isActive=c=>c.pipeline!=='backlog' && !shipped.has(c.column);
   for(const m of BOARD.managers){
-    const n = BOARD.cards.filter(c=>c.manager_id===m.id).length;
+    const n = BOARD.cards.filter(c=>c.manager_id===m.id && isActive(c)).length;
     const b=document.createElement('button');
     b.className='mgr-chip'+(m.busy?' busy':'');
-    b.innerHTML=`<span>${m.emoji}</span><span>${esc(m.name)}</span><span class="n">${n}</span>`
+    b.innerHTML=`<span>${m.emoji}</span><span>${esc(m.name)}</span>`
+                + (n?`<span class="n">${n}</span>`:'')
                 + (m.busy?' <span class="dot"></span>':'');
-    b.title=`Talk to ${m.name} about the board`;
+    b.title=`Talk to ${m.name} about the board — ${n} active card${n===1?'':'s'} in flight`;
     b.onclick=()=>openManager(m.id);
     box.appendChild(b);
   }
@@ -658,7 +715,11 @@ function renderBoards(){
   // Every pipeline is laid out on the SAME number of tracks — the longest pipeline's — so a
   // column is the same width everywhere and the board never scrolls sideways.
   const cols=Math.max(1,...BOARD.pipelines.map(p=>p.columns.length));
-  for(const p of BOARD.pipelines){
+  // The express (expedited) lane rides at the TOP of the pipelines — it is the fast path, and
+  // you want it under your eye first. Everything else keeps the order the server sent. This is
+  // display only; the server's PIPELINES order is untouched.
+  const ordered=[...BOARD.pipelines].sort((a,b)=>(a.id==='exped'?0:1)-(b.id==='exped'?0:1));
+  for(const p of ordered){
     const sec=document.createElement('div'); sec.className='pipe';
     sec.style.setProperty('--pipe-bg',p.color||'transparent');
     const h=document.createElement('div'); h.className='pipe-h';
@@ -730,11 +791,17 @@ async function newCard(){
 
 function colEl(pipe,col,i){
   const el=document.createElement('div');
-  el.className='col'+(col.gate?' gate':'');
   const list=BOARD.cards.filter(c=>c.column===col.id);
+  // A SHIPPED column is where finished work piles up and never leaves, so it is the one column
+  // that grows without bound and would push every pipeline below it off the screen. Once it is
+  // past a handful, condense its cards to thin one-line rows — title only — so "done" stays
+  // visible without costing the whole board its vertical space. Working columns are never
+  // condensed: there you want every badge and every card at full height.
+  const condensed = col.slug==='shipped' && list.length>4;
+  el.className='col'+(col.gate?' gate':'')+(condensed?' condensed':'');
 
   const h=document.createElement('div'); h.className='col-h';
-  h.innerHTML=`<span class="t">${esc(col.title)}${col.gate?' ⏸':''}</span><span class="count">${list.length}</span>`;
+  h.innerHTML=`<span class="t">${esc(col.title)}${col.gate?' ⏸':''}</span>`;
   const brain=document.createElement('span'); brain.className='tool'; brain.textContent='🧠';
   brain.title='Edit this column’s worker'; brain.onclick=e=>{e.stopPropagation();openWorker(pipe.id,col);};
   const gear=document.createElement('span'); gear.className='tool'; gear.textContent='⚙';
@@ -765,6 +832,25 @@ function whoIsWorking(c){
   return `🔨 ${w}`;
 }
 
+/* A PAUSED BOARD DOES NOT BLINK. Not one card, not once.
+
+   The pulse is animated off the card's `busy` flag — and `busy` outlives the run that set it
+   (it is the durable evidence that a run was cut off; see CLAUDE.md). So a paused board sat
+   there with cards pulsing "🔨 planning", telling the human that work was happening on them
+   while the whole point of what they had just pressed was that none was.
+
+   So while paused, the badge holds still and says which of the two true things it is — still
+   handing back, or stopped and holding its place — and `busy` does not get a vote on that.
+   The live in-flight list from the server does. Stillness IS the paused state; a board that
+   is stopped should look stopped. */
+function workBadge(c){
+  if(!c.busy) return '';
+  if(PAUSED)
+    return `<span class="badge held">⏸ ${esc(whoIsWorking(c))} — `
+         + `${WINDING.has(c.id) ? 'stopping' : 'stopped'}</span>`;
+  return `<span class="badge busy">${esc(whoIsWorking(c))} <span class="dot"></span></span>`;
+}
+
 function cardEl(c){
   const d=document.createElement('div');
   // renderBoards() does root.innerHTML='' and rebuilds every card, so the highlight is
@@ -782,13 +868,14 @@ function cardEl(c){
   let b='';
   if(c.kind==='maintenance') b+=`<span class="badge maint">🛠 fix</span>`;
   else if(c.kind!=='feature') b+=`<span class="badge untyped">needs a type</span>`;
-  if(c.busy) b+=`<span class="badge busy">${esc(whoIsWorking(c))} <span class="dot"></span></span>`;
-  if(c.gate) b+=`<span class="badge gate">awaiting you</span>`;
+  b+=workBadge(c);
   if(c.error) b+=`<span class="badge err">error</span>`;
   if(BOARD.managers.length>1 && m) b+=`<span class="badge mgr">${m.emoji} ${esc(m.name)}</span>`;
   const n=Object.keys(c.artifacts||{}).length;
   if(n) b+=`<span class="badge">📄 ${n}</span>`;
-  d.innerHTML=`<div class="t">${esc(c.title)}</div>`+(b?`<div class="meta">${b}</div>`:'');
+  // Waiting on you shows as a corner dot, not a badge in the meta row — see .card .gate-dot.
+  const dot = c.gate ? `<span class="gate-dot" title="Waiting for you"></span>` : '';
+  d.innerHTML=`<div class="t">${esc(c.title)}</div>`+(b?`<div class="meta">${b}</div>`:'')+dot;
   d.onclick=()=>openCardDrawer(c.id);
   d.ondragstart=e=>e.dataTransfer.setData('text/plain',c.id);
   return d;
@@ -887,7 +974,7 @@ function cardHeader(c){
   }
   paintKind(c);
   $('c-busy').innerHTML=c.busy
-    ? `<span class="badge busy">${esc(whoIsWorking(c))} <span class="dot"></span></span>`
+    ? workBadge(c)
     : (c.gate?'<span class="badge gate">awaiting you</span>':'');
   $('c-dir').textContent='📁 '+(c.abs_dir||c.dir||'');
   const sel=$('c-mgr'); sel.innerHTML='';
@@ -1235,6 +1322,115 @@ $('col-del').onclick=async()=>{
   const j=await r.json();
   if(j.error) toast(j.error, true); else if(j.moved_cards) toast(`${j.moved_cards} card(s) moved out of "${j.title}".`);
   closeAll();
+};
+
+/* --- pause: stop everything, safely ---
+   THE SAME WIND-DOWN AN UPDATE SHIPS WITH. Every running worker is told to stop and save its
+   place, nothing new starts, and each card is resumed in its own conversation — from where it
+   got to — when work starts again. The only thing shipping adds is the restart in the middle.
+
+   The pause outlives the process: the board comes back paused rather than quietly running
+   everything you stopped. So the SERVER is the authority on whether we are paused, never this
+   tab, and every path through here reads it from there.
+
+   PRESSING PAUSE DOES NOT PAUSE THE BOARD. It starts it stopping. The workers are mid-task
+   and each takes a moment to write down where it got to, so for that minute the board is
+   PAUSING — not paused, and not working either. That is a real third state, and the box says
+   which one you are in and what is holding it up, by name, until it is actually done. */
+let windTick=null, windSig='';
+const windTime = s => s<60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+
+function setPaused(s){
+  const paused=!!(s&&s.paused), draining=!!(s&&s.draining), runs=(s&&s.runs)||[], n=runs.length;
+  document.body.classList.toggle('paused', paused);
+  document.body.classList.toggle('draining', draining);
+
+  // What is ACTUALLY running, from the server. The cards' own `busy` flag cannot answer that
+  // while paused — it outlives the run it belongs to — so the badges read this instead.
+  PAUSED = paused;
+  WINDING = new Set(runs.filter(r=>r.kind==='card').map(r=>r.target));
+
+  // The button is the state, too. It cannot offer Resume while the board is still stopping —
+  // resuming halfway through a wind-down races the workers that are still saving their place.
+  const b=$('pause-btn');
+  b.classList.toggle('paused', paused);
+  b.disabled = paused && n>0;
+  b.textContent = !paused ? '⏸ Pause' : (n ? '⏸ Pausing…' : '▶ Resume');
+  b.title = !paused
+    ? 'Stop everything, safely. Running workers are told to stop and save their place (nothing '
+      + 'is killed); nothing new starts. You can still talk to the manager. Survives a restart.'
+    : (n ? `Still stopping ${n} — the board is paused the moment they hand back.`
+         : 'Take work again. Every card that was stopped picks up where it left off, in the same '
+           + 'conversation, and anything you said meanwhile is delivered.');
+
+  if(paused) $('pause-banner').innerHTML = n ? windingHtml(runs) : pausedHtml(s.pending||0);
+  // Shipping is the same wind-down, so it shows the same list of what is still stopping.
+  if(draining && !paused) $('ship-what').innerHTML = n
+    ? `<div class="wind-list">` + runs.map(r=>
+        `<div><span class="wind-dot"></span>${esc(r.label)} — stopping, ${windTime(r.seconds)} in</div>`
+      ).join('') + `</div>`
+    : `<div class="wind-list"><div>Everything has stopped — going down to come back up.</div></div>`;
+
+  // Repaint the cards when — and only when — what is running has actually changed. The badges
+  // depend on it, and a blanket repaint on every tick would rebuild the board under the
+  // human's hands once a second for as long as they left it paused.
+  const sig = paused + '|' + [...WINDING].sort().join(',');
+  if(sig !== windSig){ windSig = sig; renderBoards(); paintOpenCard(); }
+
+  // Keep it honest while it moves. Nothing else pushes the in-flight list, so this poll is the
+  // only thing standing between the human and a board that stopped being true a minute ago.
+  // It runs for as long as we are paused — not just while things are still stopping — because
+  // the manager can start a turn at any moment while paused, and the badges must know.
+  if((draining || paused) && !windTick) windTick=setInterval(pollWind, 1000);
+  if(!draining && !paused && windTick){ clearInterval(windTick); windTick=null; }
+}
+
+async function pollWind(){
+  try{ setPaused(await (await fetch('/api/inflight')).json()); }catch(e){}
+}
+
+function windingHtml(runs){
+  return `⏸ <b>Pausing…</b> ${runs.length===1?'one worker is':runs.length+' workers are'} still `
+    + `winding down — each is writing down where it got to (done / mid-flight / next) and `
+    + `handing back. <b>Nothing is being killed.</b>`
+    + `<div class="wind-list">` + runs.map(r=>
+        `<div><span class="wind-dot"></span>${esc(r.label)} — stopping, ${windTime(r.seconds)} in</div>`
+      ).join('') + `</div>`
+    + `The board is paused the moment these hand back.`;
+}
+
+function pausedHtml(pending){
+  return `⏸ <b>Paused.</b> Nothing is running.`
+    + (pending ? ` <b>${pending}</b> ${pending>1?'cards are holding their place':'card is holding its place'}`
+                 + ` and will pick up exactly where ${pending>1?'they':'it'} left off — in the same`
+                 + ` conversation — when you press <b>Resume</b>.` : '')
+    + ` <b>Keep using the board</b>: the manager still answers you, and anything you ask him to`
+    + ` work on is saved and picked up on resume. This pause <b>survives a restart</b> — the`
+    + ` board comes back paused, not running.`;
+}
+
+$('pause-btn').onclick=async()=>{
+  if(document.body.classList.contains('paused')){
+    $('pause-btn').disabled=true;
+    try{ setPaused(await (await fetch('/api/resume',{method:'POST'})).json()); }
+    finally{ $('pause-btn').disabled=false; }
+    toast('Working again — everything that was paused is picking up where it left off.');
+    return;
+  }
+  const st=await (await fetch('/api/inflight')).json();
+  const running = st.count
+    ? `${st.count} worker${st.count>1?'s are':' is'} running. Each is told to STOP — it writes `
+      + `down where it got to (WIP.md: done / mid-flight / next) and hands back. Nothing it did `
+      + `is thrown away: on Resume it carries on in the same conversation, with everything it `
+      + `knew. Watch the banner — it will tell you when they have all stopped.`
+    : 'Nothing is running right now, so this is immediate.';
+  if(!await askConfirm('Pause the board?',
+      running + ' Nothing new will start until you resume. You can carry on using the board — '
+      + 'the manager still answers you, and anything you ask him to work on is saved and picked '
+      + 'up on resume. The pause survives a restart: the board comes back paused.',
+      {ok:'Pause', danger:false})) return;
+  $('pause-btn').disabled=true;
+  setPaused(await (await fetch('/api/pause',{method:'POST'})).json());
 };
 
 /* --- an update is available ---
