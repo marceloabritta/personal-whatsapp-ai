@@ -102,6 +102,16 @@ export const manifest = {
         nullable: true,
         desc: 'the repeat rule for a RECURRING create, else null (one-off — the default). Object {freq: "daily"|"weekly"|"monthly", interval: number|null, byday: ["MO".."SU"]|null (weekly only), count: number|null, until: ISO-8601 -03:00|null}. count XOR until, never both.',
       },
+      location: {
+        type: "string",
+        nullable: true,
+        desc: "WHERE — a VERBATIM physical address/venue/room, copied word-for-word, never looked up; null if none",
+      },
+      virtual: {
+        type: "bool",
+        nullable: true,
+        desc: "true iff a Google Meet video call; XOR with location — video wins",
+      },
     },
     // A READ (find/list) is completeness-valid as soon as its discriminator is set (list also
     // needs a list_mode to choose window/next). An ACT names its target: create needs a date +
@@ -129,6 +139,12 @@ export const manifest = {
         test: (i) => i.action !== "create" || !!i.start_iso,
       },
       {
+        // Physical XOR virtual — a place is one or the other, never both. (normalizeLocation
+        // enforces "video wins" at merge time; this rejects an already-contradictory payload.)
+        name: "location_virtual_xor",
+        test: (i) => !(i.location && String(i.location).trim() && i.virtual === true),
+      },
+      {
         // The LIST WINDOW: a window cannot end before it starts.
         name: "end_after_start",
         test: (i) =>
@@ -148,7 +164,9 @@ export const manifest = {
             i.all_day === true ||
             i.all_day_end_iso ||
             i.recurrence ||
-            (Array.isArray(i.participants) && i.participants.length)
+            (Array.isArray(i.participants) && i.participants.length) ||
+            (i.location && String(i.location).trim()) ||
+            i.virtual === true
           ),
       },
       {
@@ -280,6 +298,94 @@ function allDayFromEvent(ev) {
   };
 }
 
+// ---- LOCATION (physical XOR virtual) ----------------------------------------
+// Location rides the draft as TWO coupled fields, treated exactly like all_day / recurrence:
+//   location: string|null  — the VERBATIM physical address (outer-trimmed, never looked up)
+//   virtual:  boolean      — true iff the event is a Google Meet video call
+// normalizeLocation is the SOLE enforcer of the XOR: virtual wins, then a non-empty address
+// means physical, everything else is "no location". Every create merge path funnels through
+// it (draftFromInfo), so the invariant is decided in exactly one place — the same "one place
+// does the arithmetic" discipline normalizeAllDay uses. Exported for the offline selftest.
+// Ported verbatim from the @assistant flow (secretary/2. Skills/1. Calendar Actions/skill.js).
+export function normalizeLocation(location, virtual) {
+  if (virtual === true) return { location: null, virtual: true }; // virtual wins the XOR
+  const addr = typeof location === "string" ? location.trim() : "";
+  return addr ? { location: addr, virtual: false } : { location: null, virtual: false };
+}
+
+// The READ direction: the {location, virtual} of a REAL Google event resource. A Meet is
+// signalled by conferenceData (or a hangoutLink); otherwise the event's own `location` string
+// is the physical address. Funnels through normalizeLocation so virtual still wins.
+export function locationFromEvent(ev) {
+  const virtual = !!(ev?.hangoutLink || ev?.conferenceData);
+  return normalizeLocation(ev?.location, virtual);
+}
+
+// The Meet URL to surface in the done bubble: the event's hangoutLink first, else the
+// `video` entryPoint uri, else null. Edge #8: Google may still be provisioning the Meet on the
+// immediate insert/update response, so this can be null — the event htmlLink (already shown) is
+// the always-works fallback the caller relies on.
+export function meetLinkOf(ev) {
+  if (ev?.hangoutLink) return ev.hangoutLink;
+  const entries = ev?.conferenceData?.entryPoints;
+  if (Array.isArray(entries)) {
+    const video = entries.find((e) => e?.entryPointType === "video" && e?.uri);
+    if (video) return video.uri;
+  }
+  return null;
+}
+
+// The location/conference fragment of an events.insert body, plus whether
+// conferenceDataVersion:1 is needed. A virtual create provisions a Meet with a DETERMINISTIC
+// requestId (seed = start_iso||start_date||title — no Date.now/Math.random, and reusing the id
+// is idempotent per Google). A physical create sets `location`. NEITHER field -> `{}` (no key
+// added, byte-identical to today's write). The draft is already normalized (XOR holds).
+export function locationInsertBody({ location, virtual, seed }) {
+  if (virtual) {
+    return {
+      body: { conferenceData: { createRequest: { requestId: `meet-${seed}` } } },
+      conferenceVersion: true,
+    };
+  }
+  if (location) return { body: { location }, conferenceVersion: false };
+  return { body: {}, conferenceVersion: false };
+}
+
+// The location/conference fields for the full-resource events.update, plus whether
+// conferenceDataVersion:1 is needed. This is where Nit C (conditional version), Nit D
+// (Meet-clear on virtual->physical), edge #2 (idempotent) and edge #3 (XOR switch) all live.
+// Five branches, authoritative:
+//   virtual  -> virtual   : {} / false — {...ev} re-supplies the live Meet and, with NO
+//                           conferenceDataVersion, Google leaves it untouched (idempotent).
+//   physical -> virtual   : provision a Meet (createRequest, deterministic requestId), drop
+//                           the address; version:true.
+//   virtual  -> physical  : Nit D — clear the stale Meet (conferenceData:null) + write the
+//                           address; version:true.
+//   physical -> physical, SAME address : {} / false — a non-location edit disturbs NOTHING
+//                           (Nit C: never sends a conference version, never touches a Meet).
+//   physical -> physical, CHANGED      : set/clear the address only; no conference; version:false.
+export function locationUpdateFields(draft, base, seed) {
+  const dv = !!draft.virtual;
+  const bv = !!base.virtual;
+  if (dv && bv) return { fields: {}, conferenceVersion: false };
+  if (dv && !bv) {
+    return {
+      fields: { location: "", conferenceData: { createRequest: { requestId: `meet-${seed}` } } },
+      conferenceVersion: true,
+    };
+  }
+  if (!dv && bv) {
+    return {
+      fields: { location: draft.location || "", conferenceData: null },
+      conferenceVersion: true,
+    };
+  }
+  if ((draft.location || null) === (base.location || null)) {
+    return { fields: {}, conferenceVersion: false };
+  }
+  return { fields: { location: draft.location || "" }, conferenceVersion: false };
+}
+
 function calendarClient(env) {
   return google.calendar({ version: "v3", auth: googleAuth(env) });
 }
@@ -291,7 +397,7 @@ function calId(env) {
 // The ONE events.insert in the repo. An ALL-DAY event is a different WIRE SHAPE.
 async function createEvent(
   env,
-  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date, recurrence }
+  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date, recurrence, location, virtual }
 ) {
   const cal = calendarClient(env);
   // Idempotency: reuse an identical confirmed event rather than stacking duplicates.
@@ -303,9 +409,20 @@ async function createEvent(
     endDate: end_date,
   });
   if (existing.length) return { ...existing[0], reused: true };
+  // The location/conference fragment. A physical event adds `location`; a virtual one adds a
+  // conferenceData.createRequest and needs conferenceDataVersion:1; NEITHER adds no key at all
+  // (byte-identical to today's write). Seed the deterministic Meet requestId from the event's
+  // own start/title — no Date.now/Math.random.
+  const { body: locBody, conferenceVersion } = locationInsertBody({
+    location,
+    virtual,
+    seed: start_iso || start_date || title,
+  });
   const r = await cal.events.insert({
     calendarId: calId(env),
     sendUpdates: "all", // fires the invite email to the participants
+    // Only a conference-touching write carries the version — a plain create never sends it.
+    ...(conferenceVersion ? { conferenceDataVersion: 1 } : {}),
     requestBody: {
       summary: title,
       description: summary || "",
@@ -316,6 +433,7 @@ async function createEvent(
             end: { dateTime: end_iso, timeZone: CAL_TZ },
           }),
       ...(recurrence ? { recurrence: [recurrence] } : {}),
+      ...locBody,
       attendees: emails.map((email) => ({ email })),
     },
   });
@@ -330,12 +448,15 @@ async function getEvent(env, eventId) {
 
 // The ONE events.update in the repo: a FULL-RESOURCE REPLACE. The caller passes the FRESHLY
 // FETCHED event and we spread it, so everything we never touch rides along.
-async function updateEvent(env, eventId, ev, fields) {
+async function updateEvent(env, eventId, ev, fields, conferenceVersion = false) {
   const cal = calendarClient(env);
   const r = await cal.events.update({
     calendarId: calId(env),
     eventId,
     sendUpdates: "all", // email the attendees about the change
+    // Only a conference-touching write carries the version — a plain edit never sends it, so
+    // {...ev} re-supplies the live conferenceData and Google leaves an existing Meet untouched.
+    ...(conferenceVersion ? { conferenceDataVersion: 1 } : {}),
     requestBody: { ...ev, ...fields },
   });
   return r.data;
@@ -595,7 +716,8 @@ async function handleCreate(ctx, info) {
 }
 
 // Normalize the payload into the draft we insert. Applies the title fallback and defaults.
-function draftFromInfo(ctx, info) {
+// Exported for the offline location selftest (scripts/mary-calendar-location-selftest.mjs).
+export function draftFromInfo(ctx, info) {
   const { owner, contact } = ctx;
   const participants = (Array.isArray(info.participants) ? info.participants : [])
     .map((p) => ({
@@ -622,6 +744,9 @@ function draftFromInfo(ctx, info) {
     all_day_end_iso,
     summary: info.summary || "",
     recurrence: info.recurrence || null,
+    // Location rides the draft like all_day / recurrence; normalizeLocation is the sole XOR
+    // enforcer (virtual wins), so the invariant is decided in exactly one place.
+    ...normalizeLocation(info.location, info.virtual),
   };
 }
 
@@ -672,6 +797,8 @@ async function createFromDraft(ctx, draft) {
     start_date,
     end_date,
     recurrence: rrule,
+    location: draft.location,
+    virtual: draft.virtual,
   });
   await send(
     number,
@@ -684,6 +811,11 @@ async function createFromDraft(ctx, draft) {
       link: ev.htmlLink || "",
       uninvited: draftUninvited(draft),
       recurrence: recurrenceLineFor(draft, ctx.lang),
+      // The location line renders from the draft; meetLink is read back from the created event
+      // (may still be provisioning — edge #8), with the htmlLink above as the fallback.
+      location: draft.location,
+      virtual: draft.virtual,
+      meetLink: meetLinkOf(ev),
     })
   );
   return { link: ev.htmlLink || "", eventId: ev.id, reused: !!ev.reused };
@@ -735,10 +867,21 @@ async function handleEdit(ctx, info) {
         ? info.participants.map((p) => p?.email).filter(Boolean)
         : base.emails,
   };
+  // The place, "absent = keep base": virtual:true -> Meet (drop address); else a non-empty
+  // location -> physical; else keep the event's current place (base). The model never sees the
+  // event JSON on @mary's edit path, so "absent = keep" is what carries an unchanged place
+  // through a time/title edit. normalizeLocation then re-applies the XOR (video wins).
+  const place =
+    info.virtual === true
+      ? { location: null, virtual: true }
+      : info.location && String(info.location).trim()
+        ? { location: info.location, virtual: false }
+        : { location: base.location, virtual: base.virtual };
+  Object.assign(draft, normalizeLocation(place.location, place.virtual));
   draft.all_day_end_iso = normalizeAllDay(draft.start_iso, draft.all_day, draft.all_day_end_iso);
 
   try {
-    await applyEditDraft(ctx, eventId, draft, ev); // sends editDone
+    await applyEditDraft(ctx, eventId, draft, ev, base); // sends editDone
     return { ok: true, eventId };
   } catch (e) {
     console.error("Calendar edit update error:", e?.response?.data || e?.message || e);
@@ -748,7 +891,8 @@ async function handleEdit(ctx, info) {
 }
 
 // The editable DRAFT seed = the event's current state, in the create draft's own terms.
-function editDraftFromEvent(ev) {
+// Exported for the offline location selftest (scripts/mary-calendar-location-selftest.mjs).
+export function editDraftFromEvent(ev) {
   const { all_day, start_iso, all_day_end_iso } = allDayFromEvent(ev);
   const end = all_day ? null : ev.end?.dateTime || null;
   const duration_min =
@@ -761,11 +905,14 @@ function editDraftFromEvent(ev) {
     all_day_end_iso,
     summary: ev.description || "",
     emails: (ev.attendees || []).map((a) => a.email).filter(Boolean),
+    // Seed the event's CURRENT place so a time/title edit that says nothing about location
+    // carries it through unchanged (the "absent = keep base" overlay in handleEdit).
+    ...locationFromEvent(ev),
   };
 }
 
 // Write the confirmed edit draft to Google (a full-resource update) and report back.
-async function applyEditDraft(ctx, eventId, draft, ev) {
+async function applyEditDraft(ctx, eventId, draft, ev, base) {
   const { env, number, send } = ctx;
   const all_day = !!draft.all_day;
 
@@ -786,7 +933,14 @@ async function applyEditDraft(ctx, eventId, draft, ev) {
     fields.end = { dateTime: endIso, timeZone: CAL_TZ };
   }
 
-  const updated = await updateEvent(env, eventId, ev, fields);
+  // The location/conference fields, computed against the event's CURRENT place (base, seeded by
+  // editDraftFromEvent in handleEdit). This is where the conditional conferenceDataVersion
+  // (Nit C) and the Meet-clear (Nit D) come from. The Meet requestId seed is the eventId —
+  // deterministic and idempotent per Google.
+  const { fields: locFields, conferenceVersion } = locationUpdateFields(draft, base, eventId);
+  Object.assign(fields, locFields);
+
+  const updated = await updateEvent(env, eventId, ev, fields, conferenceVersion);
 
   await send(
     number,
@@ -796,6 +950,11 @@ async function applyEditDraft(ctx, eventId, draft, ev) {
       when: localizeWhen(ctx.lang, draft),
       duration: all_day ? null : draft.duration_min,
       link: updated.htmlLink || ev.htmlLink || "",
+      // The location line renders from the draft; meetLink is read back from the updated event
+      // (may still be provisioning — edge #8), with the htmlLink above as the fallback.
+      location: draft.location,
+      virtual: draft.virtual,
+      meetLink: meetLinkOf(updated),
     })
   );
 }

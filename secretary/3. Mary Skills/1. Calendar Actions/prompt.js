@@ -74,6 +74,15 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     resolved from the current date/time; else null.
   If the order gives BOTH a count and an until, fill count and leave until null — a repeat has
   one or the other, never both.
+- location = WHERE the meeting is, as a VERBATIM physical place — an address, venue or room
+  exactly as ${OWNER_NAME} wrote it ("Rua Augusta 123", "Café Blue", "sala 4", "my office").
+  Copy it word for word: NEVER invent, look up, complete, or reformat an address. null when no
+  place is given.
+- virtual = true when the order asks for a VIDEO CALL / Google Meet ("make it a video call",
+  "chamada de vídeo", "por Meet", "online", "call/ligação"). Otherwise false.
+- location and virtual are MUTUALLY EXCLUSIVE — a meeting is physical OR virtual, never both.
+  If the order gives an address AND asks for a video call, set virtual=true and location=null
+  (video wins). Give NEITHER a value it was not told.
 
 To CHANGE or CANCEL an existing event, you FIRST need its id: dispatch action="find" (or
 action="list") to READ the matching events back, then act on the one you mean with its event_id.
@@ -82,7 +91,8 @@ action="list") to READ the matching events back, then act on the one you mean wi
   candidate events, each with an event_id.
 - action="edit": set event_id to the target's id, and set ONLY the fields that CHANGE (a new
   start_iso, duration_min, title, summary, all_day/all_day_end_iso, or the full participants list).
-  Leave the rest null.
+  Leave the rest null. Set location/virtual only when the PLACE changes (a new address, or making
+  it a video call); omit otherwise (absent = keep the event's current place).
 - action="delete": set event_id to the target's id.
 
 For action="list", resolve the time WINDOW the question implies and set list_mode:
@@ -259,22 +269,39 @@ function renderDays(lang, events) {
     .join("\n\n");
 }
 
+// The CONDITIONAL location line(s) for the done bubbles, per language. A physical event prints
+// "📍 <verbatim address>"; a virtual one prints "📹 Google Meet (video call)" and, when a Meet
+// link is already known (the create/edit response may still be provisioning it — edge #8), the
+// join URL beneath it. No location -> "" (no bullet at all). Returns the bullet(s) WITH the
+// leading "\n- " so callers append it inline, exactly like the recurrence line.
+function locationLineEn({ location, virtual, meetLink }) {
+  if (virtual) return `\n- 📹 Google Meet (video call)${meetLink ? `\n  ${meetLink}` : ""}`;
+  if (location) return `\n- 📍 ${location}`;
+  return "";
+}
+function locationLinePt({ location, virtual, meetLink }) {
+  if (virtual) return `\n- 📹 Google Meet (chamada de vídeo)${meetLink ? `\n  ${meetLink}` : ""}`;
+  if (location) return `\n- 📍 ${location}`;
+  return "";
+}
+
 const REPLY = {
   en: {
     thinkingError: () => "I hit an error while thinking. Try again?",
     noAction: ({ summary }) =>
       `I didn't identify a calendar action. ${summary || ""}`.trim(),
-    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence, location, virtual, meetLink }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n\nI created it without inviting ${joinListEn(uninvited)} — I don't have their email.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLineEn({ location, virtual, meetLink });
       return `${
         reused
           ? "That event already exists — here it is (no duplicate created):"
           : "Done! Invite created and sent:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nHere is a link for the event:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}${without}\n\nHere is a link for the event:\n${link}`;
     },
     createGoogleError: () =>
       "I understood the request but failed to create it in Google. Error in the log.",
@@ -292,8 +319,10 @@ const REPLY = {
     editCheckError: () => "I hit an error reading the calendar. Try again?",
     editNoChange: () =>
       "I couldn't tell what to change. Tell me the new time, duration, title, or which attendee to add/remove.",
-    editDone: ({ title, when, duration, emails, link }) =>
-      `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nHere is a link for the event:\n${link}`,
+    editDone: ({ title, when, duration, emails, link, location, virtual, meetLink }) => {
+      const loc = locationLineEn({ location, virtual, meetLink });
+      return `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}\n\nHere is a link for the event:\n${link}`;
+    },
     editGoogleError: () =>
       "I understood the change but failed to update it in Google. Error in the log.",
     listEvents: ({ startMs, endMs, events, capped }) => {
@@ -315,17 +344,18 @@ const REPLY = {
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     noAction: ({ summary }) =>
       `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
-    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence, location, virtual, meetLink }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n\nCriei sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLinePt({ location, virtual, meetLink });
       return `${
         reused
           ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
           : "Pronto! Convite criado e enviado:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nAqui está o link do evento:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}${without}\n\nAqui está o link do evento:\n${link}`;
     },
     createGoogleError: () =>
       "Entendi o pedido, mas não consegui criar no Google. O erro está no log.",
@@ -345,8 +375,10 @@ const REPLY = {
       "Tive um erro ao ler o calendário. Pode tentar de novo?",
     editNoChange: () =>
       "Não consegui entender o que mudar. Me diga o novo horário, a duração, o título, ou qual participante adicionar/remover.",
-    editDone: ({ title, when, duration, emails, link }) =>
-      `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nAqui está o link do evento:\n${link}`,
+    editDone: ({ title, when, duration, emails, link, location, virtual, meetLink }) => {
+      const loc = locationLinePt({ location, virtual, meetLink });
+      return `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}\n\nAqui está o link do evento:\n${link}`;
+    },
     editGoogleError: () =>
       "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
     listEvents: ({ startMs, endMs, events, capped }) => {

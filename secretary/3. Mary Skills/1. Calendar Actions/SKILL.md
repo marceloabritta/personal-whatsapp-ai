@@ -492,6 +492,46 @@ dia até 30 de ago. de 2026"*.
 > edit/delete — "move every Monday standup to Tuesday", "cancel the whole series" — is a **future
 > card**, deliberately out of scope here.
 
+#### LOCATION — physical XOR virtual (create + edit)
+An event can carry a **place** — on create and on edit — exactly like `all_day` / `recurrence`,
+via **two coupled, nullable** `manifest.inputs.fields`:
+
+- **`location`** (string|null) — the **VERBATIM** physical address/venue/room, copied
+  word-for-word from the owner's order (`"Rua Augusta 123"`, `"Café Blue"`, `"sala 4"`) — never
+  invented, looked up, completed, or reformatted. `null` when no place is given.
+- **`virtual`** (bool|null) — `true` iff the order asks for a **Google Meet video call** ("por
+  Meet", "chamada de vídeo", "make it virtual"). A Meet is auto-provisioned via
+  `conferenceData.createRequest` with a **deterministic** `requestId` (`meet-<seed>`, seeded off
+  the event's start/title on create and the event id on edit — no `Date.now`/`Math.random`) and
+  `conferenceDataVersion:1`.
+
+> **Physical XOR virtual — never both.** If the order gives an address AND asks for a video call,
+> **video wins** and the address is dropped. This is enforced in exactly one place,
+> **`normalizeLocation(location, virtual)`** (`skill.js`, the sole XOR normalizer), which every
+> create merge (`draftFromInfo`) and the edit overlay funnel through. `manifest.inputs.consistency`
+> also carries a `location_virtual_xor` rule that rejects an already-contradictory payload.
+
+**The five deterministic helpers** (`skill.js`, exported, pinned offline by
+`scripts/mary-calendar-location-selftest.mjs`): `normalizeLocation` (the XOR),
+`locationFromEvent(ev)` (the READ direction — a Meet is signalled by `conferenceData`/`hangoutLink`,
+else the event's own `location`), `meetLinkOf(ev)` (the join URL: `hangoutLink` first, else the
+video `entryPoint` uri, else `null` — Google may still be provisioning it, edge #8, so the event
+`htmlLink` is the always-works fallback), `locationInsertBody` (the create fragment +
+`conferenceVersion`) and `locationUpdateFields(draft, base, seed)` (the update fragment; five
+branches). The done bubble gains a `📍 <address>` or `📹 Google Meet` line (en+pt) via
+`locationLineEn`/`locationLinePt`.
+
+**EDIT is a single-pass "absent = keep" overlay** (there is no confirm step or event JSON shown to
+the model on @mary's edit path). `editDraftFromEvent(ev)` seeds the event's **current** place
+(`locationFromEvent`); `handleEdit` then folds the change inline: `virtual:true` → Meet (drop
+address); else a non-empty `location` → physical; else **keep base**. So a time/title edit that
+says nothing about the place carries it through unchanged. `normalizeLocation` re-applies the XOR.
+`locationUpdateFields` computes the wire fields from base-vs-draft and the **conditional**
+`conferenceDataVersion`: virtual→virtual is an idempotent no-op that never disturbs the live Meet
+(Nit C); virtual→physical clears the stale Meet (`conferenceData:null`, Nit D). **Not in scope
+here:** *removing* a place on edit (no clear-signal in the single-pass overlay), and Nit A's silent
+location-only notify — @mary always writes `sendUpdates:"all"`.
+
 ### Task: DELETE — `handleDelete` + `resumeDelete`
 **Unchanged.** The target is found by **matching the event's captured identity against the
 calendar**, not by trusting a decoded link alone. `interpret` fills `participants` (with
