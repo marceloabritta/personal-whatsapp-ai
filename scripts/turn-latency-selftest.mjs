@@ -396,7 +396,7 @@ const gate = (inputs, info) => {
     return { shapeOk: null, ok: null, problems: [`checkPayload THREW: ${e.message}`] };
   }
 };
-// A complete, shape-valid CREATE payload: all TWELVE declared fields present. Cases below
+// A complete, shape-valid CREATE payload: all FOURTEEN declared fields present. Cases below
 // override only what they are about.
 const pay = (o = {}) => ({
   action: "create",
@@ -411,6 +411,9 @@ const pay = (o = {}) => ({
   range_start_iso: null,
   range_end_iso: null,
   recurrence: null,
+  // Card 2b586a24 (location physical/virtual): two new DECLARED manifest.inputs fields.
+  location: null,
+  virtual: null,
   ...o,
 });
 
@@ -876,6 +879,9 @@ const cal = (o = {}) => ({
   range_start_iso: null,
   range_end_iso: null,
   recurrence: null,
+  // Card 2b586a24 (location physical/virtual): two new DECLARED manifest.inputs fields.
+  location: null,
+  virtual: null,
   ...o,
 });
 const ROUTER = (lang = "pt") => ({

@@ -511,6 +511,27 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-18 — feat(calendar): location for meetings (physical or virtual).** `@assistant`'s
+  `calendar_action` create and edit now attach a **place**: a **verbatim physical address** (never
+  looked up or reformatted) or a **Google Meet** video call — **physical XOR virtual**, enforced in
+  one normalizer (`normalizeLocation`, skill.js, virtual wins). Carried on the draft as two coupled
+  fields (`location`, `virtual`) exactly like `all_day`/`recurrence`: they are the **thirteenth and
+  fourteenth** `CAL_SCHEMA`/`manifest.inputs.fields` (T2.10 set updated), ride `REVIEW_SCHEMA`
+  (`applyDraftUpdate` reads them directly so a confirm-step reply can set/switch/clear them), and
+  the edit side adds `new_location`/`new_virtual`/`remove_location`/`notify_guests` to
+  `EDIT_SCHEMA`/`EDIT_REVIEW_SCHEMA`. A Meet is provisioned via `conferenceData.createRequest` with
+  a **deterministic** `requestId` and **`conferenceDataVersion:1`** — sent ONLY on a
+  conference-touching write, so a normal edit never disturbs an existing Meet (Nit C), and
+  virtual→physical clears the stale Meet with `conferenceData:null` (Nit D). **Location-only edits
+  are silent** — `resolveSendUpdates` emails the guests (`sendUpdates:"all"`) only on a substantive
+  change or an explicit "let them know" (`notify`), else `"none"` (Nit A). Confirm/done bubbles gain
+  a conditional `📍`/`📹` line in en+pt (Meet join link when provisioned, event `htmlLink` as the
+  fallback). New pure helpers (`normalizeLocation`, `locationFromEvent`, `meetLinkOf`,
+  `locationInsertBody`, `locationUpdateFields`, `resolveSendUpdates`) are exported and pinned
+  offline by `scripts/calendar-location-selftest.mjs` (47 assertions). No rails change, no new
+  OAuth scope (the Calendar scope already carries Meet), no new dependency. Three test fixtures
+  (`calendar-create`, `turn-latency` `cal()`+`pay()`) gained the two new default fields in lockstep
+  (same maintenance `all_day`/`recurrence` did). `@mary`'s copy is intentionally **not** touched.
 - **2026-07-15 — New Architecture: @mary's full isolated skill stack — all seven skills
   converted to pure tasks.** `@mary` now discovers and routes to its OWN skill tree,
   `secretary/3. Mary Skills/` — a byte-isolated copy of `2. Skills/` in which every skill is a

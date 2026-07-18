@@ -66,6 +66,8 @@ export const CAL_SCHEMA = {
     "range_start_iso",
     "range_end_iso",
     "recurrence",
+    "location",
+    "virtual",
   ],
   properties: {
     action: { type: "string", enum: ["create", "delete", "edit", "list", "other"] },
@@ -95,6 +97,11 @@ export const CAL_SCHEMA = {
     // The repeat rule for a RECURRING create ("every Monday", "a cada 2 semanas") — else null,
     // a one-off (the default). action="create" only; toRRule (skill.js) is its sole validator.
     recurrence: RECURRENCE,
+    // WHERE the meeting happens. A VERBATIM physical address ("Rua X 123", "Café Blue") or
+    // null — never looked up or reformatted. `virtual` = true for a Google Meet video call.
+    // Physical XOR virtual is enforced by normalizeLocation (skill.js), the sole normalizer.
+    location: { type: ["string", "null"] },
+    virtual: { type: ["boolean", "null"] },
   },
 };
 
@@ -114,6 +121,8 @@ export const REVIEW_SCHEMA = {
     "all_day_end_iso",
     "summary",
     "recurrence",
+    "location",
+    "virtual",
   ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
@@ -132,6 +141,11 @@ export const REVIEW_SCHEMA = {
     // make the model ECHO the current recurrence on non-clearing modifies and return null
     // ONLY to clear (a null it did not mean drops the whole series).
     recurrence: RECURRENCE,
+    // Same two fields as CAL_SCHEMA, same meaning — HERE so the confirm step can set / change /
+    // CLEAR them ("na verdade é na Rua X", "faz por Meet"). Physical XOR virtual is enforced by
+    // normalizeLocation; the model echoes the current pair on non-location modifies.
+    location: { type: ["string", "null"] },
+    virtual: { type: ["boolean", "null"] },
   },
 };
 
@@ -177,6 +191,10 @@ export const EDIT_SCHEMA = {
     "add_emails",
     "remove_emails",
     "clarify",
+    "new_location",
+    "new_virtual",
+    "remove_location",
+    "notify_guests",
   ],
   properties: {
     new_start_iso: { type: ["string", "null"] },
@@ -188,6 +206,15 @@ export const EDIT_SCHEMA = {
     add_emails: { type: "array", items: { type: "string" } },
     remove_emails: { type: "array", items: { type: "string" } },
     clarify: { type: ["string", "null"] },
+    // The location change, same convention as the new_* fields. new_location = a VERBATIM
+    // physical address; new_virtual = true to make it a Google Meet (a switch back to
+    // physical is expressed by new_location, NEVER by new_virtual:false); remove_location =
+    // clear both. notify_guests = the owner asked to let the attendees know (else silent on a
+    // location-only edit). applyPatchToDraft folds these with XOR discipline.
+    new_location: { type: ["string", "null"] },
+    new_virtual: { type: ["boolean", "null"] },
+    remove_location: { type: "boolean" },
+    notify_guests: { type: ["boolean", "null"] },
   },
 };
 
@@ -209,6 +236,10 @@ export const EDIT_REVIEW_SCHEMA = {
     "add_emails",
     "remove_emails",
     "clarify",
+    "new_location",
+    "new_virtual",
+    "remove_location",
+    "notify_guests",
   ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
@@ -223,6 +254,13 @@ export const EDIT_REVIEW_SCHEMA = {
     add_emails: { type: "array", items: { type: "string" } },
     remove_emails: { type: "array", items: { type: "string" } },
     clarify: { type: ["string", "null"] },
+    // Same four location-change fields as EDIT_SCHEMA — HERE so the confirm step can add /
+    // switch / clear the location and toggle notify ("actually add the address", "and let
+    // them know") during the refinement loop.
+    new_location: { type: ["string", "null"] },
+    new_virtual: { type: ["boolean", "null"] },
+    remove_location: { type: "boolean" },
+    notify_guests: { type: ["boolean", "null"] },
   },
 };
 
@@ -293,6 +331,15 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     resolved from the current date/time; else null.
   If the order gives BOTH a count and an until, fill count and leave until null — a repeat has
   one or the other, never both.
+- location = WHERE the meeting is, as a VERBATIM physical place — an address, venue or room
+  exactly as ${OWNER_NAME} wrote it ("Rua Augusta 123", "Café Blue", "sala 4", "my office").
+  Copy it word for word: NEVER invent, look up, complete, or reformat an address. null when no
+  place is given.
+- virtual = true when the order asks for a VIDEO CALL / Google Meet ("make it a video call",
+  "chamada de vídeo", "por Meet", "online", "call/ligação"). Otherwise false.
+- location and virtual are MUTUALLY EXCLUSIVE — a meeting is physical OR virtual, never both.
+  If the order gives an address AND asks for a video call, set virtual=true and location=null
+  (video wins). Give NEITHER a value it was not told.
 
 For action="delete", also identify WHICH event to cancel so it can be matched on the calendar (the decoded link is only one signal):
 - participants: the people the event is WITH — read them (and their emails) from the quoted invite message and the conversation. Include emails whenever they appear (the invite text usually lists them).
@@ -355,6 +402,7 @@ For "modify", apply the change on top of the current draft:
 - when adding/removing an attendee, keep the others; each participant is {name, email|null};
 - "participants" is the FULL attendee list. An empty array [] means the event has NO outside guests — return [] ONLY when ${OWNER_NAME} says nobody should be invited. NEVER return [] when you are only changing the time, the title or the duration: echo the draft's attendees exactly.
 - recurrence: the repeat rule {freq, interval, byday, count, until} or null, SAME shape and rules as the first extraction. On any modify that is NOT about the repetition (a rename, a new time, an added guest), ECHO the draft's current recurrence EXACTLY — carry it over unchanged. Change it only when the latest message changes the repeat ("make it every other Monday" -> interval 2; "only until August" -> set until; "add Wednesdays" -> add "WE"). Return recurrence = null ONLY when the owner cancels the repetition ("actually just once", "na verdade só uma vez", "not recurring") — that clears it to a single event. NEVER return null just because the modify was about something else: a null you did not mean DROPS the whole series.
+- location / virtual: WHERE the event is — a VERBATIM physical address in "location" (never looked up or reformatted), or virtual=true for a Google Meet video call. Physical XOR virtual — never both. On any modify that is NOT about the place, ECHO the draft's current location and virtual EXACTLY. Change them only when the latest message changes the place: a new address ("na verdade é na Rua X") sets location and virtual=false; "make it a video call" / "por Meet" sets virtual=true and location=null; "remove the location" / "sem local" clears BOTH (location=null, virtual=false). Like recurrence, a location=null you did not mean DROPS the address — echo it unless the owner cleared or changed it.
 - change ONLY what the latest message asks to change; echo everything else from the draft.
 For any decision other than "modify", the draft fields are ignored — you may echo the current draft.`;
 }
@@ -440,9 +488,14 @@ export function buildEditSystem(OWNER_NAME) {
 - new_all_day_end_iso: ONLY when the request changes the RANGE of an all-day event ("na verdade vai até sexta", "só quarta mesmo", "a semana toda"). The LAST day the event STILL COVERS, at 00:00 with the -03:00 offset — INCLUSIVE: "até sexta" is FRIDAY, do not add a day. null when the range is not changing, and null when the event collapses back to a single day. A rename/duration/attendee change touches NEITHER this field NOR new_all_day.
 - add_emails: array of email addresses to ADD as attendees (["carlos@x.com"]). Empty array if none. Only include addresses that actually appear in the request/conversation — NEVER invent one.
 - remove_emails: array of email addresses to REMOVE from the attendees. Empty array if none.
+- new_location: a NEW VERBATIM physical address if the request sets or changes the place ("na verdade é na Rua Augusta 123", "move it to Café Blue"). Copy it word for word — NEVER look up or reformat. Also use new_location to switch a VIDEO call BACK to a physical place ("actually let's meet in person at X"). null when the place is not changing.
+- new_virtual: true ONLY when the request makes it a Google Meet VIDEO call ("make it virtual", "faz por Meet", "chamada de vídeo"). null otherwise. Do NOT emit false to turn video off — a switch back to a physical meeting is expressed with new_location (the address they give), never with new_virtual:false.
+- remove_location: true when the request removes the place entirely with no replacement ("remove the location", "tira o local", "sem local"). Clears both the address and any Meet. false otherwise.
+- notify_guests: true ONLY when the request explicitly asks to let the attendees know about the change ("and let the guests know", "avisa o pessoal"). null/false otherwise — a location-only change is silent unless asked.
+- location and virtual are mutually exclusive; never set an address AND make it a video call in the same change.
 - clarify: if the request is AMBIGUOUS or missing a detail you need (e.g. "move it earlier"/"push it back" with no target time, or "add João" with no email on record), set this to a SHORT question asking for exactly that, and leave every change field null/empty. Otherwise clarify=null.
 
-Rules: change ONLY what the latest request asks; never guess a time or an email; if you cannot resolve a needed value, ask via clarify instead of guessing.`;
+Rules: change ONLY what the latest request asks; never guess a time, an email, or an address; if you cannot resolve a needed value, ask via clarify instead of guessing.`;
 }
 
 export function buildEditUser({ eventJson, transcript, latest, nowStr }) {
@@ -471,11 +524,18 @@ Choose the "decision":
 - "cancel": the latest message calls the edit off / wants to keep the event as it was (e.g. no, leave it, forget it, deixa, mantém).
 - "unrelated": normal conversation, NOT a response to this confirmation. If unsure, choose "unrelated".
 
-Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, new_all_day, new_all_day_end_iso, add_emails[], remove_emails[]. Change ONLY what the latest message asks; never invent a time or an email — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.
+Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, new_all_day, new_all_day_end_iso, add_emails[], remove_emails[], new_location, new_virtual, remove_location, notify_guests. Change ONLY what the latest message asks; never invent a time, an email, or an address — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.
 
 The WHOLE-DAY fields, same rules as the first pass:
 - new_all_day = true when ${OWNER_NAME} now says it is the whole day ("na verdade, o dia todo"); false ONLY when he gives it a TIME ("na verdade às 10h") — and then you MUST also fill new_start_iso with that time. In EVERY other case leave it null. A rename, a duration change, an attendee change, or moving an all-day event to another DAY all leave it null — NEVER false.
-- new_all_day_end_iso = the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when the RANGE changes ("só até sexta" → FRIDAY, do not add a day); null when the range is not changing or the event collapses back to a single day.`;
+- new_all_day_end_iso = the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when the RANGE changes ("só até sexta" → FRIDAY, do not add a day); null when the range is not changing or the event collapses back to a single day.
+
+The LOCATION fields, same rules as the first pass:
+- new_location = a NEW VERBATIM physical address when the place is set or changed (copy word for word, never look up); also how a switch back from a video call to an in-person place is expressed. null when unchanged.
+- new_virtual = true ONLY to make it a Google Meet video call ("faz por Meet", "make it virtual"); null otherwise. NEVER emit false to turn video off — give the address in new_location instead.
+- remove_location = true to clear the place entirely ("sem local", "remove the location"); false otherwise.
+- notify_guests = true ONLY when ${OWNER_NAME} explicitly asks to notify the attendees ("avisa o pessoal", "let them know"); null/false otherwise.
+- location and virtual are mutually exclusive — never both in one change.`;
 }
 
 export function buildEditReviewUser({ eventJson, transcript, latest, nowStr }) {
@@ -682,6 +742,23 @@ function renderDays(lang, events) {
     .join("\n\n");
 }
 
+// The CONDITIONAL location line(s) for the confirm/done bubbles, per language. A physical
+// event prints "📍 <verbatim address>"; a virtual one prints "📹 Google Meet (video call)"
+// and, when a Meet link is already known (the create/edit response may still be provisioning
+// it — edge #8), the join URL beneath it. No location -> "" (no bullet at all). Returns the
+// bullet(s) WITH the leading "\n- " so callers append it inline, exactly like the recurrence
+// line. Kept here, not in skill.js, so the prose stays localized.
+function locationLineEn({ location, virtual, meetLink }) {
+  if (virtual) return `\n- 📹 Google Meet (video call)${meetLink ? `\n  ${meetLink}` : ""}`;
+  if (location) return `\n- 📍 ${location}`;
+  return "";
+}
+function locationLinePt({ location, virtual, meetLink }) {
+  if (virtual) return `\n- 📹 Google Meet (chamada de vídeo)${meetLink ? `\n  ${meetLink}` : ""}`;
+  if (location) return `\n- 📍 ${location}`;
+  return "";
+}
+
 const REPLY = {
   en: {
     thinkingError: () => "I hit an error while thinking. Try again?",
@@ -692,30 +769,32 @@ const REPLY = {
     // empty "- " bullet says nothing, and a person must NEVER be dropped silently.
     // `duration` is null for an all-day event (the caller passes null) — `when` already
     // says "All day", and "(1440 min)" is exactly the thing the owner should never see.
-    createConfirm: ({ title, emails, when, duration, uninvited, recurrence }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n- Without ${joinListEn(uninvited)} — I don't have their email.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLineEn({ location, virtual });
       return `Confirm this event:
 - ${title}
 - ${guests}${without}
-- ${when}${duration ? ` (${duration} min)` : ""}${rec}
+- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}
 
 Reply "yes" to confirm and I'll send the invites, or tell me what to change and I'll adjust.`;
     },
-    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence, location, virtual, meetLink }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n\nI created it without inviting ${joinListEn(uninvited)} — I don't have their email.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLineEn({ location, virtual, meetLink });
       return `${
         reused
           ? "That event already exists — here it is (no duplicate created):"
           : "Done! Invite created and sent:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nHere is a link for the event:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}${without}\n\nHere is a link for the event:\n${link}`;
     },
     createCancelled: ({ title }) => `Okay, I won't create "${title}".`,
     createGoogleError: () =>
@@ -760,16 +839,29 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
     // `when` arrives PRE-RENDERED by localizeWhen (all-day -> "14 de jul. de 2026 · All
     // day (3 days)"), and `duration` is null for an all-day event — the same contract
     // createConfirm has. "(1440 min)" is the bug, not the event.
-    editConfirm: ({ title, emails, when, duration }) =>
-      `Here's the updated event:
+    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests }) => {
+      const loc = locationLineEn({ location, virtual });
+      // notifyGuests is false for a silent location-only edit — say so, don't promise to
+      // "notify everyone" when we won't. A substantive change (time, title, attendees) sets it
+      // true and keeps the original wording.
+      const close = notifyGuests
+        ? 'Reply "yes" to save and notify everyone, or tell me what else to change.'
+        : 'Reply "yes" to save — I won\'t notify the guests of this change. Tell me what else to change, or ask me to let them know.';
+      return `Here's the updated event:
 - ${title}
 - ${emails}
-- ${when}${duration ? ` (${duration} min)` : ""}
+- ${when}${duration ? ` (${duration} min)` : ""}${loc}
 
-Reply "yes" to save and notify everyone, or tell me what else to change.`,
+${close}`;
+    },
     editCancelled: ({ title }) => `Okay, I'll leave "${title}" as it was.`,
-    editDone: ({ title, when, duration, emails, link }) =>
-      `Done! Updated the event and notified the attendees:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nHere is a link for the event:\n${link}`,
+    editDone: ({ title, when, duration, emails, link, location, virtual, meetLink, notified }) => {
+      const loc = locationLineEn({ location, virtual, meetLink });
+      const head = notified
+        ? "Done! Updated the event and notified the attendees:"
+        : "Done! Updated the event (I didn't notify the guests of this change):";
+      return `${head}\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}\n\nHere is a link for the event:\n${link}`;
+    },
     editGoogleError: () =>
       "I understood the change but failed to update it in Google. Error in the log.",
     listEvents: ({ startMs, endMs, events, capped }) => {
@@ -791,30 +883,32 @@ Reply "yes" to save and notify everyone, or tell me what else to change.`,
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     noAction: ({ summary }) =>
       `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
-    createConfirm: ({ title, emails, when, duration, uninvited, recurrence }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n- Sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLinePt({ location, virtual });
       return `Confirme este evento:
 - ${title}
 - ${guests}${without}
-- ${when}${duration ? ` (${duration} min)` : ""}${rec}
+- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}
 
 Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que eu ajusto.`;
     },
-    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence }) => {
+    createDone: ({ reused, title, emails, when, duration, link, uninvited, recurrence, location, virtual, meetLink }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n\nCriei sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
+      const loc = locationLinePt({ location, virtual, meetLink });
       return `${
         reused
           ? "Esse evento já existe — aqui está ele (nenhuma cópia criada):"
           : "Pronto! Convite criado e enviado:"
-      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${rec}${without}\n\nAqui está o link do evento:\n${link}`;
+      }\n\n- ${title}\n- ${guests}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}${rec}${without}\n\nAqui está o link do evento:\n${link}`;
     },
     createCancelled: ({ title }) => `Ok, não vou criar "${title}".`,
     createGoogleError: () =>
@@ -858,16 +952,26 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
     editClarify: (question) => question,
     editNoChange: () =>
       "Não consegui entender o que mudar. Me diga o novo horário, a duração, o título, ou qual participante adicionar/remover.",
-    editConfirm: ({ title, emails, when, duration }) =>
-      `Aqui está o evento atualizado:
+    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests }) => {
+      const loc = locationLinePt({ location, virtual });
+      const close = notifyGuests
+        ? 'Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.'
+        : 'Responda "sim" para salvar — não vou avisar os convidados desta mudança. Me diga o que mais mudar, ou peça para avisá-los.';
+      return `Aqui está o evento atualizado:
 - ${title}
 - ${emails}
-- ${when}${duration ? ` (${duration} min)` : ""}
+- ${when}${duration ? ` (${duration} min)` : ""}${loc}
 
-Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.`,
+${close}`;
+    },
     editCancelled: ({ title }) => `Ok, vou deixar "${title}" como estava.`,
-    editDone: ({ title, when, duration, emails, link }) =>
-      `Pronto! Atualizei o evento e avisei os participantes:\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}\n\nAqui está o link do evento:\n${link}`,
+    editDone: ({ title, when, duration, emails, link, location, virtual, meetLink, notified }) => {
+      const loc = locationLinePt({ location, virtual, meetLink });
+      const head = notified
+        ? "Pronto! Atualizei o evento e avisei os participantes:"
+        : "Pronto! Atualizei o evento (não avisei os convidados desta mudança):";
+      return `${head}\n\n- ${title}\n- ${emails}\n- ${when}${duration ? ` (${duration} min)` : ""}${loc}\n\nAqui está o link do evento:\n${link}`;
+    },
     editGoogleError: () =>
       "Entendi a mudança, mas não consegui atualizar no Google. O erro está no log.",
     listEvents: ({ startMs, endMs, events, capped }) => {

@@ -10,11 +10,16 @@
 >    **recurring** events too ("every Monday", "every 2 weeks until August", "5 times",
 >    "daily", "on the 5th every month") — the draft states the repeat in words, and it writes
 >    a real repeating Google event. *(Create-only: editing or cancelling a recurring event
->    currently affects a single occurrence, not the series.)*
+>    currently affects a single occurrence, not the series.)* Give it a **place** too — a
+>    physical **address** ("na Rua Augusta 123") or a **Google Meet** video call ("faz por
+>    Meet") — physical **or** virtual, never both.
 > 2. **Edit/reschedule** an event you replied to — move it, change its length, rename it,
->    or add/remove an attendee. **Confirm-first**: it shows the updated event and waits
+>    add/remove an attendee, or **change its place** (add an address, switch to a Google Meet,
+>    or remove the location). **Confirm-first**: it shows the updated event and waits
 >    for your **`yes`**, and **stays open** so you can keep telling it changes ("actually
->    4:30", "also add bruno@x.com") before saving. Nothing is written until you confirm.
+>    4:30", "also add bruno@x.com") before saving. Nothing is written until you confirm. A
+>    **location-only** change is **silent** (the guests aren't emailed) unless you ask it to
+>    let them know.
 > 3. **Cancel/delete** an event you replied to — with a "type *yes* to confirm" step.
 > 4. **Read/list** what's on the calendar — a **read-only** query ("what's on tomorrow?",
 >    "anything Friday afternoon?", "what's my next meeting?"). No draft, no confirm,
@@ -254,11 +259,12 @@ names of `CAL_SCHEMA`** — which is what makes it a drop-in and why `handleCrea
 **one** LLM call before the reply instead of three. User-visible behaviour is unchanged: it is
 faster, not different.
 
-> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all TWELVE names.**
+> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all FOURTEEN names.**
 > That binding is load-bearing, and it is a new way to break this skill *silently*: add a field
 > to `CAL_SCHEMA` and forget the declaration, and the merged prompt simply stops asking for it,
 > `draftFromInfo` reads `undefined`, and the feature that field implements dies **without a
-> single test going red.** It has already happened once (`all_day`). `scripts/turn-latency-selftest.mjs`
+> single test going red.** It has already happened once (`all_day`; `recurrence` and
+> `location`/`virtual` followed the discipline). `scripts/turn-latency-selftest.mjs`
 > **T2.10** asserts set-equality. **If a future card makes it red, update the declaration —
 > never loosen the lint.**
 
@@ -282,7 +288,10 @@ one rulebook and cannot drift. Schema:
   "all_day": boolean|null,                           // "o dia inteiro" / "all day"
   "all_day_end_iso": string|null,                    // a RANGE: the LAST day COVERED, inclusive
   "list_mode": "window"|"next"|null,                 // action="list" only; null otherwise
-  "range_start_iso": string|null, "range_end_iso": string|null }  // the list window
+  "range_start_iso": string|null, "range_end_iso": string|null,   // the list window
+  "recurrence": object|null,                         // the repeat rule (see RECURRING)
+  "location": string|null,                           // VERBATIM physical address, else null
+  "virtual": boolean|null }                          // true = Google Meet; physical XOR virtual
 ```
 Dispatch on `action`: `delete` → `handleDelete`; `create` → `handleCreate`; `edit` →
 `handleEdit`; `list` → `handleList`; else "I didn't identify a calendar action." (For
@@ -479,6 +488,44 @@ dia até 30 de ago. de 2026"*.
 > edit/delete — "move every Monday standup to Tuesday", "cancel the whole series" — is a **future
 > card**, deliberately out of scope here.
 
+#### LOCATION — physical XOR virtual
+A create or edit can give the event a **place**: either a **verbatim physical address** ("Rua
+Augusta 123", "Café Blue", "sala 4") or a **Google Meet video call** ("make it a video call",
+"chamada de vídeo", "por Meet"). The two are **mutually exclusive** — an event is physical **or**
+virtual, never both.
+
+- **Two coupled draft fields**, carried exactly like `all_day` / `recurrence`: `location:
+  string|null` (the verbatim address, outer-trimmed, **never looked up or reformatted**) and
+  `virtual: boolean` (true iff it's a Meet). The XOR is enforced in **one** normalizer,
+  **`normalizeLocation(location, virtual)`** — **virtual wins**, then a non-empty address means
+  physical, everything else means no location. Every create merge path funnels through it (via
+  `draftFromInfo`); the edit fold (`applyPatchToDraft`) re-applies it too. They are the
+  **thirteenth and fourteenth** `CAL_SCHEMA`/`manifest.inputs.fields`, ride `REVIEW_SCHEMA` so
+  the confirm step can set / switch / clear them, and — like `recurrence` — `applyDraftUpdate`
+  reads `review.location`/`review.virtual` **directly** (null = clear), so the review prompt
+  makes the model **echo** the current pair on any non-location modify.
+- **The wire.** A virtual event provisions a Meet through
+  `conferenceData.createRequest` with a **deterministic** `requestId` (`meet-<seed>`, seed =
+  the event's start/title on insert, the eventId on update — no `Date.now`/`Math.random`, and
+  reusing the id is idempotent per Google), and the write carries **`conferenceDataVersion:1`**.
+  A physical event sets `location`. **`conferenceDataVersion:1` is sent ONLY on a
+  conference-touching write** — a plain create or a normal (non-location) edit never sends it,
+  so `{...ev}` re-supplies an existing Meet and Google leaves it untouched. Switching
+  **virtual→physical** clears the stale Meet with `conferenceData:null` (+ version). These live
+  in `locationInsertBody` (create) and `locationUpdateFields(draft, base, seed)` (edit), pinned
+  offline by `scripts/calendar-location-selftest.mjs`.
+- **The confirm/done bubbles** gain a conditional line: `📍 <address>` for physical, `📹 Google
+  Meet (video call)` / `📹 Google Meet (chamada de vídeo)` for virtual (with the join link
+  beneath it once Google has provisioned it — it may still be pending on the immediate response,
+  so the event `htmlLink` stays the always-works fallback). `meetLinkOf(ev)` surfaces the URL
+  (`hangoutLink`, else the `video` entryPoint uri, else null).
+- **Location-only edits are SILENT** (Nit A). `resolveSendUpdates(draft, base)` returns `"all"`
+  only when a **substantive** (non-location) field changed — the summary/agenda counts — or the
+  owner **explicitly asked to notify** (`notify_guests` → the draft's sticky `notify` flag);
+  otherwise `"none"`. So moving a meeting's address does **not** email the guests unless asked;
+  the edit-confirm bubble says which it will do, and `editDone` reports whether they were
+  notified.
+
 ### Task: DELETE — `handleDelete` + `resumeDelete`
 **Unchanged.** The target is found by **matching the event's captured identity against the
 calendar**, not by trusting a decoded link alone. `interpret` fills `participants` (with
@@ -618,9 +665,12 @@ localized "(Showing the first 50.)" note rather than truncating silently; the em
   Model = `ctx.model`.
 - **Google Calendar (OAuth refresh token):** `events.list` (dedupe on create + match/sweep
   on delete + **read the window on list**), `events.get` (resolve a decoded link id; read current state on edit),
-  `events.insert` (create), `events.update` (edit — a full-resource REPLACE, `sendUpdates:"all"`;
-  see §Task: EDIT for why it is not `patch`), `events.delete`
-  (cancel). `sendUpdates:"all"` sends invite / change / cancellation emails.
+  `events.insert` (create), `events.update` (edit — a full-resource REPLACE; see §Task: EDIT for
+  why it is not `patch`), `events.delete` (cancel). A **Google Meet** is provisioned via
+  `conferenceData.createRequest` with **`conferenceDataVersion:1`**, sent ONLY on a
+  conference-touching write (see §LOCATION) — the existing Calendar scope already carries it, no
+  new OAuth scope. `sendUpdates` is `"all"` for invites / cancellations and substantive edits,
+  and **`"none"`** for a silent location-only edit (see §LOCATION, Nit A).
 - **WhatsApp:** all user-facing text via `ctx.send`.
 
 ### Stateful behavior, timeouts, completion

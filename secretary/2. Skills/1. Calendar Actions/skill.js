@@ -120,6 +120,16 @@ export const manifest = {
         nullable: true,
         desc: 'the repeat rule for a RECURRING event, else null (one-off — the default). Object {freq: "daily"|"weekly"|"monthly", interval: number|null, byday: ["MO".."SU"]|null (weekly only), count: number|null, until: ISO-8601 -03:00|null}. count XOR until, never both.',
       },
+      location: {
+        type: "string",
+        nullable: true,
+        desc: "the VERBATIM physical address/venue of the meeting, exactly as written — NEVER invented, looked up, or reformatted. null when no place is given or when it is a video call.",
+      },
+      virtual: {
+        type: "bool",
+        nullable: true,
+        desc: 'true when the meeting is a Google Meet VIDEO CALL ("chamada de vídeo", "por Meet", "online"). Physical XOR virtual: if both an address and a video call are asked for, virtual wins and location is null.',
+      },
     },
     // A faithful transcription of missingOf()/isComplete() below. `participants[].email` means
     // "every attendee that EXISTS has an email" — an EMPTY list is COMPLETE, not missing (a
@@ -170,6 +180,13 @@ export const manifest = {
         test: (i) =>
           !(i.range_start_iso && i.range_end_iso) ||
           Date.parse(i.range_end_iso) >= Date.parse(i.range_start_iso),
+      },
+      {
+        // Physical XOR virtual — documentary only. normalizeLocation() is the real enforcer
+        // (virtual wins, then a non-empty address, else neither); a consistency failure never
+        // withholds the payload, so this just makes the invariant grep-able alongside the code.
+        name: "location_virtual_xor",
+        test: (i) => !(i.virtual === true && i.location != null && String(i.location).trim() !== ""),
       },
     ],
     // Carried VERBATIM into the merged prompt. Same env + same default as server.js's
@@ -331,6 +348,120 @@ function allDayFromEvent(ev) {
   };
 }
 
+// ---- LOCATION (physical XOR virtual) ----------------------------------------
+// Location rides the draft as TWO coupled fields, treated exactly like all_day / recurrence:
+//   location: string|null  — the VERBATIM physical address (outer-trimmed, never looked up)
+//   virtual:  boolean      — true iff the event is a Google Meet video call
+// normalizeLocation is the SOLE enforcer of the XOR: virtual wins, then a non-empty address
+// means physical, everything else is "no location". Every create merge path funnels through
+// it (draftFromInfo), so the invariant is decided in exactly one place — the same "one place
+// does the arithmetic" discipline normalizeAllDay uses. Exported for the offline selftest.
+export function normalizeLocation(location, virtual) {
+  if (virtual === true) return { location: null, virtual: true }; // virtual wins the XOR
+  const addr = typeof location === "string" ? location.trim() : "";
+  return addr ? { location: addr, virtual: false } : { location: null, virtual: false };
+}
+
+// The READ direction: the {location, virtual} of a REAL Google event resource. A Meet is
+// signalled by conferenceData (or a hangoutLink); otherwise the event's own `location` string
+// is the physical address. Funnels through normalizeLocation so virtual still wins.
+export function locationFromEvent(ev) {
+  const virtual = !!(ev?.hangoutLink || ev?.conferenceData);
+  return normalizeLocation(ev?.location, virtual);
+}
+
+// The Meet URL to surface in the confirm/done bubble: the event's hangoutLink first, else the
+// `video` entryPoint uri, else null. Edge #8: Google may still be provisioning the Meet on the
+// immediate insert/update response, so this can be null — the event htmlLink (already shown) is
+// the always-works fallback the caller relies on.
+export function meetLinkOf(ev) {
+  if (ev?.hangoutLink) return ev.hangoutLink;
+  const entries = ev?.conferenceData?.entryPoints;
+  if (Array.isArray(entries)) {
+    const video = entries.find((e) => e?.entryPointType === "video" && e?.uri);
+    if (video) return video.uri;
+  }
+  return null;
+}
+
+// The location/conference fragment of an events.insert body, plus whether
+// conferenceDataVersion:1 is needed. A virtual create provisions a Meet with a DETERMINISTIC
+// requestId (seed = start_iso||start_date||title — no Date.now/Math.random, and reusing the id
+// is idempotent per Google). A physical create sets `location`. NEITHER field -> `{}` (no key
+// added, byte-identical to today's write). The draft is already normalized (XOR holds).
+export function locationInsertBody({ location, virtual, seed }) {
+  if (virtual) {
+    return {
+      body: { conferenceData: { createRequest: { requestId: `meet-${seed}` } } },
+      conferenceVersion: true,
+    };
+  }
+  if (location) return { body: { location }, conferenceVersion: false };
+  return { body: {}, conferenceVersion: false };
+}
+
+// The location/conference fields for the full-resource events.update, plus whether
+// conferenceDataVersion:1 is needed. This is where Nit C (conditional version), Nit D
+// (Meet-clear on virtual->physical), edge #2 (idempotent) and edge #3 (XOR switch) all live.
+// Five branches, authoritative (PLAN §Interfaces):
+//   virtual  -> virtual   : {} / false — {...ev} re-supplies the live Meet and, with NO
+//                           conferenceDataVersion, Google leaves it untouched (idempotent).
+//   physical -> virtual   : provision a Meet (createRequest, deterministic requestId), drop
+//                           the address; version:true.
+//   virtual  -> physical  : Nit D — clear the stale Meet (conferenceData:null) + write the
+//                           address; version:true.
+//   physical -> physical, SAME address : {} / false — a non-location edit disturbs NOTHING
+//                           (Nit C: never sends a conference version, never touches a Meet).
+//   physical -> physical, CHANGED      : set/clear the address only; no conference; version:false.
+export function locationUpdateFields(draft, base, seed) {
+  const dv = !!draft.virtual;
+  const bv = !!base.virtual;
+  if (dv && bv) return { fields: {}, conferenceVersion: false };
+  if (dv && !bv) {
+    return {
+      fields: { location: "", conferenceData: { createRequest: { requestId: `meet-${seed}` } } },
+      conferenceVersion: true,
+    };
+  }
+  if (!dv && bv) {
+    return {
+      fields: { location: draft.location || "", conferenceData: null },
+      conferenceVersion: true,
+    };
+  }
+  if ((draft.location || null) === (base.location || null)) {
+    return { fields: {}, conferenceVersion: false };
+  }
+  return { fields: { location: draft.location || "" }, conferenceVersion: false };
+}
+
+// Do two attendee lists hold the same addresses (case-insensitive, order-independent)?
+function sameEmailSet(a, b) {
+  const norm = (list) => new Set((list || []).map((e) => String(e).toLowerCase()));
+  const sa = norm(a);
+  const sb = norm(b);
+  if (sa.size !== sb.size) return false;
+  for (const e of sa) if (!sb.has(e)) return false;
+  return true;
+}
+
+// Nit A — the notify decision for an edit write. "all" if ANY substantive (non-location)
+// field differs from the seed (`base` = editDraftFromEvent(ev)): the summary/agenda and every
+// other field count. Otherwise "all" when the owner explicitly asked to notify (draft.notify),
+// else "none" — a silent location-only edit does not spam the guests unless asked.
+export function resolveSendUpdates(draft, base) {
+  const substantiveChanged =
+    (draft.title || "") !== (base.title || "") ||
+    (draft.start_iso || null) !== (base.start_iso || null) ||
+    (Number(draft.duration_min) || null) !== (Number(base.duration_min) || null) ||
+    !!draft.all_day !== !!base.all_day ||
+    (draft.all_day_end_iso || null) !== (base.all_day_end_iso || null) ||
+    (draft.summary || "") !== (base.summary || "") ||
+    !sameEmailSet(draft.emails, base.emails);
+  if (substantiveChanged) return "all";
+  return draft.notify ? "all" : "none";
+}
+
 function calendarClient(env) {
   return google.calendar({ version: "v3", auth: googleAuth(env) });
 }
@@ -344,7 +475,7 @@ function calId(env) {
 // read side. `end_date` is EXCLUSIVE (Google's rule) and is computed by the caller.
 async function createEvent(
   env,
-  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date, recurrence }
+  { title, emails, start_iso, end_iso, summary, all_day, start_date, end_date, recurrence, location, virtual }
 ) {
   const cal = calendarClient(env);
   // Idempotency: repeated "schedule this" (e.g. while testing) used to stack up
@@ -358,9 +489,20 @@ async function createEvent(
     endDate: end_date,
   });
   if (existing.length) return { ...existing[0], reused: true };
+  // The location/conference fragment. A physical event adds `location`; a virtual one adds a
+  // conferenceData.createRequest and needs conferenceDataVersion:1; NEITHER adds no key at all
+  // (byte-identical to today's write). Seed the deterministic Meet requestId from the event's
+  // own start/title — no Date.now/Math.random.
+  const { body: locBody, conferenceVersion } = locationInsertBody({
+    location,
+    virtual,
+    seed: start_iso || start_date || title,
+  });
   const r = await cal.events.insert({
     calendarId: calId(env),
     sendUpdates: "all", // fires the invite email to the participants
+    // Only a conference-touching write carries the version — a plain create never sends it.
+    ...(conferenceVersion ? { conferenceDataVersion: 1 } : {}),
     requestBody: {
       summary: title,
       description: summary || "",
@@ -373,6 +515,7 @@ async function createEvent(
       // A RECURRING event carries an RRULE line; a one-off (recurrence null) omits the field
       // entirely — byte-identical to today's write.
       ...(recurrence ? { recurrence: [recurrence] } : {}),
+      ...locBody,
       attendees: emails.map((email) => ({ email })),
     },
   });
@@ -401,12 +544,15 @@ async function getEvent(env, eventId) {
 // everything else we never touch ride along. resumeEditConfirm already re-fetches the event
 // before writing, so this costs NO extra API call. (scripts/calendar-edit-selftest.mjs pins
 // colorId as the tripwire for exactly this.)
-async function updateEvent(env, eventId, ev, fields) {
+async function updateEvent(env, eventId, ev, fields, sendUpdates = "all", conferenceVersion = false) {
   const cal = calendarClient(env);
   const r = await cal.events.update({
     calendarId: calId(env),
     eventId,
-    sendUpdates: "all", // email the attendees about the change
+    sendUpdates, // "all" emails the attendees; "none" is a silent location-only edit (Nit A)
+    // Only a conference-touching write carries the version — a plain edit never sends it, so
+    // {...ev} re-supplies the live conferenceData and Google leaves an existing Meet untouched.
+    ...(conferenceVersion ? { conferenceDataVersion: 1 } : {}),
     requestBody: { ...ev, ...fields },
   });
   return r.data;
@@ -698,7 +844,7 @@ async function advanceCreate(ctx, draft) {
 
 // Normalize an interpret()/review() result into the draft we store, render, and
 // eventually insert. Applies the title fallback: inferred topic, else Owner/names.
-function draftFromInfo(ctx, info) {
+export function draftFromInfo(ctx, info) {
   const { owner, contact } = ctx;
   // noEmail rides along: it is the owner's ANSWER ("I don't have hers"), and it must
   // survive every re-normalization or the email question comes back from the dead.
@@ -722,6 +868,11 @@ function draftFromInfo(ctx, info) {
   const all_day = !!info.all_day;
   const all_day_end_iso = normalizeAllDay(info.start_iso, all_day, info.all_day_end_iso);
 
+  // LOCATION. The single create-side normalizer every merge path funnels through (edge #11):
+  // physical XOR virtual is decided here, once, by normalizeLocation — virtual wins, then a
+  // non-empty verbatim address, else neither.
+  const { location, virtual } = normalizeLocation(info.location, info.virtual);
+
   return {
     title,
     participants,
@@ -734,6 +885,8 @@ function draftFromInfo(ctx, info) {
     // and write time. Plays no part in missingOf()/isComplete(): a null recurrence is an
     // ordinary one-off, never a missing field.
     recurrence: info.recurrence || null,
+    location,
+    virtual,
   };
 }
 
@@ -786,6 +939,8 @@ async function openCreateConfirm(ctx, draft) {
       duration: draft.all_day ? null : draft.duration_min,
       uninvited: draftUninvited(draft),
       recurrence: recurrenceLineFor(draft, ctx.lang),
+      location: draft.location,
+      virtual: draft.virtual,
     })
   );
 }
@@ -822,6 +977,8 @@ async function createFromDraft(ctx, draft) {
     start_date,
     end_date,
     recurrence: rrule,
+    location: draft.location,
+    virtual: draft.virtual,
   });
   await send(
     number,
@@ -834,6 +991,11 @@ async function createFromDraft(ctx, draft) {
       link: ev.htmlLink || "",
       uninvited: draftUninvited(draft),
       recurrence: recurrenceLineFor(draft, ctx.lang),
+      // The location line renders from the draft; the Meet link (may still be provisioning —
+      // edge #8) is read from the created event, with the htmlLink above as the fallback.
+      location: draft.location,
+      virtual: draft.virtual,
+      meetLink: meetLinkOf(ev),
     })
   );
 }
@@ -895,7 +1057,7 @@ function carryNoEmail(prevList, nextList) {
 // Array.isArray, NOT `.length` — an EMPTIED guest list is an ANSWER ("don't invite
 // anyone"), not an absence of information, and it must stick. Only a missing list
 // (null/undefined) means "the review said nothing about the guests".
-function applyDraftUpdate(ctx, prev, review) {
+export function applyDraftUpdate(ctx, prev, review) {
   const participants = Array.isArray(review.participants)
     ? carryNoEmail(prev.participants, review.participants)
     : prev.participants;
@@ -915,6 +1077,11 @@ function applyDraftUpdate(ctx, prev, review) {
     // direct read is correct. (Contrast all_day above: an explicit false is "turn off", so
     // it keeps `?? prev` to distinguish that from "not mentioned".)
     recurrence: review.recurrence,
+    // DIRECT, same contract as recurrence: the model ECHOES the current location/virtual on
+    // every non-location modify and returns location:null only to CLEAR, so a direct read is
+    // correct. normalizeLocation (inside draftFromInfo) re-applies the XOR.
+    location: review.location,
+    virtual: review.virtual,
   });
 }
 
@@ -985,7 +1152,7 @@ const normName = (s) => String(s || "").trim().toLowerCase();
 // ("not Laura, Ana") from inviting BOTH — createEvent runs sendUpdates:"all", so an
 // appended Laura is a real invite emailed to someone the owner removed.
 // patch.participants === null still means "no information" → keep the previous list.
-function mergeDraft(ctx, prev, patch) {
+export function mergeDraft(ctx, prev, patch) {
   if (!patch) return prev;
   let participants = prev.participants.map((p) => ({ ...p }));
 
@@ -1033,6 +1200,11 @@ function mergeDraft(ctx, prev, patch) {
     // the repeat rule, so without this line the recurrence is silently dropped on every
     // gathering merge.
     recurrence: prev.recurrence,
+    // Carried from prev, same reason: the resolver never touches the place (edge #11), so
+    // without these two lines location/virtual are silently dropped on every gathering merge —
+    // exactly as all_day / recurrence are carried above.
+    location: prev.location,
+    virtual: prev.virtual,
   });
 }
 
@@ -1128,6 +1300,8 @@ function eventForLLM(ev) {
   const end = all_day ? null : ev.end?.dateTime || null;
   const duration_min =
     start_iso && end ? Math.round((new Date(end) - new Date(start_iso)) / 60000) : null;
+  // The current place, so the edit model sees what it is changing FROM.
+  const { location, virtual } = locationFromEvent(ev);
   return {
     title: ev.summary || "",
     start_iso,
@@ -1136,6 +1310,8 @@ function eventForLLM(ev) {
     all_day,
     all_day_end_iso,
     attendees: (ev.attendees || []).map((a) => a.email).filter(Boolean),
+    location,
+    virtual,
   };
 }
 
@@ -1148,11 +1324,14 @@ function eventForLLM(ev) {
 // `duration_min` falls back to 45 for an all-day event. That is not a guess about the
 // event: it is the default length used only IF the owner converts it to a timed one
 // ("na verdade é às 10h") without stating a length — exactly the create default.
-function editDraftFromEvent(ev) {
+export function editDraftFromEvent(ev) {
   const { all_day, start_iso, all_day_end_iso } = allDayFromEvent(ev);
   const end = all_day ? null : ev.end?.dateTime || null;
   const duration_min =
     start_iso && end ? Math.round((new Date(end) - new Date(start_iso)) / 60000) : 45;
+  // Seed the current place from the event, and notify:false — the per-write notify signal is
+  // set true only when the model reports an explicit "let the guests know" (applyPatchToDraft).
+  const { location, virtual } = locationFromEvent(ev);
   return {
     title: ev.summary || "",
     start_iso,
@@ -1161,6 +1340,9 @@ function editDraftFromEvent(ev) {
     all_day_end_iso,
     summary: ev.description || "",
     emails: (ev.attendees || []).map((a) => a.email).filter(Boolean),
+    location,
+    virtual,
+    notify: false,
   };
 }
 
@@ -1170,7 +1352,7 @@ function editDraftFromEvent(ev) {
 // `new_all_day === true` is a change ON ITS OWN — "na verdade é o dia todo" says nothing
 // else, and without this it was answered with "não consegui entender o que mudar". So is a
 // new range end. `new_all_day === false` is NOT: see THE RULE below.
-function hasEditChange(p) {
+export function hasEditChange(p) {
   return !!(
     p.new_start_iso ||
     Number(p.new_duration_min) > 0 ||
@@ -1179,7 +1361,12 @@ function hasEditChange(p) {
     p.new_all_day === true ||
     p.new_all_day_end_iso ||
     (Array.isArray(p.add_emails) && p.add_emails.length) ||
-    (Array.isArray(p.remove_emails) && p.remove_emails.length)
+    (Array.isArray(p.remove_emails) && p.remove_emails.length) ||
+    // A location change counts: a new address, switching to a Meet, or clearing the place.
+    // `notify_guests` alone is NOT a change — it only steers who is emailed about a real one.
+    (typeof p.new_location === "string" && p.new_location.trim()) ||
+    p.new_virtual === true ||
+    p.remove_location === true
   );
 }
 
@@ -1193,7 +1380,7 @@ function hasEditChange(p) {
 // re-entering through the front door. Turning all-day OFF means GIVING the event a time
 // ("na verdade é às 10h") — always. So a bare `false` is IGNORED. `true` and a new range
 // end are honoured on their own. Enforced HERE, in code, not in prompt hope.
-function applyPatchToDraft(draft, patch) {
+export function applyPatchToDraft(draft, patch) {
   const d = { ...draft, emails: [...draft.emails] };
   if (patch.new_title) d.title = patch.new_title;
   if (typeof patch.new_summary === "string" && patch.new_summary.trim())
@@ -1220,6 +1407,30 @@ function applyPatchToDraft(draft, patch) {
       have.add(e.toLowerCase());
     }
   }
+
+  // LOCATION — XOR + THE-RULE discipline (mirrors new_all_day). new_virtual:true makes it a
+  // Meet, dropping any address; else a non-empty new_location makes it physical, dropping any
+  // Meet; else remove_location clears BOTH. A BARE new_virtual:false is IGNORED — turning video
+  // off means GIVING the event an address (via new_location), exactly as new_all_day:false
+  // needs a time. normalizeLocation then re-applies the XOR, once.
+  if (patch.new_virtual === true) {
+    d.virtual = true;
+    d.location = null;
+  } else if (typeof patch.new_location === "string" && patch.new_location.trim()) {
+    d.location = patch.new_location;
+    d.virtual = false;
+  } else if (patch.remove_location === true) {
+    d.location = null;
+    d.virtual = false;
+  }
+  const loc = normalizeLocation(d.location, d.virtual);
+  d.location = loc.location;
+  d.virtual = loc.virtual;
+
+  // notify is STICKY across the edit's refinements: once the owner asks to let the guests know,
+  // it stays on. Set true ONLY on an explicit request (resolveSendUpdates reads it).
+  if (patch.notify_guests === true) d.notify = true;
+
   return d;
 }
 
@@ -1239,6 +1450,9 @@ function draftAsEventJson(d) {
     all_day: !!d.all_day,
     all_day_end_iso: d.all_day_end_iso || null,
     attendees: d.emails,
+    // The proposed place, so the edit-review model judges refinements against the target.
+    location: d.location,
+    virtual: !!d.virtual,
   });
 }
 
@@ -1307,8 +1521,10 @@ async function reviewEdit(ctx, draft) {
 
 // Open (or refresh) the confirm session holding the draft, and show the target state.
 // The owner's next plain message resumes via resumeEditConfirm. 10-min window.
-async function openEditConfirm(ctx, eventId, draft) {
+async function openEditConfirm(ctx, eventId, draft, base) {
   const { number, send, sessions, remoteJid } = ctx;
+  // `base` (the event's CURRENT state, editDraftFromEvent(ev)) rides the session so the notify
+  // decision survives the confirm round-trip — resumeEditConfirm reads it back and re-passes it.
   await sessions.set(
     remoteJid,
     {
@@ -1317,10 +1533,13 @@ async function openEditConfirm(ctx, eventId, draft) {
       stage: "await_confirmation",
       awaitFrom: "owner", // only the owner approves changes to their event
       lang: ctx.lang,
-      data: { eventId, draft },
+      data: { eventId, draft, base },
     },
     600
   );
+  // Preview whether the guests will be emailed (Nit A) so the bubble tells the truth: a silent
+  // location-only edit says "I won't notify"; a substantive one keeps "notify everyone".
+  const willNotify = resolveSendUpdates(draft, base) === "all";
   await send(
     number,
     reply(ctx.lang).editConfirm({
@@ -1330,6 +1549,9 @@ async function openEditConfirm(ctx, eventId, draft) {
       // an all-day event has no duration to state. Identical to openCreateConfirm.
       when: localizeWhen(ctx.lang, draft),
       duration: draft.all_day ? null : draft.duration_min,
+      location: draft.location,
+      virtual: draft.virtual,
+      notifyGuests: willNotify,
     })
   );
 }
@@ -1364,7 +1586,17 @@ async function applyEditDraft(ctx, eventId, draft, ev) {
     fields.end = { dateTime: endIso, timeZone: CAL_TZ };
   }
 
-  const updated = await updateEvent(env, eventId, ev, fields);
+  // The location/conference fields, computed against the event's CURRENT place (base). This is
+  // where the conditional conferenceDataVersion (Nit C) and Meet-clear (Nit D) come from. The
+  // Meet requestId seed is the eventId — deterministic and idempotent per Google.
+  const base = editDraftFromEvent(ev);
+  const { fields: locFields, conferenceVersion } = locationUpdateFields(draft, base, eventId);
+  Object.assign(fields, locFields);
+
+  // Nit A: notify the guests only when something substantive changed, or the owner asked. A
+  // silent location-only edit passes sendUpdates:"none".
+  const sendUpdates = resolveSendUpdates(draft, base);
+  const updated = await updateEvent(env, eventId, ev, fields, sendUpdates, conferenceVersion);
 
   // Rendered from the DRAFT, not by reading `updated.start.dateTime` back — which is null
   // for an all-day event, and is where "(sem horário)" came from.
@@ -1376,6 +1608,12 @@ async function applyEditDraft(ctx, eventId, draft, ev) {
       when: localizeWhen(ctx.lang, draft),
       duration: all_day ? null : draft.duration_min,
       link: updated.htmlLink || ev.htmlLink || "",
+      // The location line renders from the draft; the Meet link is read back from the updated
+      // event (may still be provisioning — edge #8), with the htmlLink above as the fallback.
+      location: draft.location,
+      virtual: draft.virtual,
+      meetLink: meetLinkOf(updated),
+      notified: sendUpdates === "all",
     })
   );
 }
@@ -1457,9 +1695,11 @@ async function handleEdit(ctx, info) {
     return;
   }
 
-  // Confirm-first: fold the change into a draft and ask before writing anything.
-  const draft = applyPatchToDraft(editDraftFromEvent(ev), patch);
-  await openEditConfirm(ctx, eventId, draft);
+  // Confirm-first: fold the change into a draft and ask before writing anything. `base` is the
+  // event's current state — the notify decision (Nit A) is computed against it.
+  const base = editDraftFromEvent(ev);
+  const draft = applyPatchToDraft(base, patch);
+  await openEditConfirm(ctx, eventId, draft, base);
 }
 
 // Resume a pending edit CLARIFICATION (the first request was ambiguous). Re-inspect the
@@ -1494,8 +1734,9 @@ async function resumeEditClarify(ctx, session) {
   }
   if (!patch || !hasEditChange(patch)) return; // still ambiguous / chatter — wait
 
-  const draft = applyPatchToDraft(editDraftFromEvent(ev), patch);
-  await openEditConfirm(ctx, eventId, draft);
+  const base = editDraftFromEvent(ev);
+  const draft = applyPatchToDraft(base, patch);
+  await openEditConfirm(ctx, eventId, draft, base);
 }
 
 // Resume a pending edit CONFIRMATION. Runs for every owner message while open: one
@@ -1503,7 +1744,7 @@ async function resumeEditClarify(ctx, session) {
 // multiple refinements; silent on chatter; writes to Google only on "yes".
 async function resumeEditConfirm(ctx, session) {
   const { number, env, send, sessions, remoteJid } = ctx;
-  const { eventId, draft } = session.data || {};
+  const { eventId, draft, base } = session.data || {};
   if (!eventId || !draft) {
     await sessions.clear(remoteJid);
     return;
@@ -1519,15 +1760,16 @@ async function resumeEditConfirm(ctx, session) {
   }
 
   if (review.decision === "modify") {
-    // Ambiguous further change → ask and keep the session (draft unchanged).
+    // Ambiguous further change → ask and keep the session (draft unchanged). `base` (the
+    // event's current state) rides through so resolveSendUpdates still has its seed.
     if (!hasEditChange(review) && review.clarify) {
-      await openEditConfirm(ctx, eventId, draft); // refresh TTL, keep draft
+      await openEditConfirm(ctx, eventId, draft, base); // refresh TTL, keep draft
       await send(number, reply(ctx.lang).editClarify(review.clarify));
       return;
     }
     if (!hasEditChange(review)) return; // nothing new resolved — stay silent
     const updated = applyPatchToDraft(draft, review);
-    await openEditConfirm(ctx, eventId, updated); // re-show the revised draft, keep open
+    await openEditConfirm(ctx, eventId, updated, base); // re-show the revised draft, keep open
     return;
   }
 

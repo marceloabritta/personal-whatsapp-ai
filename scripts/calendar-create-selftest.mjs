@@ -479,6 +479,12 @@ const cal = (o) =>
     range_start_iso: null,
     range_end_iso: null,
     recurrence: null,
+    // Card 2b586a24 (location physical/virtual). Same maintenance all_day/recurrence did above:
+    // a new DECLARED manifest.inputs field must be PRESENT in the merged fixture or lib/inputs
+    // rejects the payload as shape-invalid and the flow falls back to an unscripted interpret().
+    // Both default null (no location), so every scenario above is untouched; overrides can set them.
+    location: null,
+    virtual: null,
     ...o,
   });
 const resolve_ = (o) =>
