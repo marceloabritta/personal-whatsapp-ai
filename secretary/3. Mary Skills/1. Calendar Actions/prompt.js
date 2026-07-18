@@ -111,8 +111,8 @@ range_end_iso=null.`;
 
 const REPLY_TZ = "America/Sao_Paulo";
 
-// Localized date/time for USER-FACING strings. Always hh:mm AM/PM and a 3-letter month; the
-// locale sets the day/month ORDER. São Paulo, no seconds.
+// Localized date/time for USER-FACING strings. Bare, zero-padded 24-hour time (HH:MM, no
+// AM/PM) and a 3-letter month; the locale sets the day/month ORDER. São Paulo, no seconds.
 export function localizeDate(lang, dateTime) {
   if (!dateTime) return lang === "pt" ? "(sem horário)" : "(no time)";
   const locale = lang === "pt" ? "pt-BR" : "en-US";
@@ -121,9 +121,9 @@ export function localizeDate(lang, dateTime) {
     year: "numeric",
     month: "short",
     day: "numeric",
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
-    hour12: true, // always AM/PM
+    hour12: false, // bare 24-hour, no AM/PM
   });
 }
 
@@ -158,14 +158,15 @@ function joinListPt(items) {
 }
 
 // ---- LIST (read-only) render helpers ----------------------------------------
-// Time-only (hh:mm AM/PM) in the reply TZ — used for event lines inside a single-day window.
-function localizeTime(lang, dateTime) {
+// Time-only (bare, zero-padded 24-hour HH:MM, no AM/PM) in the reply TZ — used for event
+// lines inside a single-day window.
+export function localizeTime(lang, dateTime) {
   if (!dateTime) return "";
   return new Date(dateTime).toLocaleTimeString(lang === "pt" ? "pt-BR" : "en-US", {
     timeZone: REPLY_TZ,
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
+    hour12: false,
   });
 }
 

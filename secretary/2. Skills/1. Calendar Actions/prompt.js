@@ -516,10 +516,10 @@ ${OWNER_NAME}'s order: ${order}`;
 
 const REPLY_TZ = "America/Sao_Paulo";
 
-// Localized date/time for USER-FACING strings. Always hh:mm AM/PM and a 3-letter
-// month; the locale sets the day/month ORDER — en-US "Jul 5, 2026, 2:30 PM"
-// (month-day), pt-BR "5 de jul. de 2026, 2:30 PM" (day-month). São Paulo, no
-// seconds. (The LLM-facing nowStr in server.js stays en.)
+// Localized date/time for USER-FACING strings. Bare, zero-padded 24-hour time
+// (HH:MM, no AM/PM) and a 3-letter month; the locale sets the day/month ORDER —
+// en-US "Jul 5, 2026, 15:00" (month-day), pt-BR "5 de jul. de 2026, 15:00"
+// (day-month). São Paulo, no seconds. (The LLM-facing nowStr in server.js stays en.)
 export function localizeDate(lang, dateTime) {
   if (!dateTime) return lang === "pt" ? "(sem horário)" : "(no time)";
   const locale = lang === "pt" ? "pt-BR" : "en-US";
@@ -528,14 +528,14 @@ export function localizeDate(lang, dateTime) {
     year: "numeric",
     month: "short",
     day: "numeric",
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
-    hour12: true, // always AM/PM
+    hour12: false, // bare 24-hour, no AM/PM
   });
 }
 
 // The WHEN-line of a create draft, from the draft itself. Three shapes:
-//   timed          -> "14 de jul. de 2026, 10:00 AM"        (localizeDate, unchanged)
+//   timed          -> "14 de jul. de 2026, 10:00"           (localizeDate, unchanged)
 //   all-day, 1 day -> "14 de jul. de 2026 · Dia todo"
 //   all-day range  -> "13 de jul. de 2026 – 15 de jul. de 2026 · Dia todo (3 dias)"
 // Both endpoints are INCLUSIVE (the last day the event still covers) and the DAY COUNT is
@@ -571,15 +571,15 @@ function joinListPt(items) {
 }
 
 // ---- LIST (read-only) render helpers ----------------------------------------
-// Time-only (hh:mm AM/PM) in the reply TZ — used for event lines inside a single-day
-// window, where the header already states the date.
-function localizeTime(lang, dateTime) {
+// Time-only (bare, zero-padded 24-hour HH:MM, no AM/PM) in the reply TZ — used for
+// event lines inside a single-day window, where the header already states the date.
+export function localizeTime(lang, dateTime) {
   if (!dateTime) return "";
   return new Date(dateTime).toLocaleTimeString(lang === "pt" ? "pt-BR" : "en-US", {
     timeZone: REPLY_TZ,
-    hour: "numeric",
+    hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
+    hour12: false,
   });
 }
 
