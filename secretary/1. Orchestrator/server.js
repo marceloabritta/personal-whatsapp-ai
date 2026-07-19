@@ -33,6 +33,8 @@ import { createEvolution } from "./lib/evolution.js";
 import {
   extractText,
   getQuoted,
+  inboundMedia,
+  mediaBlockFor,
   remember,
   combine,
   buildTranscript,
@@ -93,6 +95,13 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 // Cheap model for the long-tail translation fallback (see localizeBody).
 const TRANSLATE_MODEL =
   process.env.TRANSLATE_MODEL || "claude-haiku-4-5-20251001";
+// The model pinned for a file-carrying @mary turn (see the media-prep block + router route()).
+// Independent of CLAUDE_MODEL so the droplet's model choice never disables vision/PDF reading.
+// claude-haiku-4-5 also supports vision + PDF if a cheaper pin is wanted.
+const VISION_MODEL = process.env.VISION_MODEL || "claude-sonnet-5";
+const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // Anthropic per-image cap (~5 MB)
+const PDF_MAX_BYTES = 32 * 1024 * 1024; // Anthropic per-request PDF cap (32 MB)
+const MAX_FILES_PER_TURN = 10; // per-turn file cap (a real turn holds 2–3; 10 is hostile-payload headroom)
 const OWNER_NAME = process.env.OWNER_NAME || "User";
 // Languages the secretary writes natively (skills carry en/pt maps). Any other
 // detected language is handled by the LLM-translation fallback in send().
@@ -262,6 +271,25 @@ const ORCH_MSG = {
     en: () => "I couldn't get that right after a couple of tries. Can you tell me again, more simply?",
     pt: () => "Não consegui acertar isso depois de algumas tentativas. Pode me dizer de novo, de forma mais simples?",
   },
+  // Inbound-media plumbing notices (the orchestrator's OWN, like turnCap/dispatchCap — sent via
+  // the bare send(), NOT ctx.send; informational, so NOT *Failed/*Error keys). One per distinct
+  // reason a file could not be relayed on a @mary turn.
+  fileDownloadFailed: {
+    en: () => "I couldn't open that file — try sending it again.",
+    pt: () => "Não consegui abrir esse arquivo — tente enviar de novo.",
+  },
+  fileTooLarge: {
+    en: () => "That file is too big for me to read. Can you send a smaller one, or a screenshot?",
+    pt: () => "Esse arquivo é grande demais para eu ler. Pode mandar um menor, ou um print?",
+  },
+  fileTooMany: {
+    en: () => "That's a lot of files at once — send me a few at a time and I'll read them.",
+    pt: () => "São muitos arquivos de uma vez — me mande alguns por vez que eu leio.",
+  },
+  fileUnsupported: {
+    en: () => "I can only read images and PDFs right now — send it as one of those and I'll read it.",
+    pt: () => "Por enquanto só consigo ler imagens e PDFs — me manda assim que eu leio.",
+  },
   // Flag (a): a second, converted skill was asked for alongside the first but cannot run in a
   // batch. The first thing was done; ask him to re-send the other part on its own.
   dispatchSkipped: {
@@ -362,6 +390,13 @@ app.post("/webhook", async (req, res) => {
 
     const quoted = getQuoted(data); // { id, hasAudio, mediaType, text, calendarLink } | null
 
+    // The turn's inbound media LIST (attachment first, then quote) — computed ONCE, consumed by
+    // both the gate-open below and the media-prep block before the @mary turn loop. [] when none.
+    const files = inboundMedia(data, quoted);
+    // The direct attachment's caption ("" for a quote / none). A captioned document has text==""
+    // (extractText has no document branch), so its tag+order ride the caption, not `text`.
+    const attachmentCaption = files.find((m) => m.source === "attachment")?.caption || "";
+
     // Never react to the secretary's OWN messages. They arrive with fromMe=true
     // (same account as the owner), so this header check is the ONLY thing telling
     // them apart from a genuine owner message — it must match every header variant
@@ -376,8 +411,13 @@ app.post("/webhook", async (req, res) => {
     // flow. `tag` is the tag this message actually starts with (or null) — used below to slice it
     // off. If a message somehow matched BOTH lists (they are meant to be disjoint), the LEGACY
     // flow wins, so @assistant is never starved by a NEW-flow tag collision.
+    // The NEW-flow matcher also sees an attachment caption, so a captioned document (whose `text`
+    // is "") can open the @mary gate on its caption. The LEGACY matcher keeps seeing `text` only —
+    // byte-identical to HEAD. For a captioned image, text already carries the caption, so
+    // gateText === text and nothing changes on that path either.
+    const gateText = text || attachmentCaption;
     const legacyTag = fromMe ? matchedTag(text) : null;
-    const newTag = fromMe ? matchedTagNew(text) : null;
+    const newTag = fromMe ? matchedTagNew(gateText) : null;
     const taggedNew = !!newTag && !legacyTag; // a fresh NEW-flow order
     const tag = taggedNew ? newTag : legacyTag;
     const isTagged = !!tag;
@@ -416,8 +456,17 @@ app.post("/webhook", async (req, res) => {
     const useNewFlow = isTagged ? taggedNew : !session?.skill;
     const flow = useNewFlow ? NEW_FLOW : LEGACY_FLOW;
 
-    // Slice off the matched tag by ITS own length (tags can differ in length).
-    const order = isTagged ? text.slice(tag.length).trim() : text.trim();
+    // Slice off the matched tag by ITS own length (tags can differ in length). NEW flow only:
+    // source the order from the attachment caption so a caption-borne instruction reaches the model
+    // on BOTH the first (tagged) turn AND a mid-session (untagged) continuation of a captioned
+    // document — whose `text` is "" (Amendment). The LEGACY branch is byte-identical to HEAD.
+    const order = useNewFlow
+      ? isTagged
+        ? gateText.slice(tag.length).trim() // first message, tagged caption -> POST-TAG instruction
+        : text.trim() || attachmentCaption.trim() // mid-session continuation -> caption if text empty
+      : isTagged
+      ? text.slice(tag.length).trim()
+      : text.trim(); // LEGACY — byte-identical to HEAD
     const number = remoteJid.split("@")[0]; // reply in the originating chat
 
     // Conversation context (Evolution history + in-memory buffer).
@@ -592,6 +641,68 @@ app.post("/webhook", async (req, res) => {
       if (cur && cur.skill) return; // a skill owns the key now — leave it alone
       await sessions.clear(remoteJid);
     };
+
+    // ---- MEDIA PREP (before the turn loop) ----------------------------------------------------
+    // Relay any inbound media on THIS turn to the turn call as Anthropic multimodal content.
+    // Prepared ONCE here and carried on ctx.media for the whole webhook; route() attaches it on
+    // every turn that is not a read-back. ctx.media stays null on a text-only turn (byte-identical).
+    ctx.media = null;
+    if (files.length) {
+      if (files.length > MAX_FILES_PER_TURN) {
+        // Edge 7: reject the whole turn's media rather than silently truncating.
+        await send(number, orch(ctx.lang, "fileTooMany"), ctx.lang);
+        await closeMarker();
+        return;
+      }
+      const relayedBlocks = [];
+      const problems = new Set(); // fileDownloadFailed | fileTooLarge | fileUnsupported
+      for (const f of files) {
+        // Unsupported types short-circuit WITHOUT downloading, where the mediaType alone decides.
+        if (f.mediaType !== "image" && f.mediaType !== "document") {
+          problems.add("fileUnsupported");
+          continue;
+        }
+        let dl;
+        try {
+          dl = await evolution.getMediaBase64(f.id); // { base64, mimetype: real || "audio/ogg" }
+        } catch (e) {
+          console.error("media download failed:", e?.message || e);
+          problems.add("fileDownloadFailed");
+          continue;
+        }
+        if (!dl?.base64) {
+          problems.add("fileDownloadFailed");
+          continue;
+        }
+        const bytes = Buffer.byteLength(dl.base64, "base64");
+        const cap = f.mediaType === "image" ? IMAGE_MAX_BYTES : PDF_MAX_BYTES;
+        if (bytes > cap) {
+          problems.add("fileTooLarge");
+          continue;
+        }
+        // PREFER the real webhook mime; fall back to the download's. mediaBlockFor validates it
+        // against the allow-list, so getMediaBase64's "audio/ogg" default can never become an
+        // image/PDF block — it is rejected to fileUnsupported, never trusted.
+        const mime = f.mimetype || dl.mimetype;
+        const block = mediaBlockFor({ mediaType: f.mediaType, mimetype: mime, base64: dl.base64 });
+        if (!block) {
+          problems.add("fileUnsupported"); // non-pdf doc, or audio/ogg leaking onto an image
+          continue;
+        }
+        relayedBlocks.push(block);
+      }
+      // Consolidated notes: one per distinct reason, fixed order, each at most once (Edge 5 — name
+      // what couldn't be read; never silently drop). Realistic turns hit exactly one.
+      for (const key of ["fileDownloadFailed", "fileTooLarge", "fileUnsupported"]) {
+        if (problems.has(key)) await send(number, orch(ctx.lang, key), ctx.lang);
+      }
+      if (relayedBlocks.length === 0) {
+        // Edge 6: nothing readable -> notes already sent, stop without routing.
+        await closeMarker();
+        return;
+      }
+      ctx.media = { blocks: relayedBlocks, model: VISION_MODEL };
+    }
 
     // State that rides between turns of THIS webhook only.
     let pendingReadback = null; // { result, said } after a successful CONVERTED dispatch

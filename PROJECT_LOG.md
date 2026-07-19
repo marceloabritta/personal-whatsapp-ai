@@ -511,6 +511,29 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-18 — feat(@mary): generalized inbound-media relay in stateful conversations.** `@mary`
+  now **reads files attached in the conversation** — detect any attachment on every turn (first /
+  mid-session / quoted), relay all supported files to the turn call as **N multimodal content
+  blocks** (images + PDFs ship now), open the gate on a **captioned PDF** (its caption carries the
+  tag+order since `extractText` has no document branch), an **extension point** (`mediaBlockFor`) for
+  future types with a graceful defer (docx/xlsx/video → a localized "can't read that yet"), a
+  **vision-model pin** (`VISION_MODEL`, default `claude-sonnet-5`, independent of `CLAUDE_MODEL`), and
+  **per-file (5 MB image / 32 MB PDF) + per-turn (10-file) caps** with consolidated failure notes.
+  **Authorized additive rails change:** two new `lib/whatsapp.js` exports (`inboundMedia`,
+  `mediaBlockFor` — `extractText`/`getQuoted` byte-identical), one new `ctx` field (`ctx.media =
+  {blocks, model}`, `null` on every text-only turn), `route()`'s content string → N-block array +
+  model pin **only** when `ctx.media` is present and the turn is not a read-back (byte-identical
+  otherwise), one conditional model-facing line in `buildRouterUser` (`hasMedia`), and four new
+  en+pt `ORCH_MSG` plumbing keys (`fileDownloadFailed`/`fileTooLarge`/`fileTooMany`/
+  `fileUnsupported`). **Audio is NOT relayed** — `inboundMedia` omits audio from the media list (a
+  direct `audioMessage` attachment AND a quoted voice note), so a "reply to a voice note, @mary
+  transcribe" turn is **not** intercepted by the relay and reaches `transcribe_audio` via normal
+  routing (`ctx.hasQuotedAudio`, left untouched). `transcribe_audio` unchanged. Pinned offline by
+  `scripts/file-relay-selftest.mjs` (23 assertions: detector list on both webhook shapes + multi-file,
+  **audio-exclusion (quoted + direct)**, extension-point native/defer, `extractText` byte-identity,
+  `route()` array-vs-string + model pin + read-back/repair). **Editing `router/prompt.js` requires the live router self-test** (real money,
+  human-run). No new skill, no `manifest.description` change, no new dependency, no store migration.
+  `@assistant` (legacy) is byte-for-byte unchanged.
 - **2026-07-18 — feat(calendar): location for meetings (physical or virtual).** `@assistant`'s
   `calendar_action` create and edit now attach a **place**: a **verbatim physical address** (never
   looked up or reformatted) or a **Google Meet** video call — **physical XOR virtual**, enforced in

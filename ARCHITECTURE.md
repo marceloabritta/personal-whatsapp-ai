@@ -54,6 +54,18 @@ webhook → filter → build context ─┤
   makes deliberate silence free, and runs a **repair loop** (a payload that fails validation is
   re-prompted with `buildRepairUser`, which invites a corrected execute — NOT a dispatch).
 
+  **Inbound media (card cf60f344).** A `@mary` turn that carries files (a receipt, an invoice) now
+  relays them to `route()` as Anthropic **multimodal content**, interpreted on the turn they arrive.
+  `inboundMedia(data, quoted)` (`lib/whatsapp.js`) detects the turn's media **LIST** (attachment +
+  quoted file, both documented webhook shapes); `mediaBlockFor({mediaType,mimetype,base64})` is the
+  **extension point** — one "supported? → native block, or defer" decision plus two native handlers
+  (image, PDF); everything else returns `null` (a localized "can't read that yet"), and a future
+  format is a single new branch here. The orchestrator downloads each file (per-file + per-turn
+  caps), builds `ctx.media = { blocks, model: VISION_MODEL }`, and `route()`'s turn call becomes an
+  **N-block content array (media before text) with the vision model pinned** whenever `ctx.media` is
+  present and the turn is not a read-back — otherwise the call is the byte-identical text-only
+  string. `ctx.media` is the one additive `ctx` field and is `null` on every text-only turn.
+
 **The isolation is structural and load-bearing.** The two flows share only the invariant rails
 (message I/O, sessions, formatting, the wrapped Anthropic client, self-learning). They do **not**
 share the router, the input contract, `assistant_settings`, or — as of 2026-07-15 — **the skill
@@ -462,6 +474,7 @@ still live in the others. Reach for them before writing your own:
 | `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
 | `identity.js` | `headerFor`, `TAGS`, `isOwnMessage`, `matchedTag` | The trigger tags and the reply header. |
+| `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image (jpeg/png/gif/webp) → an image block, document (pdf) → a document block, everything else → `null` (defer). A new file type is one new branch here + its converter — no other rails change. `media_type` comes from the real mime, never trusted from a default. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
 | `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
 | `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |

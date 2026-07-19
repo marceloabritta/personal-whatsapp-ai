@@ -88,6 +88,7 @@ export async function route(ctx, turn = {}) {
     quoted,
     catalog,
     tags,
+    media,
   } = ctx;
   const valid = new Set([...(catalog || []).map((c) => c.id), "other"]);
 
@@ -122,16 +123,33 @@ export async function route(ctx, turn = {}) {
         nowStr,
         contact,
         quotedText: quoted?.text || null,
+        hasMedia: !!media,
       });
+
+  // media present AND not a read-back -> attach the N file blocks and pin the vision model.
+  // A read-back re-reads a dispatch result and carries NO file (Edge 15); a REPAIR does
+  // (turn.repair is not turn.readback), so a corrected re-read of a receipt still sees it.
+  const mediaBlocks = media && !turn.readback ? media.blocks : null;
+  // NIT (a): never emit an empty/whitespace text block beside media (the Messages API can 400).
+  // `user` is the buildRouterUser render and is never empty in practice — but guard explicitly:
+  // with media, include the text block only when `user` has content; otherwise send media-only.
+  const content = mediaBlocks
+    ? user && user.trim()
+      ? [...mediaBlocks, { type: "text", text: user }]
+      : [...mediaBlocks]
+    : user; // no media -> byte-identical string (Decision 8)
+  // NIT (c): pin the vision model by reading media.model HERE — the only place the create call's
+  // model is chosen. No media -> byte-identical ctx.model.
+  const useModel = mediaBlocks ? media.model : model;
 
   // 1024, not 200: the reply now carries a payload as well as a classification (measured
   // median output: 169 tokens). With thinking disabled the budget can no longer be eaten by
   // reasoning, which is what makes this safe — and is why the thinking fix ships first.
   const msg = await anthropic.messages.create({
-    model,
+    model: useModel,
     max_tokens: 1024,
     system,
-    messages: [{ role: "user", content: user }],
+    messages: [{ role: "user", content }],
   });
 
   let parsed = null;

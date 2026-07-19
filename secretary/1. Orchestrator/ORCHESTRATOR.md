@@ -254,6 +254,58 @@ threw — the orchestrator stays **silent**, because the skill already wrote and
 gains only a redundant explicit `conversation: "skill"` line (except Feature Requests, whose absent
 declaration correctly defaults to `"skill"`).
 
+### Inbound media relay (card cf60f344) — files reach the turn call as multimodal content
+
+A `@mary` turn that carries files (a receipt, an invoice) relays them to the turn call as Anthropic
+**multimodal content**, interpreted **on the turn they arrive** — no cross-turn persistence.
+
+- **Detection — `inboundMedia(data, quoted)` (`lib/whatsapp.js`).** At intake (step 4) it returns
+  the turn's media **LIST** (attachment first, then the quoted file). It handles **both** documented
+  webhook shapes defensively — bare `documentMessage` and the `documentWithCaptionMessage` wrapper —
+  and always reads the media id from `data.key.id`. `video` is detected only so it can be
+  **deferred**, never relayed. **`audio` is NOT relayed at all — it is OMITTED from the media list**
+  (neither a direct `audioMessage` attachment nor a quoted audio produces an entry). The AI can't
+  take audio natively; audio is handled by `transcribe_audio` via **normal routing**
+  (`ctx.hasQuotedAudio`, which this detector leaves untouched), never intercepted by the relay — so
+  replying to a voice note still reaches `transcribe_audio`.
+- **Gate open (captioned document).** A captioned document's `text` is `""` (`extractText` has no
+  document branch), so the `@mary` tag matcher and the order derivation also read the **attachment
+  caption** (a `gateText`/`attachmentCaption` local, **new flow only** — the legacy matcher and
+  order are byte-identical). This lets a captioned PDF *start* the flow and carries its caption
+  instruction as the order on both the first (tagged) turn and a mid-session (untagged)
+  continuation.
+- **The extension point — `mediaBlockFor({ mediaType, mimetype, base64 })` (`lib/whatsapp.js`).**
+  The single "is this type supported? → native block, or defer" decision, plus the two ship-now
+  native handlers: **image** (`image/jpeg|png|gif|webp`) → an `image` block; **document**
+  (`application/pdf`) → a `document` block; **everything else → `null`** (deferred). `media_type`
+  comes from the **real** mime, never a hard-coded default, so `getMediaBase64`'s `audio/ogg`
+  fallback can never be trusted onto an image/PDF block. **A future file type is added HERE (one new
+  branch) + its converter — no other rails file changes.** *Audio is the exception:* it is **not**
+  relayed and does **not** flow through `mediaBlockFor` — `inboundMedia` omits it from the media list
+  entirely, so the sibling audio-input card handles audio through the **skill/routing path**
+  (`transcribe_audio`), not this relay.
+- **Media prep (before the turn loop, `server.js`).** Enforce `MAX_FILES_PER_TURN` (10; over it →
+  `fileTooMany` and close). For each file: download via `evolution.getMediaBase64`, enforce the
+  per-file byte cap (`IMAGE_MAX_BYTES` 5 MB / `PDF_MAX_BYTES` 32 MB), then route through
+  `mediaBlockFor`. Per-file failures accumulate into **one consolidated note per distinct reason**
+  (`fileDownloadFailed` / `fileTooLarge` / `fileUnsupported`, fixed order, each at most once — never
+  a silent drop). If **nothing** is readable, the notes are sent and the turn closes without routing.
+  Otherwise `ctx.media = { blocks, model: VISION_MODEL }`.
+- **The turn call — `route()` (`router/router.js`).** When `ctx.media` is present **and the turn is
+  not a read-back**, `route()` builds an **N-block** `content` array (**media before text**, the
+  empty text block omitted) and pins the create call's model to `media.model`. A read-back carries
+  no file (Edge 15); a repair keeps the media. With no media, `content` is the byte-identical
+  `buildRouterUser` string and the model is `ctx.model`. `buildRouterUser` also gains one conditional
+  model-facing line when files are attached.
+- **The vision-model pin — `VISION_MODEL`** (env `VISION_MODEL`, default `claude-sonnet-5`;
+  `claude-haiku-4-5` also supports vision + PDF). A file-carrying turn uses this model **independent
+  of `CLAUDE_MODEL`**, so the droplet's model choice never disables file reading. Non-file turns are
+  unaffected.
+- **The four plumbing notices** — `fileDownloadFailed`, `fileTooLarge`, `fileTooMany`,
+  `fileUnsupported` — are new `ORCH_MSG` keys (`en`+`pt`), sent via the bare `send()`. They are the
+  orchestrator's own informational notices (the `turnCap`/`dispatchCap` category), **not**
+  `*Failed`/`*Error` failure replies.
+
 ### Dual-tag parallel run (@assistant = OLD, @mary = NEW) — temporary scaffolding
 
 The turn loop above does **not** replace the legacy dispatch in place. Both run in one process,

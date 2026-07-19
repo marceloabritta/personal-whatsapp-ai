@@ -61,6 +61,10 @@ summon:
                         skill) · DONE (close), and reads a skill's result back before closing.
 ```
 
+`@mary` can also **read images and PDFs attached in the conversation** — a receipt, an invoice —
+whether on the first message or as a reply to one, and use them as evidence for what you asked;
+other file types get a polite "can't read that yet."
+
 `@assistant` is the stable daily driver and is exactly the committed behaviour; `@mary` is the new
 system, tested live without touching `@assistant`. Each flow discovers its **own skill tree**:
 `@assistant` loads `secretary/2. Skills/` (each skill drives its own dialogue), and **`@mary` loads

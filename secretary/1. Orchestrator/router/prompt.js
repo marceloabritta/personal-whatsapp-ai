@@ -144,6 +144,7 @@ export function buildRouterUser(
     nowStr,
     contact,
     quotedText,
+    hasMedia,
   }
 ) {
   return `Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
@@ -156,7 +157,7 @@ Recent conversation:
 ${transcript || "(no history)"}
 
 ${ownerName}'s order: ${order}
-
+${hasMedia ? "One or more files (images and/or PDFs) are attached to this message. Read them and use them as the evidence for the order above.\n" : ""}
 Reply with the single JSON object described above, and nothing else.`;
 }
 
