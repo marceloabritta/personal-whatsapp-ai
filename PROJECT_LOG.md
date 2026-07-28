@@ -497,6 +497,17 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: @mary picks up a guest's inline email reply instead of ignoring it.**
+  The Calendar Actions missing-email rulebook (`3. Mary Skills/1. Calendar Actions/prompt.js`,
+  `buildExtractionRules`) hardcoded `awaitFrom="owner"` when asking for a guest's email and had
+  no branch for the guest answering inline, so a session left awaiting the owner dropped the
+  guest's untagged reply at the inbound gate (`server.js:346–356`) — the reply "just sat there"
+  until the owner nudged. Added a third branch: when the emailless guest is the person in this
+  chat, @mary asks THEM and replies `awaitFrom="contact"`, so the guest's inline reply passes
+  the gate and continues the booking. Owner-answers and book-without-invite branches unchanged.
+  No rails/gate change. Guard: `scripts/mary-calendar-guest-email-await-selftest.mjs` (offline;
+  model obedience confirmed by live check only). Migration-regression from the pure-task
+  skill-stack move (the old `awaitFrom:"any"` gathering window was flattened to `"owner"`).
 - **2026-07-28 — Retired the @assistant/@assistente flow — a single always-@mary flow now.**
   Deleted `1. Orchestrator/legacy/` (the frozen pre-migration router/prompt/inputs/assistant-settings)
   and the `2. Skills/` duplicate skill tree; collapsed the dual-tag routing gate in `server.js` to a

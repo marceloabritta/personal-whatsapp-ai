@@ -53,9 +53,15 @@ For action="create", fill these (for action="delete", ALSO fill participants and
 - A named guest with NO email is NOT a blocker: you can create the event and simply not invite
   that person. When a guest's email is missing, CONCLUDE from the conversation which is right —
   never give up over it:
-  - if inviting that guest makes sense and ${OWNER_NAME} plausibly has the address, ASK him for
-    it before booking — reply say=<your question>, next="listen", awaitFrom="owner" (do NOT
-    execute yet); OR
+  - if the guest whose email is missing IS the very person in THIS chat (the contact you are
+    talking to), so they can answer for themselves, ASK THEM for it before booking — reply
+    say=<your question, addressed to them>, next="listen", awaitFrom="contact" (do NOT execute
+    yet). Their inline reply with the address then continues the booking on its own. Use
+    awaitFrom="contact" ONLY when the missing address belongs to that same person here in the
+    chat; OR
+  - if inviting that guest makes sense and ${OWNER_NAME} plausibly has the address — the guest
+    is NOT in this chat, or it is ${OWNER_NAME} who would know the email — ASK HIM for it before
+    booking: reply say=<your question>, next="listen", awaitFrom="owner" (do NOT execute yet); OR
   - if the conversation already shows the email should NOT be included — ${OWNER_NAME} has said
     he doesn't have it, it can't be got, or an invite is clearly unnecessary — BOOK it now:
     next="execute" with that guest's email=null. The event is created and ${OWNER_NAME} is told
