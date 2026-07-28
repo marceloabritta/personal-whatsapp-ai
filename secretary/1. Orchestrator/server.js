@@ -643,10 +643,13 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (reply.next === "done") {
-        // A degraded/refusal close on the FIRST turn (nothing said, nothing to run, nothing yet
-        // dispatched) is "I didn't understand" — keep today's alarm. A later `done` (a read-back
-        // close, or "forget it") is an ordinary ending.
-        if (turnIndex === 0 && !thisTurnIsReadback && !reply.say && !reply.skills.length) {
+        // A DEGRADED close (the router refused or produced an unparseable reply — router.js sets
+        // reply.degraded) is the real schema-drift alarm: keep the "I didn't understand" menu AND
+        // the unrouted capture. A LEGITIMATE empty close has the SAME shape (say:null, skills:[])
+        // but is the model deliberately closing chit-chat / a no-op / an out-of-scope line
+        // (thanks, "deixa pra la", an emoji) — NOT a malfunction. Close it silently, capture
+        // nothing. (card 77cd6542)  reply.degraded implies say:null & skills:[].
+        if (reply.degraded && turnIndex === 0 && !thisTurnIsReadback) {
           const names = NEW_CATALOG.map((c) => c.id).join(", ");
           await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
           await closeMarker();
@@ -678,11 +681,13 @@ app.post("/webhook", async (req, res) => {
       const batch = [...new Set(reply.skills)];
       const dispatchable = batch.filter((s) => NEW_SKILLS[s]);
       if (!dispatchable.length) {
-        // Only "other" / unknown ids — the router ran fine and understood nothing. Today's path.
-        const names = NEW_CATALOG.map((c) => c.id).join(", ");
-        await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
+        // The model chose `execute` but named no dispatchable skill (only "other"/unknown ids —
+        // router.js forces an empty-skilled execute to ["other"]). A PARSED reply always: the
+        // degrade fallback returns next:"done", never "execute", so a genuine router malfunction
+        // can NEVER reach here. This is the model deciding nothing here is for it — close cleanly,
+        // no menu, no unrouted capture. The schema-drift alarm still fires on the degraded `done`
+        // path above. (card 77cd6542)
         await closeMarker();
-        await fireCapture(ctx, { phase: "unrouted", taskId: "router", unroutedOrder: ctx.order });
         return;
       }
 

@@ -497,6 +497,20 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: router no longer logs graceful chit-chat / no-op closes as `unrouted`
+  failures.** The orchestrator classified a first-turn *empty close* by shape alone, so the
+  router's prompt-authorised graceful no-op close (a thank-you, a laugh, "deixa pra la", an
+  out-of-scope one-liner) was indistinguishable from a genuine malfunction — it got a
+  false-positive `unrouted/router` bug report **plus** a rude "I didn't understand" menu (4 of 11
+  reports pulled 2026-07-28). Added an explicit `degraded` flag to `route()`
+  (`1. Orchestrator/router/router.js`): `true` on a model refusal / unparseable reply, `false` on
+  every success path. `server.js` now fires the `unrouted` capture + `notUnderstood` menu **only**
+  on `degraded` (the `done` branch), and both former capture sites now close a legitimate empty
+  close **silently** — the `done` branch falls through to a plain `closeMarker()`, and the
+  `execute`-empty branch (only "other"/unknown ids) closes with no menu and no report. Rails fix
+  (router + server), additive `degraded` field breaks no existing `route()` caller; no
+  `manifest.description` / `router/prompt.js` change, so no live router check. Guard:
+  `scripts/unrouted-classification-selftest.mjs` (offline). Fixes card 77cd6542.
 - **2026-07-28 — Fix: @mary picks up a guest's inline email reply instead of ignoring it.**
   The Calendar Actions missing-email rulebook (`3. Mary Skills/1. Calendar Actions/prompt.js`,
   `buildExtractionRules`) hardcoded `awaitFrom="owner"` when asking for a guest's email and had

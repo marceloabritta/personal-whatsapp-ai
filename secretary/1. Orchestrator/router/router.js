@@ -9,9 +9,11 @@
 //    - parseJsonReply below is now LOAD-BEARING, not a fallback. ~4% of merged replies leak a
 //      line of prose before the JSON and are recovered by its balanced-brace scan. Do not
 //      remove it and do not "simplify" it.
-//    - nothing but the prompt enforces the shape any more. An unparseable reply degrades to
-//      tasks:["other"], which server.js already answers with "I didn't understand" AND a
-//      self-learning report. That existing path is the schema-drift alarm.
+//    - nothing but the prompt enforces the shape any more. An unparseable/refused reply degrades
+//      to { next:"done", skills:[], degraded:true }; server.js fires the "I didn't understand"
+//      menu AND the unrouted self-learning report ONLY on that `degraded` flag — the schema-drift
+//      alarm. A legitimate empty close (the model deliberately ending chit-chat / a no-op) is
+//      degraded:false and closes silently.
 // ============================================================================
 import {
   buildRouterSystem,
@@ -167,7 +169,7 @@ export async function route(ctx, turn = {}) {
   // A refusal or unparseable reply must NOT loop — degrade to a silent close and let server.js's
   // caller decide (its "I didn't understand" path treats an empty result as not-understood).
   if (!parsed)
-    return { say: null, next: "done", skills: [], info: null, lang: "en", awaitFrom: null };
+    return { say: null, next: "done", skills: [], info: null, lang: "en", awaitFrom: null, degraded: true };
 
   const next = ["listen", "execute", "done"].includes(parsed.next) ? parsed.next : "done";
 
@@ -186,5 +188,5 @@ export async function route(ctx, turn = {}) {
 
   const awaitFrom = typeof parsed.awaitFrom === "string" ? parsed.awaitFrom : null;
 
-  return { say, next, skills, info: parsed.info ?? null, lang, awaitFrom };
+  return { say, next, skills, info: parsed.info ?? null, lang, awaitFrom, degraded: false };
 }

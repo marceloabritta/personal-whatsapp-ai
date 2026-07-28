@@ -21,8 +21,11 @@
 
 Most replies come from skills. The orchestrator only speaks up on routing/plumbing
 problems (all prefixed with the language-aware header from `headerFor(lang)`):
-- Couldn't classify the order → *"I didn't understand what you want me to do. Available
-  skills: …"*
+- The router **degraded** (refused or produced an unparseable reply) on a first turn → *"I didn't
+  understand what you want me to do. Available skills: …"* — this menu now fires **only** on a
+  `degraded` router reply, not on every empty first-turn close. A legitimate empty close (the model
+  deliberately ending chit-chat / a no-op) closes silently, and an `execute` that names no
+  dispatchable skill closes silently too — neither speaks up nor files a report.
 - The router call failed → *"I hit an error understanding the request. Try again?"*
 - A skill threw while running → *"I failed to run that task. Error in the log."*
 - A continuation's skill threw → *"I failed to continue that. Error in the log."*
@@ -131,9 +134,11 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     loop: a fresh order first `sessions.clear`s any stale session (a new `@mary` overrides), a
     continuation rebuilds its counters from the marker. Each turn is **`route(ctx, turn)`** — one
     Claude call that both classifies AND extracts — returning `{say, next, skills, info, lang,
-    awaitFrom}`; the model drives a three-state cycle and the orchestrator runs each
-    `NEW_SKILLS[task](ctx)` on an `execute`. Empty/unknown skills → "I didn't understand… Available
-    skills: …"; per-skill errors → "I failed to run that task."
+    awaitFrom, degraded}`; the model drives a three-state cycle and the orchestrator runs each
+    `NEW_SKILLS[task](ctx)` on an `execute`. A **degraded** router reply (refused/unparseable) on a
+    first turn → "I didn't understand… Available skills: …" plus an `unrouted` capture; an `execute`
+    that names no dispatchable skill closes silently (no menu, no report); per-skill errors → "I
+    failed to run that task."
 
       **THE PAYLOAD GATE, and it is plain code — no AI.** The turn call also returns `info`: the
       **first** skill's declared inputs, as the model filled them. Before any skill sees it,
@@ -315,7 +320,7 @@ already received their error reply:
 | the continuation catch | `throw:continuation` |
 | the router catch | `throw:router` |
 | the per-skill catch | `throw:skill` |
-| the `notUnderstood` branch | `unrouted` (a *missing capability*, not a bug — the highest-signal machine report) |
+| the degraded `done` branch | `unrouted` (a *missing capability*, not a bug — the highest-signal machine report) |
 
 **Plus `ctx.sendFailure(number, text)` — the `soft` phase, and the one that fires most.** Most
 failures never reach a catch block: the skill understands the order, fails to execute it, and
