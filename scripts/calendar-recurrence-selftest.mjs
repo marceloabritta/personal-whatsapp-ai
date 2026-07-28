@@ -35,7 +35,7 @@
 //  Run:  node scripts/calendar-recurrence-selftest.mjs
 // ============================================================================
 const CAL = await import(
-  new URL("../secretary/2. Skills/1. Calendar Actions/skill.js", import.meta.url).href
+  new URL("../secretary/3. Mary Skills/1. Calendar Actions/skill.js", import.meta.url).href
 );
 
 let failures = 0;

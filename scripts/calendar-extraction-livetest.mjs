@@ -71,8 +71,8 @@ const ARMS = (process.env.ARMS || "PROD,NOTHINK,MERGED").split(",").map((s) => s
 //                          next week Mon = 2026-07-20
 const NOW_STR = "Monday, 07/13/2026, 09:41 AM";
 
-const SKILLS_DIR = fileURLToPath(new URL("../secretary/2. Skills/", import.meta.url));
-const CAL_DIR = fileURLToPath(new URL("../secretary/2. Skills/1. Calendar Actions/", import.meta.url));
+const SKILLS_DIR = fileURLToPath(new URL("../secretary/3. Mary Skills/", import.meta.url));
+const CAL_DIR = fileURLToPath(new URL("../secretary/3. Mary Skills/1. Calendar Actions/", import.meta.url));
 
 let failures = 0;
 const check = (name, cond) => {

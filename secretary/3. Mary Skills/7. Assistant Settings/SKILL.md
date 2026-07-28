@@ -10,7 +10,7 @@
 >
 > Change how you summon her, by asking her.
 >
-> Until now, the tag you call her with lived in `SECRETARY_TAG` on the droplet: to change it
+> Until now, the tag you call her with lived in `SECRETARY_TAG_NEW` on the droplet: to change it
 > you edited the compose file and recreated the container. Now you just tell her.
 >
 > ```
@@ -49,10 +49,10 @@
 >   the change is live *but not saved* and will not survive a restart. See "Persistence".
 >
 > **If you ever lock yourself out** — a tag you can't type, a tag you forgot — clear the stored
-> setting on the droplet and restart; she goes back to the `SECRETARY_TAG` seed:
+> setting on the droplet and restart; she goes back to the `SECRETARY_TAG_NEW` seed:
 >
 > ```
-> docker exec evolution_redis redis-cli DEL secretary:settings:tags
+> docker exec evolution_redis redis-cli DEL secretary:settings:new:tags
 > ```
 >
 > A restart **alone does not** undo a tag change: the store outlives it. That command is the
@@ -89,12 +89,10 @@ called, the model has proposed and the owner has agreed, and the **validated** t
 1. `normalizeTags(ctx.info.tags)` — a defensive re-check (belt to the gate's braces); a failure is
    a genuine malfunction and goes through `ctx.sendFailure` (`thinkingError`).
 2. Snapshot the **retired** tags against the **live** list (`ctx.tags`, never `process.env`).
-3. `settings.saveTags()` (persist) then `setNewTags()` (apply live) — in that order. **Dual-tag
-   run:** as the NEW (@mary) flow's pilot, this converted skill mutates the NEW tag list
-   (`NEW_TAGS` via `setNewTags`) and its own namespaced store, **never** the legacy (@assistant)
-   `TAGS`/`setTags` — that separation is what lets @mary be tested without touching @assistant. `ctx.tags`
-   and `ctx.settings` are already the new flow's (the orchestrator builds `ctx` per flow). The frozen
-   legacy propose/confirm skill under `1. Orchestrator/legacy/` is the one that still calls `setTags`.
+3. `settings.saveTags()` (persist) then `setNewTags()` (apply live) — in that order. The skill
+   mutates the tag list (`NEW_TAGS` via `setNewTags`) and its own namespaced store. `ctx.tags`
+   and `ctx.settings` are already the flow's (the orchestrator builds `ctx` from `NEW_TAGS`/
+   `newSettings`).
 4. Send **exactly one** outcome message (`applied` / `appliedNotSaved`), then **return**
    `{ ok, persisted, tags, retired }` for the model to read back.
 
@@ -104,17 +102,17 @@ that moved to the orchestrator, and the dead code + dead reply keys (`propose`, 
 
 ## Persistence
 
-`SECRETARY_TAG` is the **seed**. The stored value, when present, **wins** — `server.js` reads it
-at boot (`await settings.ready` first, or the read would race the Redis connect and silently fall
+`SECRETARY_TAG_NEW` is the **seed**. The stored value, when present, **wins** — `server.js` reads it
+at boot (`await newSettings.ready` first, or the read would race the Redis connect and silently fall
 back to the seed) and logs which source won:
 
 ```
-tags: @assist (source: stored setting)
-tags: @assistente, @assistant (source: SECRETARY_TAG seed)
+new-tags: @assist (source: stored setting)
+new-tags: @mary (source: SECRETARY_TAG_NEW seed)
 ```
 
 The store is `lib/settings.js` — the same Redis the sessions already use (`--appendonly yes` on a
-named volume, so it survives restart *and* redeploy), key `secretary:settings:tags`, **no TTL**.
+named volume, so it survives restart *and* redeploy), key `secretary:settings:new:tags`, **no TTL**.
 
 If Redis is unreachable it degrades to memory exactly as `lib/sessions.js` does, and
 **`saveTags()` returns `false`**. That boolean is the only thing that decides what she claims:
@@ -124,7 +122,7 @@ tells him the truth. This is also why a bad tag can never become permanent by ac
 ## The prefix trap (`lib/identity.js`)
 
 The owner may legitimately land on a list where one tag is a **prefix** of another — `@assist`
-alongside `@assistente` is exactly what the example above produces. `matchedTag()` therefore
+alongside `@assistente` is exactly what the example above produces. `matchedTagNew()` therefore
 matches the **longest tag first**, and a tag must **end** at a word boundary:
 
 - Longest-first, or `"@assistente marque uma reunião"` would match the shorter `@assist`, and
@@ -134,8 +132,8 @@ matches the **longest tag first**, and a tag must **end** at a word boundary:
   `@assist` live, `"@assistant do X"` still starts with `@assist`, and the router would get
   `"ant do X"`. A retired tag has to be *gone*, not half-working.
 
-It sorts a **copy**: `TAGS[0]` is the primary tag (`ctx.tag` falls back to it), so the owner's
-order is preserved. `setTags()` mutates `TAGS` **in place** for the same reason — every reader
+It sorts a **copy**: `NEW_TAGS[0]` is the primary tag (`ctx.tag` falls back to it), so the owner's
+order is preserved. `setNewTags()` mutates `NEW_TAGS` **in place** for the same reason — every reader
 that already holds the array (including `server.js`'s per-turn `ctx` build) must see the change.
 
 Guarded by `scripts/settings-tag-selftest.mjs` (the apply→live→persist flow) and assertion 9 of
@@ -144,7 +142,7 @@ Guarded by `scripts/settings-tag-selftest.mjs` (the apply→live→persist flow)
 ## Not here
 
 - **No alias and no grace period.** The confirmed list replaces the old one outright.
-- **No tag→language data model.** `TAGS` is a flat list; the deduction happens in prose, per turn.
+- **No tag→language data model.** `NEW_TAGS` is a flat list; the deduction happens in prose, per turn.
 - **The reply header is untouched.** `headerFor()`/`HEADERS` derive from `OWNER_NAME`, not from
   the tag — a different value with different wiring.
 - **Per-chat tags.** The tag list is global to the assistant.

@@ -20,72 +20,51 @@ Only `8080` is published to the internet.
 ## Flow
 
 ```
-webhook  ->  filter (start on fromMe + @secretary, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
+webhook  ->  filter (start on fromMe + matchedTagNew, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
 ```
 
-### Two flows in parallel, selected by summon tag (dual-tag run)
+### The turn loop (the model holds the conversation)
 
-The secretary currently runs **two** flows in one process, chosen by the trigger tag on each
-message, branched as early as possible in the webhook handler:
+There is **one** flow. A message summoned by the `@mary` tag (`SECRETARY_TAG_NEW`) runs the
+orchestrator's **turn loop**: the model **holds the conversation** and drives a three-state cycle,
+and the orchestrator holds a marker between messages.
 
 ```
-                                  ┌─ tag ∈ SECRETARY_TAG      (@assistant) ─→ OLD flow: route → dispatch (linear, above)
-webhook → filter → build context ─┤
-                                  └─ tag ∈ SECRETARY_TAG_NEW  (@mary)      ─→ NEW flow: the orchestrator TURN LOOP (below)
+message → route(ctx, turn) → { say, next, skills, info, lang, awaitFrom }
+                                │
+      next = "listen"  ── ask / propose / stay silent, keep the marker open, wait for awaitFrom
+      next = "execute" ── run skill(s); a skill returns a value → a READ-BACK turn
+      next = "done"    ── close the conversation
 ```
+`execute` is **non-terminal**: a skill (`manifest.conversation:"orchestrator"`) returns a
+JSON-serialisable value which the orchestrator feeds back to the model as a **read-back** turn (the
+model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`,
+`MAX_DISPATCHES`, `MAX_REPAIRS`, enforces the **write invariant** (a read-back may not execute),
+makes deliberate silence free, and runs a **repair loop** (a payload that fails validation is
+re-prompted with `buildRepairUser`, which invites a corrected execute — NOT a dispatch).
 
-- **`@assistant` — the OLD flow.** The linear `route → dispatch` above, run on **frozen copies** of
-  the pre-migration code under `secretary/1. Orchestrator/legacy/` (its own router, prompt,
-  input-contract and the self-driven propose/confirm `assistant_settings`). It is byte-for-byte the
-  committed behaviour and is the owner's daily driver.
-- **`@mary` — the NEW flow.** The model **holds the conversation** and drives a three-state cycle:
+**Inbound media (card cf60f344).** A turn that carries files (a receipt, an invoice) relays them to
+`route()` as Anthropic **multimodal content**, interpreted on the turn they arrive.
+`inboundMedia(data, quoted)` (`lib/whatsapp.js`) detects the turn's media **LIST** (attachment +
+quoted file, both documented webhook shapes); `mediaBlockFor({mediaType,mimetype,base64})` is the
+**extension point** — one "supported? → native block, or defer" decision plus two native handlers
+(image, PDF); everything else returns `null` (a localized "can't read that yet"), and a future
+format is a single new branch here. The orchestrator downloads each file (per-file + per-turn
+caps), builds `ctx.media = { blocks, model: VISION_MODEL }`, and `route()`'s turn call becomes an
+**N-block content array (media before text) with the vision model pinned** whenever `ctx.media` is
+present and the turn is not a read-back — otherwise the call is the byte-identical text-only
+string. `ctx.media` is the one additive `ctx` field and is `null` on every text-only turn.
 
-  ```
-  message → route(ctx, turn) → { say, next, skills, info, lang, awaitFrom }
-                                  │
-        next = "listen"  ── ask / propose / stay silent, keep the marker open, wait for awaitFrom
-        next = "execute" ── run skill(s); a CONVERTED skill returns a value → a READ-BACK turn
-        next = "done"    ── close the conversation
-  ```
-  `execute` is **non-terminal**: a converted skill (`manifest.conversation:"orchestrator"`) returns
-  a JSON-serialisable value which the orchestrator feeds back to the model as a **read-back** turn
-  (the model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`,
-  `MAX_DISPATCHES`, `MAX_REPAIRS`, enforces the **write invariant** (a read-back may not execute),
-  makes deliberate silence free, and runs a **repair loop** (a payload that fails validation is
-  re-prompted with `buildRepairUser`, which invites a corrected execute — NOT a dispatch).
-
-  **Inbound media (card cf60f344).** A `@mary` turn that carries files (a receipt, an invoice) now
-  relays them to `route()` as Anthropic **multimodal content**, interpreted on the turn they arrive.
-  `inboundMedia(data, quoted)` (`lib/whatsapp.js`) detects the turn's media **LIST** (attachment +
-  quoted file, both documented webhook shapes); `mediaBlockFor({mediaType,mimetype,base64})` is the
-  **extension point** — one "supported? → native block, or defer" decision plus two native handlers
-  (image, PDF); everything else returns `null` (a localized "can't read that yet"), and a future
-  format is a single new branch here. The orchestrator downloads each file (per-file + per-turn
-  caps), builds `ctx.media = { blocks, model: VISION_MODEL }`, and `route()`'s turn call becomes an
-  **N-block content array (media before text) with the vision model pinned** whenever `ctx.media` is
-  present and the turn is not a read-back — otherwise the call is the byte-identical text-only
-  string. `ctx.media` is the one additive `ctx` field and is `null` on every text-only turn.
-
-**The isolation is structural and load-bearing.** The two flows share only the invariant rails
-(message I/O, sessions, formatting, the wrapped Anthropic client, self-learning). They do **not**
-share the router, the input contract, `assistant_settings`, or — as of 2026-07-15 — **the skill
-tree itself.** Skill discovery is **per-flow**: `loadSkills(dir)` is parametrized, and `server.js`
-calls it twice at boot — once on `SKILLS_DIR` (`2. Skills/`) → `SKILLS`/`CATALOG`/`CAPS` for
-`@assistant`, and once on `NEW_SKILLS_DIR` (`3. Mary Skills/`) → `NEW_SKILLS`/`NEW_CATALOG` for
-`@mary` (`NEW_FLOW.catalog` and the NEW turn loop read these). **`CAPS` is discovered only on the
-old tree** — the caps-based Tasks→Calendar `startCreate` delegation is legacy-only, and the new
-tree exports no capabilities. `3. Mary Skills/` is a byte-isolated copy of `2. Skills/` in which
-every skill is a **pure task** (see "Adding a skill" and the per-skill `SKILL.md`s): the
-orchestrator model runs the whole dialogue, and each `run(ctx)` only validates its declared
+**Skills are pure tasks.** Skill discovery runs once at boot: `loadSkills(dir = NEW_SKILLS_DIR)`
+discovers `secretary/3. Mary Skills/` → `NEW_SKILLS`/`NEW_CATALOG` (the turn loop reads these).
+Every skill under that tree is a **pure task** (see "Adding a skill" and the per-skill `SKILL.md`s):
+the orchestrator model runs the whole dialogue, and each `run(ctx)` only validates its declared
 `inputs`, acts, and **returns** a value. `calendar_action`, `task_action` and `flight_search` use a
 **READ-then-ACT** contract — a `find`/`list`/`search` READ returns id-bearing candidates the model
-reads back, and a later ACT targets one by id (which is why the new calendar/tasks need no
-in-skill session and no `startCreate` coupling). The NEW flow's tag list (`NEW_TAGS`, mutated by
-`setNewTags`) and its durable store (`secretary:settings:new:tags`) are likewise separate from the
-OLD flow's (`TAGS`/`setTags`, `secretary:settings:tags`). So **a change — or a bug — anywhere in the
-`@mary` path cannot alter what `@assistant` answers to.** This parallel run is temporary scaffolding
-for a live A/B of the new architecture; when the migration completes, the legacy subtree and the
-dual-tag branch are removed and only the converted tree + turn loop remains.
+reads back, and a later ACT targets one by id (which is why calendar/tasks need no in-skill session).
+The model **chains skills itself** across turns; a skill never invokes another. The trigger tag list
+(`NEW_TAGS`, mutated by `setNewTags`) is durable in `secretary:settings:new:tags`, which wins over
+the `SECRETARY_TAG_NEW` seed at boot.
 
 ### 1. Evolution → secretary (incoming webhook)
 
@@ -102,14 +81,14 @@ Body (`MESSAGES_UPSERT`), example:
   "data": {
     "key": { "remoteJid": "5531999...@s.whatsapp.net", "fromMe": true, "id": "3EB0..." },
     "pushName": "User",
-    "message": { "conversation": "@secretary schedule..." },
+    "message": { "conversation": "@mary schedule..." },
     "messageType": "conversation",
     "messageTimestamp": 1751560000
   }
 }
 ```
 The secretary **buffers every message** (for context). A flow only **starts** when `fromMe === true`
-**and** the text starts with a trigger tag (`@secretaria`/`@secretary`). But the secretary is **stateful** — it keeps per-chat state
+**and** the text starts with a trigger tag (`matchedTagNew`, default `@mary`). But the secretary is **stateful** — it keeps per-chat state
 in Redis (see `1. Orchestrator/lib/sessions.js`) — so once a session is active it can **continue
 without the tag**: the secretary uses the LLM to ignore normal chatter and watch for the awaited
 answer (a confirmation or clarification). That continuation can also come from the **other person**
@@ -231,8 +210,8 @@ DELETE https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (
 ```
 `due` is **date-only** (stored at UTC midnight). A to-do for **yourself** lands here; a
 to-do assigned to **someone else** has no private-list equivalent (Tasks emails no one),
-so `task_action` **delegates** to `calendar_action` (step 5) via the capability registry —
-a 5-min invite that notifies them by email. See "Composing skills" below.
+so a to-do for someone else is **not** a task op — the model **chains** a `calendar_action` create
+(step 5) instead: a 5-min invite that notifies them by email.
 
 ### 6. skill → Evolution (fetch audio) — transcribe_audio
 
@@ -351,24 +330,20 @@ reply language, which follows `ctx.lang`), `FLIGHT_CURRENCY` (optional, default 
 `flight_search` — the currency asked of Kiwi. **There is no flight-provider API key**: the Kiwi
 endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store **and** the durable settings
 store; defaults to `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
-`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG` (the trigger tags —
-**comma-separated**, default `@secretaria,@secretary`; both trigger the secretary. The old
-`@brain` tag is **retired** — a message using it is silently ignored), and `SECRETARY_TAG_NEW`
-(the **NEW-flow** trigger tags, comma-separated, default `@mary`; see the dual-tag parallel run
-under **Flow** — a message with one of these runs the orchestrator turn loop instead of the
-legacy dispatch. Its own stored list wins over the seed at `secretary:settings:new:tags`,
-independently of `SECRETARY_TAG`).
+`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, and `SECRETARY_TAG_NEW` (the trigger tags —
+**comma-separated**, default `@mary`; a message starting with one of these runs the orchestrator
+turn loop. Its own stored list wins over the seed at `secretary:settings:new:tags`).
 
-`SECRETARY_TAG` is now the **SEED, not the last word**. The owner can change the tags by asking
+`SECRETARY_TAG_NEW` is the **SEED, not the last word**. The owner can change the tags by asking
 her (`assistant_settings`); the confirmed list is stored in Redis under
-`secretary:settings:tags` (**no TTL**, `lib/settings.js`) and **wins over the env var at boot**
+`secretary:settings:new:tags` (**no TTL**, `lib/settings.js`) and **wins over the env var at boot**
 — `server.js` awaits the store's `ready` before reading it (an un-awaited read would race the
 Redis connect and silently fall back to the seed) and logs which source won. **A restart does
 not revert a changed tag**; the store outlives it. The recovery path — a tag the owner cannot
 type, or has forgotten — is to clear the key and restart, which falls back to the seed:
 
 ```bash
-docker exec evolution_redis redis-cli DEL secretary:settings:tags
+docker exec evolution_redis redis-cli DEL secretary:settings:new:tags
 ```
 
 **Evolution (`/opt/evolution/.env`)** — `AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`,
@@ -376,35 +351,21 @@ docker exec evolution_redis redis-cli DEL secretary:settings:tags
 
 ## Adding a skill
 
-There are now **two skill trees**, one per flow (see "Two flows in parallel", above): `secretary/2.
-Skills/` for `@assistant`, and `secretary/3. Mary Skills/` for `@mary`. Discovery is per-flow —
-`server.js` runs `loadSkills(dir)` on each — so a skill folder is picked up by whichever flow's tree
-it sits in. **No `server.js` or router edit is needed to add a skill; it is a drop-in into the right
-tree.** (Adding a *new tree* — the per-flow split itself — was the one authorized rails change.)
+Skills live under one tree: `secretary/3. Mary Skills/`. Discovery is `server.js` running
+`loadSkills(NEW_SKILLS_DIR)` once at boot, so a skill folder is picked up simply by sitting in that
+tree. **No `server.js` or router edit is needed to add a skill; it is a drop-in.**
 
-Create `secretary/2. Skills/<Your Skill>/skill.js` (OLD-flow, self-driven dialogue):
-```js
-export const manifest = {
-  id: "unique_id",
-  description: "what it does (the router reads this)",
-  inputs: null,          // or a declaration — see "Declaring your inputs" below
-};
-export async function run(ctx) { /* use ctx.send, ctx.evolution, ctx.anthropic, ctx.lang, ... */ }
-export const capabilities = { doThing: (ctx, args) => ... };  // OPTIONAL — see "Composing skills"
-```
-The orchestrator discovers it at boot; the router starts routing to it. No other changes.
-
-**A converted (`@mary`) skill is a PURE TASK** — `secretary/3. Mary Skills/<Your Skill>/skill.js`:
+**A skill is a PURE TASK** — `secretary/3. Mary Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = {
   id: "unique_id",
   conversation: "orchestrator",   // the MODEL runs the dialogue; the skill never asks/confirms
-  description: "what it does (reworded: no 'she proposes/asks' — the orchestrator does)",
+  description: "what it does (no 'she proposes/asks' — the orchestrator does)",
   inputs: { /* a declaration — see below; or null, e.g. transcribe_audio */ },
 };
 // validate ctx.info defensively → act → send ONE outcome → RETURN a JSON value (the read-back)
 export async function run(ctx) { /* ...; return { ok, ... }; */ }
-// NO `capabilities` export in the converted tree; NO lib/confirm.js; NO sessions.set.
+// NO `capabilities` export; NO lib/confirm.js; NO sessions.set — the model runs the dialogue.
 ```
 For a read-then-act skill (calendar/tasks/flights), a discriminator value that only READS carries
 **no** `requiredWhen`, every non-discriminator field is `nullable`, and the READ step **returns**
@@ -446,8 +407,7 @@ that ignores `ctx.info` behaves exactly as it did before any of this existed.
 - **If your `fields` mirror a JSON Schema you also send elsewhere, they must stay in lockstep
   forever, and nothing in the language enforces it.** Add a field to the schema and forget the
   declaration and the merged prompt silently stops asking for it — the feature dies with no test
-  going red. `calendar_action` keeps them honest with a static set-equality lint
-  (`scripts/turn-latency-selftest.mjs` T2.10). **Write one.**
+  going red. There is no automated set-equality lint guarding this today. **Write one.**
 
 **Send failures with `ctx.sendFailure`, not `ctx.send`.** A reply that means *"you asked me to
 do something and I did not do it"* — an API error, "something went wrong", a batch that only
@@ -473,40 +433,26 @@ still live in the others. Reach for them before writing your own:
 | `inputs.js` | `describeInputs`, `checkPayload` | The **declared-inputs contract** that lets the router extract a skill's inputs in the same call that classifies the order. `describeInputs(catalog)` renders each skill's declaration as prompt text; `checkPayload(inputs, info)` is the **plain-code, no-AI** gate — `{ shapeOk, ok, problems }`. It knows about *declarations*, never about skills. You almost never call this directly: declare `manifest.inputs` and read `ctx.info`. |
 | `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
-| `identity.js` | `headerFor`, `TAGS`, `isOwnMessage`, `matchedTag` | The trigger tags and the reply header. |
+| `identity.js` | `NEW_TAGS`, `headerFor(lang)`, `isOwnMessage`, `matchedTagNew` | The trigger tags and the reply header. |
 | `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image (jpeg/png/gif/webp) → an image block, document (pdf) → a document block, everything else → `null` (defer). A new file type is one new branch here + its converter — no other rails change. `media_type` comes from the real mime, never trusted from a default. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
 | `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
 | `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |
 
-Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`,
-`hasSkill`/`callSkill`) arrives on **`ctx`** — see `server.js`. If you find yourself editing
-the orchestrator to add a skill, that's the signal `ctx` or this lib is missing something:
-fix it **once**, here, rather than reaching around it.
+Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`)
+arrives on **`ctx`** — see `server.js`. If you find yourself editing the orchestrator to add a
+skill, that's the signal `ctx` or this lib is missing something: fix it **once**, here, rather
+than reaching around it.
 
-### Composing skills (the capability registry)
+### Chaining skills (the model does it)
 
-A skill has **two faces**. The *routable* face (`manifest` + `run`) is what the router
-sees and dispatches to. The optional *internal* face — an exported `capabilities`
-object — is a private **skill-to-skill API** the router never sees. Skills never import
-each other's files; the orchestrator collects every skill's `capabilities` at boot into a
-registry and injects two helpers into `ctx`:
-
-```js
-ctx.hasSkill(id, name)              // is capability id.name available?
-await ctx.callSkill(id, name, ...args)  // invoke it; THIS ctx is auto-injected as the first arg
-```
-
-`callSkill` passes the caller's `ctx` (so the callee shares `owner`/`lang`/`sessions`/
-`send`) and enforces `MAX_SKILL_DEPTH` as a loop guard; a missing capability throws (caught
-by the orchestrator's per-skill try/catch). **Decoupled by id, not path** — renaming a
-skill's folder never breaks a caller. Today: `calendar_action` exposes `startCreate` (the
-confirm-first create flow), and `task_action` calls it for a to-do assigned to someone else.
-
-**Session ownership on delegation.** A session the callee opens is tagged with the
-callee's `skill` id, so its continuations (the `yes`, a modify, an email chase) route back
-to the **callee** — the caller initiates and steps out. E.g. a "task for Ana" opens a
-`calendar_action` session; Ana's email or your `yes` is handled by Calendar, not Tasks.
+Skills never import or invoke each other. When a request needs more than one skill — a to-do for
+someone else that must go out as a calendar invite, a search whose result feeds a later action —
+the **model chains them itself** across the turn loop: it dispatches one skill, reads back the
+value that skill returns, and dispatches the next. There is no skill-to-skill API, no capability
+registry, and no `capabilities` export. E.g. a "task for Ana" is routed by the model to
+`calendar_action` (not `task_action`), which opens the confirm-first create; Ana's email or your
+`yes` continues that same conversation on the next turn.
 
 ### Localization convention (applies to every skill)
 
@@ -535,7 +481,7 @@ out.
 The secretary writes **failure reports about itself** to `secretary/improvements/`; the Mac
 pulls them and turns each into an implementation plan. The capture layer is
 `1. Orchestrator/lib/{logbuffer,selflearning}.js` — **infrastructure, not a skill** (every
-loaded skill lands in `CATALOG`, the router's menu, so a skill the router must never pick is
+loaded skill lands in `NEW_CATALOG`, the router's menu, so a skill the router must never pick is
 a misroute hazard with no upside).
 
 **Six triggers — five the machine sees, one only the owner can.**
@@ -608,8 +554,8 @@ the owner's testimony.
 - **Capture never throws** and never masks the original error; it runs *after* the user has
   their reply.
 - **One report per webhook turn** (`ctx._turn`), which is an **object, not a boolean**:
-  `ctx.callSkill` spreads the ctx, so a boolean flag set by a callee would mutate a copy and
-  never reach the caller.
+  `ctx.sendFailure` and the read-back both read and write it across the turn loop, so a bare
+  boolean flag couldn't carry that shared state.
 - **Machine failures dedupe (10 min) and are capped (~20/h)** — a crash loop must not fill the
   droplet's disk. **Owner reports do neither**: a human can't loop, two notes are two
   complaints, and a silently dropped note is the worst failure this system has.

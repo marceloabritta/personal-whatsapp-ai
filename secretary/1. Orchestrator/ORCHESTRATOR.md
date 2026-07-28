@@ -8,7 +8,7 @@
 >
 > **What it does:**
 > - Receives every message from WhatsApp (via the Evolution API webhook).
-> - **Starts** a task only when *you* (the owner) write a trigger tag (`@assistente`/`@assistant`).
+> - **Starts** a task only when *you* (the owner) write a trigger tag (`@mary`, by default).
 > - Once a task is mid-conversation (e.g. a cancel awaiting your "yes"), it lets the
 >   follow-up through **without** the tag — and can even pick up the *other person's*
 >   reply — while ignoring normal chatter.
@@ -47,8 +47,8 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    (default `secretary`; prod overrides to `secretaria`), `CLAUDE_MODEL` (default
    `claude-sonnet-5`), `OWNER_NAME`, `ANTHROPIC_API_KEY`, `REDIS_URL` (default
    `redis://evolution_redis:6379`; set empty to force in-memory). The trigger tags and reply
-   header live in `lib/identity.js`: `TAGS` is parsed from `SECRETARY_TAG` (**comma-separated**,
-   lowercased, default `@assistente,@assistant`; the old `@brain` is retired), and the header
+   header live in `lib/identity.js`: `NEW_TAGS` is parsed from `SECRETARY_TAG_NEW` (**comma-separated**,
+   lowercased, default `@mary`), and the header
    is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Assistant]:`, pt →
    `[Assistente IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
 2. **Clients:** `anthropic` (SDK), `evolution` (`createEvolution`), `sessions`
@@ -61,29 +61,19 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    the model reasoned, we waited for it, we paid for it, and we deleted it (~4.6s of every 16s
    turn). A call site that genuinely wants reasoning **passes its own `thinking`** and the wrapper
    leaves it alone. The wrapper is a `Proxy`, not a spread — the SDK client is a class instance and
-   a spread would drop its prototype. `scripts/turn-latency-selftest.mjs` T1.5 lints that exactly
-   one client exists and that it is wrapped.
-3. **`loadSkills(dir = SKILLS_DIR)`** — scans `<dir>/*/skill.js`, dynamically `import()`s each,
-   and requires `manifest.id` + `run()`. Builds `SKILLS = { [id]: run }` and
-   `CATALOG = [{id, description, inputs, conversation}]` (the router's menu — `inputs` is the
+   a spread would drop its prototype.
+3. **`loadSkills(dir = NEW_SKILLS_DIR)`** — scans `<dir>/*/skill.js` (`NEW_SKILLS_DIR` is
+   `3. Mary Skills/`), dynamically `import()`s each, and requires `manifest.id` + `run()`. Returns
+   `{ skills, catalog }`: `skills = { [id]: run }` and
+   `catalog = [{id, description, inputs, conversation}]` (the router's menu — `inputs` is the
    skill's declared input contract, `manifest.inputs`, or `null`; **`conversation` is
    `"orchestrator"` if the manifest declares it, else `"skill"`** — the safe default, see
-   "The conversation loop" below). Also collects each skill's
-   **optional** `capabilities` export into `CAPS = { [id]: { [name]: fn } }` — the
-   internal skill-to-skill API (see "Composing skills" below). Logs each
-   `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit
-   here to add one.
+   "The conversation loop" below). Logs each `skill loaded: … -> id`. **Drop-in skills:** no edit
+   here to add one. Skills export no skill-to-skill API — each is a pure task, and the model chains
+   them across turns (see "Composing skills" below).
 
-   **RAILS CHANGE (a) — per-flow discovery (2026-07-15).** `loadSkills` is now **parametrized**
-   (`dir` defaults to `SKILLS_DIR = "2. Skills/"`, so the existing zero-arg call is unchanged), and
-   boot calls it **twice**: `loadSkills()` → `SKILLS`/`CATALOG`/`CAPS` for `@assistant`, and
-   `loadSkills(NEW_SKILLS_DIR = "3. Mary Skills/")` → `NEW_SKILLS`/`NEW_CATALOG` for `@mary`
-   (`NEW_FLOW.catalog = NEW_CATALOG`, and the six NEW-loop `SKILLS`/`CATALOG` references are
-   repointed to the NEW maps). Boot logs both `available skills:` (old) and `mary skills:` (new).
-   **`CAPS` is discovered only on the OLD tree and is NOT repointed** — its sole consumers are the
-   shared `ctx.hasSkill`/`ctx.callSkill` closure (built before the flow split), which the legacy
-   Tasks→Calendar `startCreate` delegation depends on; the converted tree exports no capabilities
-   and needs none (the model chains skills itself).
+   Boot calls it **once**: `loadSkills(NEW_SKILLS_DIR)` → `NEW_SKILLS`/`NEW_CATALOG`, which
+   `NEW_FLOW.catalog` points at and the turn loop dispatches against. Boot logs `mary skills: …`.
 4. **Express:** `GET /` health check; `POST /webhook`; `listen(3000)`.
 
 ### The webhook pipeline — `POST /webhook` (per message)
@@ -101,8 +91,10 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    acted on.
 6. **`session = await sessions.get(remoteJid)`** — any open per-chat state.
 7. **The gate (start vs continue vs ignore):**
-   - `isTagged = fromMe && !!matchedTag(text)` → a **fresh** command (owner only); `matchedTag`
-     returns whichever tag in `TAGS` the message starts with (or null).
+   - `gateText = text || attachmentCaption` (a captioned document has `text === ""`, so the tag
+     rides its caption); `tag = fromMe ? matchedTagNew(gateText) : null`; `isTagged = !!tag` → a
+     **fresh** command (owner only); `matchedTagNew` returns whichever tag in `NEW_TAGS` the message
+     starts with (or null).
    - `isContinuation` = there's a `session`, it's not tagged, not one of the secretary's own
      messages, **and** the sender matches `session.awaitFrom`: `owner`→`fromMe`, `contact`→`!fromMe`, `any`→both.
    - If **neither** → `return` (ignored — incl. all non-owner messages with no session for them).
@@ -112,10 +104,10 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
 10. **Build context:** `nowStr` (São Paulo); `conv = combine(buffer + evolution.fetchHistory(remoteJid))`
     → `transcript` via `buildTranscript` (`ME:` / `OTHER:`, last ~30); `contact` =
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
-11. **Build `ctx`** (handed to router + skills): `owner, tag, anthropic, model, order,
+11. **Build `ctx`** (handed to router + skills): `owner, tag, tags, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, isTagged, quoted, hasQuotedAudio,
-    catalog, env, evolution, send, sendFailure, sessions, session, lang, info, hasSkill,
-    callSkill, _turn`.
+    catalog, env, evolution, sessions, settings, session, lang, send, sendFailure, info, media,
+    _turn`.
     `session` is set **only** on a continuation (else `null`).
     **`ctx.info`** — the skill's **declared inputs**, already extracted by the router in the same
     call that classified the order (see step 12), and already checked by plain code. It is set on
@@ -128,29 +120,26 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     `isTagged` — did **THIS** message carry a tag? `true` on a fresh command, and **always
     `false` on a continuation** (a tagged message is never a continuation — see the gate at
     step 7). It is the only honest source of that bit: **`ctx.tag` is not a substitute**, it
-    falls back to `TAGS[0]` and is therefore always truthy. A skill reads it to tell an order
+    falls back to `NEW_TAGS[0]` and is therefore always truthy. A skill reads it to tell an order
     *addressed to it* from talk it merely overheard while a window was open (Tasks does —
-    `2. Skills/3. Tasks/SKILL.md`). `ctx.lang` is the
+    `3. Mary Skills/3. Tasks/SKILL.md`). `ctx.lang` is the
     conversation language — from the session on a continuation, from the router on a fresh
     command (set after `route()` returns), default `"en"`; `ctx.send` is bound to it (see
-    the localizing `send` above). `ctx.hasSkill`/`ctx.callSkill` are the capability-registry
-    helpers (see "Composing skills" below). `_turn` is the self-learning per-turn flag (see
-    below).
-12. **Dispatch:**
-    - **Continuation** → **bypass the router**, run `SKILLS[session.skill](ctx)` directly
-      (the skill reads `ctx.session` and decides). Missing skill → `sessions.clear`. Errors
-      → "I failed to continue that."
-    - **Fresh** → first `sessions.clear` any stale session (a new `@secretary` overrides), then
-      **`route(ctx)`** — **ONE Claude call that both classifies AND extracts** → `{tasks, lang,
-      info}`. `tasks[]` is validated against the catalog; empty/unknown → "I didn't understand…
-      Available skills: …". Otherwise run each `SKILLS[task](ctx)` in order; per-skill errors →
-      "I failed to run that task."
+    the localizing `send` above). `_turn` is the self-learning per-turn object (see below).
+12. **Dispatch — the turn loop (see "The conversation loop" below).** Both a fresh tagged order
+    and an untagged follow-up on a conversation the orchestrator owns feed the **same** multi-turn
+    loop: a fresh order first `sessions.clear`s any stale session (a new `@mary` overrides), a
+    continuation rebuilds its counters from the marker. Each turn is **`route(ctx, turn)`** — one
+    Claude call that both classifies AND extracts — returning `{say, next, skills, info, lang,
+    awaitFrom}`; the model drives a three-state cycle and the orchestrator runs each
+    `NEW_SKILLS[task](ctx)` on an `execute`. Empty/unknown skills → "I didn't understand… Available
+    skills: …"; per-skill errors → "I failed to run that task."
 
-      **THE GATE, and it is plain code — no AI.** The merged call also returns `info`: the
-      **first** task's declared inputs, as the model filled them. Before any skill sees it,
+      **THE PAYLOAD GATE, and it is plain code — no AI.** The turn call also returns `info`: the
+      **first** skill's declared inputs, as the model filled them. Before any skill sees it,
       `checkPayload(primary.inputs, info)` (`lib/inputs.js`) checks it against the *declaration*:
       is it an object, are the declared fields present, are the types right?
-      - **shape-VALID** → it is handed to `tasks[0]` as `ctx.info`. That skill skips its own
+      - **shape-VALID** → it is handed to the primary skill as `ctx.info`. That skill skips its own
         extraction call. If the payload is valid but *incomplete* (no email for Laura) it is
         **still handed over** — the skill's own clarification pass fills the gap exactly as it
         does today. That is the "only if the check fails do we ask again" call.
@@ -162,13 +151,12 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
       whole safety net: a skill that adds a schema field and forgets its declaration gets a slow
       turn, not a silently un-shipped feature.
 
-### The conversation loop (card 55e00052) — the orchestrator holds the conversation
+### The conversation loop — the orchestrator holds the conversation
 
-The dispatch above is the **legacy path**, and it stays live for skills that run their own
-dialogue (`conversation: "skill"` — six of seven skills today). What changed is that a **fresh
-tagged order, and every untagged follow-up on a conversation the orchestrator itself owns, now go
-through a MULTI-TURN LOOP** in which the model drives a three-state cycle. The whole loop runs
-inside one `POST /webhook` request; only counters cross a message boundary.
+The turn loop is the **only** path: a **fresh tagged order, and every untagged follow-up on a
+conversation the orchestrator itself owns, go through a MULTI-TURN LOOP** in which the model drives a
+three-state cycle. The whole loop runs inside one `POST /webhook` request; only counters cross a
+message boundary. The payload gate above (`checkPayload`) is applied on each dispatch inside it.
 
 **`manifest.conversation` — a new, additive skill-contract field.** `"skill"` (default; absent ⇒
 `"skill"`) means the skill asks/confirms for itself, exactly as today. `"orchestrator"` means the
@@ -238,13 +226,12 @@ needs it to — fixed here.)
 additive, invisible to every caller — because that is the outcome message the read-back shows the
 model. `sendFailure` records too, so a *failing* read-back does not re-narrate.
 
-**Two kinds of open session — the coexistence gate.** A session with a **`skill` field** is a
-legacy skill session → the bypass at step 12, byte-for-byte unchanged. A session with **no `skill`
-field** is the orchestrator's own **conversation marker** (`{ open, awaitFrom, lang, turns,
-dispatches, expiresAt }`) → the turn loop. Before the orchestrator clears **or** writes the marker
-it **re-reads the key** and leaves it alone if a dispatched skill has taken it (its confirmation
-outranks the marker; `sessions.set` is a full overwrite). **This two-kinds gate is temporary
-machinery with a named end date: it is deleted by the last skill-conversion card.**
+**The conversation marker — and yielding the key.** The orchestrator's own open session is a
+**conversation marker** (`{ open, awaitFrom, lang, turns, dispatches, expiresAt }`) with **no
+`skill` field** — it carries the loop's counters between messages. Before the orchestrator clears
+**or** writes the marker it **re-reads the key** and leaves it alone if a dispatched skill has taken
+it (a session that skill opened, carrying a `skill` field — its confirmation outranks the marker;
+`sessions.set` is a full overwrite).
 
 **Orchestrator-owned failures** each fire a `fireCapture` (existing plumbing): `turn_cap`,
 `dispatch_cap`, `repair_giveup`, `readback_execute`, and `throw:readback` (a read-back call that
@@ -269,11 +256,10 @@ A `@mary` turn that carries files (a receipt, an invoice) relays them to the tur
   (`ctx.hasQuotedAudio`, which this detector leaves untouched), never intercepted by the relay — so
   replying to a voice note still reaches `transcribe_audio`.
 - **Gate open (captioned document).** A captioned document's `text` is `""` (`extractText` has no
-  document branch), so the `@mary` tag matcher and the order derivation also read the **attachment
-  caption** (a `gateText`/`attachmentCaption` local, **new flow only** — the legacy matcher and
-  order are byte-identical). This lets a captioned PDF *start* the flow and carries its caption
-  instruction as the order on both the first (tagged) turn and a mid-session (untagged)
-  continuation.
+  document branch), so the tag matcher and the order derivation also read the **attachment caption**
+  (the `gateText`/`attachmentCaption` locals in the gate). This lets a captioned PDF *start* the flow
+  and carries its caption instruction as the order on both the first (tagged) turn and a mid-session
+  (untagged) continuation.
 - **The extension point — `mediaBlockFor({ mediaType, mimetype, base64 })` (`lib/whatsapp.js`).**
   The single "is this type supported? → native block, or defer" decision, plus the two ship-now
   native handlers: **image** (`image/jpeg|png|gif|webp`) → an `image` block; **document**
@@ -306,40 +292,14 @@ A `@mary` turn that carries files (a receipt, an invoice) relays them to the tur
   orchestrator's own informational notices (the `turnCap`/`dispatchCap` category), **not**
   `*Failed`/`*Error` failure replies.
 
-### Dual-tag parallel run (@assistant = OLD, @mary = NEW) — temporary scaffolding
+### Tag settings — the durable summon list
 
-The turn loop above does **not** replace the legacy dispatch in place. Both run in one process,
-chosen by the **summon tag** on each message, so the new architecture can be tested live without
-risking the owner's daily driver. The branch is made **as early as possible** in the webhook
-handler (server.js), before any flow-specific logic:
-
-- **`@assistant` (`SECRETARY_TAG`) → the LEGACY flow** (`runLegacyFlow`): the pre-card `route →
-  dispatch`, run on **frozen copies** of the pre-card code under `1. Orchestrator/legacy/`
-  (`router.js`, `prompt.js`, `inputs.js`, `assistant-settings.js`, `assistant-settings-prompt.js` —
-  the deleted propose/`classifyConfirmation` flow). None of it is imported by the NEW flow. This is
-  **byte-for-byte the committed (HEAD) behaviour.**
-- **`@mary` (`SECRETARY_TAG_NEW`) → the NEW flow**: the turn loop above.
-
-**How the branch is decided.** A *tagged* message: `matchedTagNew` hit → NEW, else `matchedTag` hit
-→ LEGACY (if a message somehow matched both disjoint lists, LEGACY wins, so @assistant is never
-starved). A *continuation*: a session **with a `skill` field** → LEGACY bypass (every skill-session
-continuation, including a NEW-flow-dispatched skill's own confirmation, is handed off through the
-shared run and behaves identically); a **marker** (no `skill` field) → the NEW turn loop. The NEW
-flow's converted `assistant_settings` never opens a skill session, so a `skill:"assistant_settings"`
-session can only be the legacy propose/confirm flow — the split is unambiguous.
-
-**The isolation is the whole point, and it is structural.** The NEW flow's `assistant_settings`
-mutates a **separate** tag list (`NEW_TAGS` via `setNewTags`, not `TAGS`/`setTags`) persisted to a
-**separate** settings key (`createSettings({ ns: "new" })` → `secretary:settings:new:tags`). `ctx`
-is built **per flow** — `tags`, `catalog`, `settings` all point at the active flow's own state. So a
-tag change (or any bug) in the `@mary` path is **incapable** of altering what `@assistant` answers
-to. The two flows share only the invariant rails (Evolution I/O, `sessions`, `format`, the wrapped
-Anthropic client, `logbuffer`, `selflearning`) — exactly what the legacy path used at HEAD.
-
-**Boot** loads each tag list over its own seed independently: `settings.loadTags()` → `setTags`
-(legacy), `newSettings.loadTags()` → `setNewTags` (new). The boot log prints both (`tags:` and
-`new-tags:`). **This whole dual-tag apparatus is temporary:** when the migration completes, the
-`legacy/` subtree, `NEW_TAGS`/`newSettings`, and the branch are removed and only the turn loop stays.
+The accepted tag list (`NEW_TAGS`, default `@mary`) is durable: the owner can change it at runtime
+by asking (the `assistant_settings` skill), which mutates `NEW_TAGS` via `setNewTags` and persists it
+to a namespaced settings key (`createSettings({ ns: "new" })` → `secretary:settings:new:tags`). At
+**boot** the stored list is loaded over the `SECRETARY_TAG_NEW` seed: `await newSettings.ready` →
+`newSettings.loadTags()` → `setNewTags`, so a stored value wins and the boot log prints `new-tags:`
+with its source.
 
 ### Self-learning — the orchestrator's failure capture
 `installLogBuffer()` (`lib/logbuffer.js`) runs **first**, above everything that logs: it wraps
@@ -382,10 +342,11 @@ The fifth trigger, **`reported`**, is the only one a human pulls: the `feedback`
 owner says the secretary got something wrong.
 
 **`ctx._turn` is an object, not a boolean, and that is load-bearing.** It caps capture at one
-report per webhook turn — but `ctx.callSkill` hands the callee `{ ...ctx, _skillDepth }`, a
-**spread**. A boolean flag set by a callee would mutate a *copy* and never be seen by the
-caller, so the flag has to live on a shared object whose *reference* the spread copies.
-`scripts/selflearning-selftest.mjs` pins this so a refactor can't quietly reintroduce it.
+report per webhook turn, but it is also the turn's shared scratch: `ctx.sendFailure` and the
+read-back both read and write it (`_turn.said`, `_turn.captured`, `_turn.skill`). A boolean flag
+would be copied by value at each read/write and the writers would never see each other's updates, so
+the state has to live on one shared object whose *reference* every reader holds.
+`scripts/selflearning-selftest.mjs` pins this so a refactor can't quietly reintroduce a flag.
 
 ### `send(number, text)` — the localizing choke point
 Prepends the language-aware header (`headerFor(ctx.lang)` from `lib/identity.js`) + a blank
@@ -441,27 +402,13 @@ await ctx.sessions.clear(remoteJid);
 `get / set / clear`. A fresh `@secretary` command clears any stale session first (starting over
 always wins). Skills that never call `ctx.sessions.set` behave statelessly, exactly as before.
 
-### Composing skills — the capability registry
-Skills compose without importing each other. `loadSkills()` collects each skill's optional
-`capabilities` export into `CAPS = { [id]: { [name]: fn } }`, and the orchestrator injects
-two helpers into every `ctx`:
-```js
-ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
-ctx.callSkill = async (id, name, ...args) => {          // auto-injects THIS ctx
-  const fn = CAPS[id]?.[name];
-  if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
-  const depth = (ctx._skillDepth || 0) + 1;             // loop guard
-  if (depth > MAX_SKILL_DEPTH) throw new Error(`skill-call depth exceeded at ${id}.${name}`);
-  return fn({ ...ctx, _skillDepth: depth }, ...args);
-};
-```
-The callee receives the caller's `ctx` (shared `owner`/`lang`/`sessions`/`send`), so a
-session it opens is tagged with the **callee's** `skill` id and its continuations route
-back to the callee — the caller only initiates. A missing capability throws and is caught
-by the per-skill try/catch (or the caller guards with `hasSkill` for a friendlier reply).
-`capabilities` are **not** in the router catalog — they're internal, addressed by skill id
-(rename-safe). Example: `task_action` turns a to-do assigned to another person into a
-calendar invite by calling `calendar_action.startCreate`, never re-implementing create.
+### Composing skills — the model chains them
+Skills never import or call each other; there is no in-code skill-to-skill registry. Each skill is a
+**pure task** that runs, sends one outcome message, and returns. Composition happens in the **turn
+loop**: the model can name more than one skill for a single `execute` batch, and a converted skill's
+**read-back** (its return value, shown back to the model on the next turn) lets the model decide a
+follow-up `execute`. So a job that needs two skills is chained by the model across turns — not by one
+skill reaching into another.
 
 ### External touchpoints, timeouts, completion
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.

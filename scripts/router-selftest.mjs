@@ -24,7 +24,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(2);
 }
 
-const SKILLS_DIR = path.resolve("secretary/2. Skills");
+const SKILLS_DIR = path.resolve("secretary/3. Mary Skills");
 const catalog = [];
 for (const e of await readdir(SKILLS_DIR, { withFileTypes: true })) {
   if (!e.isDirectory()) continue;

@@ -34,10 +34,10 @@
 //                  skill catalog ("Available tasks:") — the same call the read-back turn reuses.
 //    - Evolution : a local HTTP server. Records every message the assistant sends, and serves
 //                  the chat history back to fetchHistory.
-//  Because the pilot mutates PROCESS-GLOBAL identity (setTags rewrites the live TAGS array),
-//  each scenario boots its OWN fresh child (fresh TAGS from SECRETARY_TAG, fresh in-memory
-//  sessions) so scenarios cannot contaminate each other's trigger tag. The Anthropic/Evolution
-//  fakes stay up for the whole run; per-scenario state is reset between children.
+//  Because the pilot mutates PROCESS-GLOBAL identity (setNewTags rewrites the live NEW_TAGS
+//  array), each scenario boots its OWN fresh child (fresh NEW_TAGS from SECRETARY_TAG_NEW, fresh
+//  in-memory sessions) so scenarios cannot contaminate each other's trigger tag. The Anthropic/
+//  Evolution fakes stay up for the whole run; per-scenario state is reset between children.
 //
 //  THE LIMIT, stated plainly. The model's outputs are PINNED, not re-derived. This suite proves
 //  the ORCHESTRATION — how many turns a message takes, which state each turn is in, what closes
@@ -102,13 +102,9 @@ function kindOf(body) {
         `self-learning analyze — system="${sys.slice(0, 70)}…"`
     );
   }
-  // The NEW (@secretaria) pilot has NO output_config path. But the LEGACY (@assistant) flow — run
-  // in parallel by the dual-tag change and exercised in §6 — DOES: the frozen assistant_settings
-  // makes a propose call (PROPOSE_SCHEMA: tags+reasoning) and a classifyConfirmation call
-  // (CONFIRM_SCHEMA: decision). Recognise those two; anything else with a schema is a real fault.
+  // The @secretaria pilot has NO output_config path — the whole flow is the merged turn call.
+  // So any output_config (schema) call is a real fault.
   const keys = Object.keys(schema.properties || {});
-  if (keys.includes("tags") && keys.includes("reasoning")) return "legacy_propose";
-  if (keys.includes("decision")) return "legacy_classify";
   throw new Error(`kindOf: an unexpected output_config call — properties=${JSON.stringify(keys)}`);
 }
 
@@ -232,10 +228,7 @@ async function startServer(selfLearnDir) {
         EVOLUTION_INSTANCE: "secretary",
         REDIS_URL: "",
         OWNER_NAME: "Marcelo",
-        // DUAL-TAG: @assistant is the LEGACY (OLD) flow, @secretaria the NEW flow. The existing
-        // §1-§5 drive "@secretaria …" and so exercise the NEW turn loop unchanged; §6 drives BOTH
-        // tags in one server to prove OLD and NEW run side by side, isolated.
-        SECRETARY_TAG: "@assistant",
+        // §1-§5 drive "@secretaria …", exercising the @mary turn loop.
         SECRETARY_TAG_NEW: "@secretaria",
         SELF_LEARNING_DIR: selfLearnDir,
         GOOGLE_CLIENT_ID: "",
@@ -318,17 +311,6 @@ const silent = (awaitFrom = "owner") =>
 const execute = (tags) =>
   turnReply({ say: null, next: "execute", skills: ["assistant_settings"], info: { tags } });
 const done = (say = null) => turnReply({ say, next: "done", skills: [], info: null });
-
-// LEGACY (@assistant) flow fixtures (§6 only). The OLD router shares the "Available tasks:" system
-// prompt, so its call is a "turn" to the fake too — but it returns the OLD { tasks, lang, info }
-// shape (NOT the three-state shape). Then the frozen assistant_settings makes its two
-// output_config calls: propose (tags + reasoning) and classifyConfirmation (decision).
-const legacyRoute = (tasks, info = null) =>
-  ({ kind: "turn", json: JSON.stringify({ tasks, lang: "en", info }) });
-const legacyPropose = (tags, reasoning = "Collapsing to the short form.") =>
-  ({ kind: "legacy_propose", json: JSON.stringify({ tags, reasoning }) });
-const legacyClassify = (decision) =>
-  ({ kind: "legacy_classify", json: JSON.stringify({ decision }) });
 
 const raw = (msgs) => msgs.join("\n~~~\n");
 const has = (msgs, s) => raw(msgs).includes(s);
@@ -538,57 +520,6 @@ console.log("\n=== §5  the repair loop: a bad payload re-turns, never writes ==
   check("§5.2  NOTHING was written (no outcome message names an applied tag)",
     !has(t.out, "@ ass ist") && !has(t.out, "@b a d") && !has(t.out, "@assist"));
   check("§5.3  a repair-give-up capture was filed", (await nReports(s.dir)) > before);
-
-  await s.done();
-}
-
-// ============================================================================
-//  §6 — DUAL-TAG: OLD (@assistant) and NEW (@secretaria) run side by side in ONE server.
-//  This is the load-bearing deliverable of the parallel-run change: the same running process
-//  answers @secretaria with the NEW turn loop AND @assistant with the OLD propose/confirm
-//  machinery, and a tag change made through the NEW flow does NOT disturb @assistant.
-// ============================================================================
-console.log("\n=== §6  dual-tag: OLD (@assistant) + NEW (@secretaria) in one server ===\n");
-{
-  const s = await scenario();
-
-  // (A) NEW flow. @secretaria drives the three-state turn loop: propose (listen), then confirm
-  // EXECUTEs the converted skill, which applies the tag to the NEW list and returns a read-back.
-  scripted = [listen("Switch how you summon me to @maria? Reply to confirm.", "owner")];
-  const a1 = await say("@secretaria change your tag to @maria");
-  console.log(`   owner    : @secretaria change your tag to @maria     [NEW flow]`);
-  console.log(`   assistant: ${a1.out.map((m) => JSON.stringify(m.slice(0, 50))).join(" | ") || "(nothing)"}`);
-  check("§6.1  @secretaria(NEW): the FIRST turn is the model's proposal via the turn loop",
-    a1.turnCalls === 1 && has(a1.out, "Reply to confirm") && !has(a1.out, "didn't understand"));
-  scripted = [execute(["@maria"]), done(null)];
-  const a2 = await say("yes do it");
-  console.log(`   owner    : yes do it   <- UNTAGGED confirm [NEW flow]`);
-  check("§6.2  @secretaria(NEW): confirm EXECUTEs the converted skill (@maria) + a read-back turn fires",
-    has(a2.out, "@maria") && a2.turnCalls === 2);
-
-  // (B) OLD flow, in the SAME server, AFTER the NEW-flow change above. @assistant drives the
-  // LEGACY propose/confirm machinery — output_config calls, the "hold this for 15 minutes"
-  // proposal — proving @assistant is untouched by the NEW-flow tag change to @maria.
-  scripted = [
-    legacyRoute(["assistant_settings"]), // the OLD router picks the skill
-    legacyPropose(["@assist"], "Collapsing @assistant to @assist."), // …which then proposes
-  ];
-  const b1 = await say("@assistant change your tag to @assist");
-  console.log(`   owner    : @assistant change your tag to @assist     [OLD flow]`);
-  console.log(`   assistant: ${b1.out.map((m) => JSON.stringify(m.slice(0, 50))).join(" | ") || "(nothing)"}`);
-  check("§6.3  @assistant(OLD): drives the LEGACY propose flow (the 15-minute hold), NOT the turn loop",
-    has(b1.out, "hold this for 15 minutes") && has(b1.out, "@assist"));
-  check("§6.4  @assistant(OLD): the proposal WROTE nothing yet (no 'Done'), and never leaked the NEW tag",
-    !has(b1.out, "Done") && !has(b1.out, "@maria"));
-  scripted = [legacyClassify("confirm")];
-  const b2 = await say("sim, pode");
-  console.log(`   owner    : sim, pode   <- UNTAGGED confirm [OLD flow]`);
-  console.log(`   assistant: ${b2.out.map((m) => JSON.stringify(m.slice(0, 50))).join(" | ") || "(nothing)"}`);
-  // The outcome names the NEW @assist and RETIRES the old @assistant (in-memory store here, so
-  // it's the "no longer works" outcome, not the persisted "Done." — either way the change applied).
-  check("§6.5  @assistant(OLD): the untagged confirm APPLIES via the legacy resumeConfirm (@assist, retires @assistant)",
-    has(b2.out, "@assist") && has(b2.out, "no longer"));
-  check("§6.6  isolation: the OLD flow never emitted the NEW tag (@maria)", !has(b2.out, "@maria"));
 
   await s.done();
 }

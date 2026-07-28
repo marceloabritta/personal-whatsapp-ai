@@ -36,8 +36,8 @@ Seven skills exist today:
 - `task_action` — a to-do inbox: add / list / complete / edit / delete todos, **one or many
   per message**, via a single list-aware planner that matches the owner's words to tasks on
   file. Stays **engaged without re-tagging** for a window. A todo for the owner goes to Google
-  Tasks; one assigned to someone else becomes a 5-min Calendar invite (via `calendar_action`'s
-  `startCreate` capability). See `New Features Plans/task-improvements.md`.
+  Tasks; one assigned to someone else becomes a 5-min Calendar invite (the orchestrator model
+  chains a `calendar_action` create). See `New Features Plans/task-improvements.md`.
 - `feature_request` — talk through a new feature idea; the secretary interviews the owner, then
   writes a Markdown spec and sends it as a `.md` document.
 - `feedback` — **tell the secretary it made a mistake and it files itself a bug report.** Reply
@@ -51,21 +51,19 @@ Seven skills exist today:
   multi-stop and carrier-chained (self-transfer) itineraries Kiwi floats to the top of a
   cheapest-first list, **before** the sort. One follow-up turn hands over the booking link
   (`link for option 2`, tagged or not). It **never buys**. Provider: Kiwi's keyless MCP
-  endpoint. See `secretary/2. Skills/6. Flight Search/SKILL.md`.
-- `assistant_settings` — **change how you summon her, by asking her.** `@assistant, change your
+  endpoint. See `secretary/3. Mary Skills/6. Flight Search/SKILL.md`.
+- `assistant_settings` — **change how you summon her, by asking her.** `@mary, change your
   tag to @assist`: she deduces whether the other language's call should change too, says the
   reasoning in prose, shows the **complete** new tag list, and applies it only on a `yes`. The
-  confirmed list is **persisted** (Redis, no TTL) and **wins over `SECRETARY_TAG`**, which is now
-  only the seed. See `secretary/2. Skills/7. Assistant Settings/SKILL.md`.
+  confirmed list is **persisted** (Redis, no TTL) and **wins over `SECRETARY_TAG_NEW`**, which is now
+  only the seed. See `secretary/3. Mary Skills/7. Assistant Settings/SKILL.md`.
 
-**Two skill trees run in parallel (A/B), selected by summon tag** (see §2 and `ARCHITECTURE.md`).
-The seven descriptions above are the OLD (`@assistant`) tree, `secretary/2. Skills/` — each skill
-holds its own propose/confirm dialogue. **`@mary` routes to a second, fully-converted tree,
-`secretary/3. Mary Skills/`**, where the same seven skills are **pure tasks**: the orchestrator
-model runs every conversation and each skill only validates its declared `inputs`, acts, and
-returns a value (calendar/tasks/flights use a READ-then-ACT contract; the calendar↔tasks
-`startCreate` coupling exists only in the old tree). Both trees are discovered at boot into their
-own maps; a bug in one cannot reach the other. See each `3. Mary Skills/<N>/SKILL.md`.
+**One skill tree, summoned by `@mary`** (see §2 and `ARCHITECTURE.md`). The seven skills live under
+`secretary/3. Mary Skills/` and are **pure tasks**: the orchestrator model runs every conversation
+and each skill only validates its declared `inputs`, acts, and returns a value the orchestrator
+reads back (calendar/tasks/flights use a READ-then-ACT contract). The model chains skills itself —
+there is no cross-skill `startCreate`/`callSkill` coupling. The tree is discovered at boot from
+`3. Mary Skills/*/skill.js`. See each `3. Mary Skills/<N>/SKILL.md`.
 
 ---
 
@@ -77,8 +75,8 @@ own maps; a bug in one cannot reach the other. See each `3. Mary Skills/<N>/SKIL
 - **GitHub:** repo `personal-whatsapp-ai` is **PRIVATE**. This local folder is a working
   **git clone** tracking `origin/main` (`gh` provides auth).
 - **Production (the droplet): ✅ v2.0 is DEPLOYED and LIVE** (cut over 2026-07-10). Trigger
-  now **`@secretaria` / `@secretary`** (comma-separated `SECRETARY_TAG=@secretaria,@secretary`;
-  the legacy `@brain` is retired and silently ignored) and instance kept as **`secretaria`**
+  now **`@mary`** (`SECRETARY_TAG_NEW=@mary`; the legacy `@brain`/`@assistant` tags are retired and
+  silently ignored) and instance kept as **`secretaria`**
   (`EVOLUTION_INSTANCE=secretaria`) so WhatsApp stayed linked. Old
   v3.3 code backed up at `/opt/brain_v3.3_backup`; compose backup at
   `/opt/evolution/docker-compose.yml.v3.3.bak`.
@@ -87,12 +85,12 @@ own maps; a bug in one cannot reach the other. See each `3. Mary Skills/<N>/SKIL
   `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
   (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
 
-- **@mary now runs a fully-converted stack (2026-07-15).** The `@mary` flow discovers its own
-  isolated tree `secretary/3. Mary Skills/` (all seven skills converted to pure tasks — the
-  orchestrator holds every conversation; calendar/tasks/flights are READ-then-ACT). `@assistant`
-  is unchanged (OLD `2. Skills/` tree + legacy flow). This is an **A/B parallel run**; the default
-  flip (retiring the old tree) is a later card, and it is gated on the human's live
-  `router-selftest.mjs` against the new catalog.
+- **Single always-@mary flow (2026-07-28).** `@mary` (env `SECRETARY_TAG_NEW`, default `@mary`)
+  summons the orchestrator turn loop: the model drives listen/execute/done, and `execute` is
+  non-terminal (a skill's return value drives a read-back turn). Skills live only under
+  `secretary/3. Mary Skills/` (all seven pure tasks — the orchestrator holds every conversation;
+  calendar/tasks/flights are READ-then-ACT). There is no @assistant flow, no OLD/NEW split, no
+  A/B run: the retired `2. Skills/` tree and `1. Orchestrator/legacy/` are deleted.
 
 **What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
 Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
@@ -156,7 +154,7 @@ ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v
 5. **Calendar feature backlog (open).** Smart scheduling (Phase C) and edit/reschedule
    (Phase B) are ✅ **shipped**. Remaining, see `New Features Plans/calendar-actions.md`:
    conflict/availability check on create, read/query events, and recurring events.
-6. **Product upgrades (backlog).** More skills (each a folder under `2. Skills/`),
+6. **Product upgrades (backlog).** More skills (each a folder under `3. Mary Skills/`),
    private reply when `@secretary` is used in a group. (A "confirm before acting" step now
    exists for cancellations, built on the stateful session layer.)
 
@@ -196,13 +194,14 @@ ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v
 │   │   ├── server.js      #   webhook, start/continue gate, context, dispatch
 │   │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
 │   │   └── router/{prompt,router}.js
-│   └── 2. Skills/
-│       ├── 1. Calendar Actions/{skill,prompt}.js   # create + cancel/delete; exports capabilities.startCreate
+│   └── 3. Mary Skills/    # pure-task tree (manifest.conversation:"orchestrator" + declared inputs)
+│       ├── 1. Calendar Actions/{skill,prompt}.js   # create + edit + cancel/delete + list (READ-then-ACT)
 │       ├── 2. Audio transcriptions/{skill,prompt}.js
-│       ├── 3. Tasks/{skill,prompt}.js              # Google Tasks (self) / delegates task-for-others to Calendar
+│       ├── 3. Tasks/{skill,prompt}.js              # Google Tasks (self); task-for-others = model chains a calendar create
 │       ├── 4. Feature Requests/{skill,prompt}.js   # clarify conversation → Markdown spec sent as a .md document
 │       ├── 5. Feedback/{skill,prompt}.js           # "you got this wrong" → a self-learning failure report
-│       └── 6. Flight Search/{skill,prompt}.js      # confirm-first flight search (Kiwi); 3 cheapest AFTER the junk filter
+│       ├── 6. Flight Search/{skill,prompt}.js      # confirm-first flight search (Kiwi); 3 cheapest AFTER the junk filter
+│       └── 7. Assistant Settings/{skill,prompt}.js # change the summon tag by asking (@mary), persisted in Redis
 └── evolution/
     ├── docker-compose.yml # Evolution API + Postgres + Redis + secretary
     └── .env.example
@@ -234,7 +233,7 @@ ANTHROPIC_API_KEY=dummy npm start
   different branch than the orchestrator, so a single `node_modules` at the `secretary/` root
   is the only place both can reach. Start command is `node "1. Orchestrator/server.js"`
   run from `secretary/` (that's what `npm start` does).
-- Folder names have spaces and numbers (`1. Orchestrator`, `2. Skills/1. Calendar
+- Folder names have spaces and numbers (`1. Orchestrator`, `3. Mary Skills/1. Calendar
   Actions`). The orchestrator loads skills via dynamic `import(pathToFileURL(...))`,
   which handles the spaces. Don't convert these to static imports across folders.
 - Requires Node 18+ (uses `fetch`, `fileURLToPath`, `pathToFileURL`). The droplet runs
@@ -248,7 +247,7 @@ it for iterating on skill logic — prefer mocked tests (§9).
 
 ## 6. How a skill works (the contract)
 
-Each skill is a folder under `2. Skills/` with a `skill.js`:
+Each skill is a folder under `3. Mary Skills/` with a `skill.js`:
 
 ```js
 export const manifest = {
@@ -259,7 +258,7 @@ export const manifest = {
 export async function run(ctx) { /* do the work, reply via ctx.send */ }
 ```
 
-The orchestrator scans `2. Skills/*/skill.js` at boot, builds `{ [id]: run }` and a
+The orchestrator scans `3. Mary Skills/*/skill.js` at boot, builds `{ [id]: run }` and a
 catalog `[{id, description, inputs}]` that it passes to the router. **Adding a skill = drop in a
 folder. No edits to `server.js` or the router.**
 
@@ -285,13 +284,14 @@ send, sessions, session, lang`.
   (else null); `ctx.fromMe` says whether the owner (true) or the contact (false) sent it.
 
 **Stateful flow (§ see `secretary/1. Orchestrator/ORCHESTRATOR.md`):** a flow STARTS only when the
-owner sends `@secretary`. While a session is open, the orchestrator hands each message from
-the awaited party (`session.awaitFrom`: owner / contact / any) to the owning skill,
-which uses the LLM to detect the awaited answer and ignores normal chatter — no reply or
-tag needed. Trigger tags + the reply header live in the shared module
-`secretary/1. Orchestrator/lib/identity.js` (exports `TAGS`, `headerFor`, `isOwnMessage`,
-`matchedTag`); the secretary never reacts to its own header'd messages (`isOwnMessage`
-matches every header variant, incl. the legacy `[AI Brain]:`).
+owner sends `@mary`. While a session is open, the orchestrator turn loop takes each message from
+the awaited party (`session.awaitFrom`: owner / contact / any) and lets the model detect the
+awaited answer, ignoring normal chatter — no reply or tag needed. Trigger tags + the reply header
+live in the shared module `secretary/1. Orchestrator/lib/identity.js` (exports `NEW_TAGS`,
+`headerFor`, `isOwnMessage`, `matchedTagNew`); the accepted-tags list stored at
+`secretary:settings:new:tags` wins over the `SECRETARY_TAG_NEW` seed. The secretary never reacts to
+its own header'd messages (`isOwnMessage` matches every header variant, incl. the legacy
+`[AI Brain]:`).
 
 Convention: prompt/text lives in the skill's `prompt.js`, logic in `skill.js`.
 **Localization:** user-facing strings are a per-language map (`{ en, pt }`) in `prompt.js`,
@@ -325,7 +325,7 @@ cd /opt && git clone <repo-url> personal-whatsapp-ai
 # 2. Point the secretary at the app folder.
 #    The compose 'secretary' service mounts /opt/secretary and runs `npm install && npm start`,
 #    and npm start = node "1. Orchestrator/server.js". So /opt/secretary must contain the
-#    CONTENTS of secretary (package.json at its root, "1. Orchestrator/", "2. Skills/").
+#    CONTENTS of secretary (package.json at its root, "1. Orchestrator/", "3. Mary Skills/").
 #    Simplest: back up the current /opt/secretary, then repoint it:
 mv /opt/secretary /opt/brain_v1_backup
 ln -s /opt/personal-whatsapp-ai/secretary /opt/secretary     # or copy the contents
@@ -334,7 +334,7 @@ ln -s /opt/personal-whatsapp-ai/secretary /opt/secretary     # or copy the conte
 cp /opt/brain_v1_backup/.env /opt/secretary/.env
 #    then add the new key:  ASSEMBLYAI_API_KEY=...   (and ASSEMBLYAI_LANGUAGE=pt for PT audio)
 #    decide trigger/instance: set them in the compose 'secretary' env:
-#      SECRETARY_TAG: "@secretaria,@secretary"   # comma-separated; the legacy @brain is retired
+#      SECRETARY_TAG_NEW: "@mary"   # comma-separated seed; the legacy @brain/@assistant tags are retired
 #      EVOLUTION_INSTANCE: secretaria # if you want to keep the existing linked instance
 
 # 4. Recreate the secretary (force-recreate because .env changed)
@@ -376,7 +376,7 @@ conflate them. The webhook URL still uses the *container* hostname `http://secre
   (`tasks.insert`/`list`/`patch`/`delete` on `GOOGLE_TASKLIST_ID || "@default"`). `due`
   is **date-only** (stored at UTC midnight). Without the scope, calls 401 and the skill
   replies `failed()`. A to-do assigned to another person is created as a Calendar invite
-  instead (via the capability registry) — Tasks itself notifies no one.
+  instead (the orchestrator model chains a `calendar_action` create) — Tasks itself notifies no one.
 - **Kiwi (flight search) — `https://mcp.kiwi.com`, verified live 2026-07-12.** Used by
   `flight_search` via a plain `fetch` (no SDK, no new dependency). JSON-RPC `tools/call`, tool
   name `search-flight`. **No API key, no account, no billing** — and **no `initialize` handshake
@@ -400,8 +400,9 @@ conflate them. The webhook URL still uses the *container* hostname `http://secre
   (b) **ITS RESULTS ARE VOLATILE.** The identical query, run four times, returned **four disjoint
   result sets** — 11 of 15 itineraries surviving the skill's filter on one, **15 of 15** on
   another. *"The filter dropped everything today and nothing yesterday"* is **expected, not a
-  bug**, and it is why `scripts/flights-selftest.mjs`'s fixture is **frozen and hand-built**: a
-  fixture regenerated from a live call would stop discriminating and silently gut the suite.
+  bug** — which is why any offline flight fixture must be **frozen and hand-built**: a fixture
+  regenerated from a live call would stop discriminating and silently pass on the junk it exists
+  to catch.
 - **Redis (secretary session state):** in addition to being Evolution's cache, the secretary
   stores per-chat conversation state in Redis (`lib/sessions.js`, key prefix
   `secretary:session:`, TTL'd). `REDIS_URL` defaults to `redis://evolution_redis:6379`
@@ -457,15 +458,6 @@ cheapest smoke test: `ANTHROPIC_API_KEY=dummy npm start`.
 **Committed self-tests** (the first of the `test/` folder above, in spirit). *No numeral here on
 purpose — this list went stale once already by counting.*
 
-- `node scripts/flights-selftest.mjs` — **offline** (no network, no keys: `fetch` and
-  `ctx.anthropic` are stubbed, `createSessions()` runs on its in-memory Map). 65 assertions over
-  `flight_search`. The two it exists for: **the result filter runs BEFORE the sort** (a
-  sort-then-filter build shows the owner self-transfer junk — on a real capture the four cheapest
-  results were all carrier chains), and **the options tombstone is written at FLOW START** (or a
-  search that finds nothing leaves the *previous* search's booking links addressable). Its Kiwi
-  fixtures are **frozen and hand-built — never regenerate them from a live call** (Kiwi's results
-  are volatile; a refreshed fixture stops discriminating and the suite passes on the very bug it
-  exists to catch — test `#4a` guards this).
 - `node scripts/selflearning-selftest.mjs` — the self-learning capture invariants, fully
   offline (fake `ctx`, stub `anthropic`, reports redirected to a temp dir via
   `SELF_LEARNING_DIR`). Asserts redaction, machine dedupe, the `{ ...ctx }`-spread guard, that
@@ -486,19 +478,13 @@ purpose — this list went stale once already by counting.*
   funnels stay independent (one empty/failing spool never stops the other); and
   `rsync --remove-source-files` is never passed.
 - `node scripts/identity-selftest.mjs` — offline. Asserts the trigger tag and reply header values
-  in `lib/identity.js` (`TAGS` defaults to `@assistente,@assistant`; `headerFor()` returns the
-  Assistant pair; the old tags no longer match) **and** — the one that protects something — that
-  `isOwnMessage()` still recognises the **retired** headers (`[Marcelo's AI Secretary]:` /
+  in `lib/identity.js` (`NEW_TAGS` from `SECRETARY_TAG_NEW`, default `@mary`; `matchedTagNew()`
+  matches it; `headerFor()` returns the Secretary reply-header pair) **and** — the one that protects
+  something — that `isOwnMessage()` still recognises the **retired** headers (`[Marcelo's AI Secretary]:` /
   `[Secretaria IA do Marcelo]:` / `[AI Brain]:`), bolded and unbolded. Those `LEGACY_HEADERS`
   entries look like dead code and are not: they are what keeps the feedback skill able to see the
   bot's own back-catalogue of messages as its own. Delete them and every quoted old bot message is
   silently reclassified as "context only".
-- `ANTHROPIC_API_KEY=… node scripts/tasks-addressed-selftest.mjs` — the Tasks planner's
-  **addressed** bit. Two halves: a **live** half (16 planner calls, a few cents) proving the
-  overheard chatter produces an empty plan *and* that genuine untagged follow-ups still act, and
-  an **offline** half linting the wiring (all three `planTaskOps` call sites pass `ctx.isTagged`,
-  never a literal). The lint alone: `TASKS_SELFTEST_OFFLINE=1 node scripts/tasks-addressed-selftest.mjs`.
-  The acceptance run is `RUNS=3` — the fix is probabilistic.
 - `ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs` — calls the **live** router against
   the real catalog and asserts that a *complaint* ("you scheduled that at the wrong time") is
   **filed as feedback, not executed as a calendar order**. Costs a few cents. Run it after any
@@ -511,6 +497,29 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Retired the @assistant/@assistente flow — a single always-@mary flow now.**
+  Deleted `1. Orchestrator/legacy/` (the frozen pre-migration router/prompt/inputs/assistant-settings)
+  and the `2. Skills/` duplicate skill tree; collapsed the dual-tag routing gate in `server.js` to a
+  single always-@mary flow (the gate now matches `matchedTagNew` only, `flow = NEW_FLOW`), and removed
+  `runLegacyFlow`, `LEGACY_SKILLS`/`LEGACY_CATALOG`/`LEGACY_FLOW`, the old-tree discovery
+  (`SKILLS`/`CATALOG`/`CAPS`), `MAX_SKILL_DEPTH`, the `ctx.callSkill`/`ctx.hasSkill` cross-skill
+  registry, and the legacy `settings` store handle + its boot-load. Removed the legacy tag half
+  (`TAGS`/`seed`/`setTags`/`matchedTag`) from `lib/identity.js` (the @mary exports
+  `NEW_TAGS`/`setNewTags`/`matchedTagNew` are unchanged; `LEGACY_HEADERS` is kept so `isOwnMessage`
+  still recognises the bot's own older messages). Dropped `SECRETARY_TAG` from `.env.example` +
+  `evolution/docker-compose.yml` (`SECRETARY_TAG_NEW`, default `@mary`, is now the only trigger-tag
+  var). **@mary behaviour is byte-for-byte unchanged** — every @mary continuation already satisfied
+  `!session?.skill`, so hard-coding the flow changed nothing @mary sees. Docs (`ARCHITECTURE.md`,
+  `README.md`, `secretary/README.md`, `ORCHESTRATOR.md`, the settings `SKILL.md`) scrubbed of the
+  two-flows/dual-tag narrative. Tests repointed onto `3. Mary Skills/`
+  (`selflearning`/`mary-skills`/`identity`/`settings-tag`/`settings`/`file-relay`/`calendar-recurrence`/
+  `timeformat`-selftest, plus the two live tests `router`/`calendar-extraction`); the legacy-only
+  `calendar-location`- and `turn-latency`-selftest were retired, and the four selftests that pinned
+  the deleted per-skill schema/plan-builder surface (`tasks-addressed`, `calendar-create`,
+  `calendar-edit`, `flights`) were retired (their subject ships in `3. Mary Skills/` in pure-task
+  form, which no longer exposes their imported surface — rewriting them against the pure-task shape
+  is a separate card). New behaviour guard: `scripts/retire-assistant-selftest.mjs` (a fromMe
+  `@assistant`/`@assistente` message now produces zero outbound sends; `@mary` still routes).
 - **2026-07-28 — Fix: @mary calendar create no longer gives up on an emailless guest; Mary now
   asks-or-books.** The Calendar Actions `create` contract required `participants[].email` for
   every named guest (`requiredWhen.create` + the `attendee_count_matches_email_count` consistency

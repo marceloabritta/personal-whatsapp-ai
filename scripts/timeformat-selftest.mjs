@@ -7,8 +7,7 @@
 //  Every user-facing calendar clock time renders as BARE, zero-padded 24-hour
 //  (`09:30`, `12:00`, `15:00`, `00:00`) — uniform, no AM/PM, no morning/afternoon
 //  branching, in America/Sao_Paulo (already REPLY_TZ). This is display-only; the
-//  two formatters are duplicated across the assistant (`2. Skills`) and Mary
-//  (`3. Mary Skills`) calendar stacks, so BOTH copies are asserted.
+//  formatter lives in the Mary (`3. Mary Skills`) calendar stack, asserted here.
 //
 //  Offline: no network, no API key, no Redis, no Google credentials, no framework,
 //  no new dependency. FREE. Dynamic import() of the two prompt.js modules — the
@@ -22,9 +21,6 @@
 //
 //  Run:  node scripts/timeformat-selftest.mjs
 // ============================================================================
-const ASSISTANT = await import(
-  new URL("../secretary/2. Skills/1. Calendar Actions/prompt.js", import.meta.url).href
-);
 const MARY = await import(
   new URL("../secretary/3. Mary Skills/1. Calendar Actions/prompt.js", import.meta.url).href
 );
@@ -66,7 +62,6 @@ const CASES = [
 
 const AMPM = /\b[AP]M\b/;
 const STACKS = [
-  { name: "assistant (2. Skills)", mod: ASSISTANT },
   { name: "mary (3. Mary Skills)", mod: MARY },
 ];
 

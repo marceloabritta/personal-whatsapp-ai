@@ -6,15 +6,12 @@
 //  Redis), and the router's JUDGEMENT can only be checked with a live, real-money call
 //  (scripts/router-selftest.mjs — the human's gate). So this drives the DETERMINISTIC
 //  discovery + declared-inputs layer directly — the same thing server.js loadSkills() and
-//  lib/inputs.js checkPayload() do — over BOTH skill trees, with no server boot, no network,
+//  lib/inputs.js checkPayload() do — over the @mary skill tree, with no server boot, no network,
 //  no model. It asserts the contract of @mary's converted stack:
 //
-//    T1  both trees discover cleanly — every skill.js under "2. Skills/" AND "3. Mary Skills/"
-//        imports and exports manifest.id + a run() function.
-//    T2  same seven ids in both trees, and per-flow maps DISJOINT: newTree[id].run is a
-//        DIFFERENT function object than oldTree[id].run — proves the new stack is an isolated
-//        copy, not a shared module (the parallel A/B run must never let one flow reach into
-//        the other).
+//    T1  the @mary tree discovers cleanly — every skill.js under "3. Mary Skills/" imports and
+//        exports manifest.id + a run() function.
+//    T2  exactly the seven expected ids, each exposing a run() function.
 //    T3  every new manifest is a PURE TASK: conversation === "orchestrator" (the model runs
 //        the dialogue; the skill only acts + returns).
 //    T4  the declared read-then-act inputs validate a READ payload AND an ACT payload through
@@ -29,7 +26,7 @@
 //        lives in server.js and isn't offline-unit-testable; this pins the deterministic
 //        contract around it (CONVENTIONS §5).
 //
-//  Each assertion FAILS if the feature is absent: no "3. Mary Skills/" tree -> T1/T2 fail; an
+//  Each assertion FAILS if the feature is absent: no "3. Mary Skills/" tree -> T1 fails; an
 //  unconverted skill left as conversation:"skill" -> T3 fails; a botched discriminator -> T4
 //  fails; transcribe left declaring inputs or as conversation:"skill" -> T5 fails.
 //
@@ -43,10 +40,9 @@ import { checkPayload } from "../secretary/1. Orchestrator/lib/inputs.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // scripts/
 const REPO = path.join(HERE, "..");
-const OLD_DIR = path.join(REPO, "secretary", "2. Skills");
 const NEW_DIR = path.join(REPO, "secretary", "3. Mary Skills");
 
-// The seven skills the card converts. Both trees must expose exactly this set.
+// The seven skills the card converts. The @mary tree must expose exactly this set.
 const EXPECTED = [
   "calendar_action",
   "transcribe_audio",
@@ -115,7 +111,6 @@ function payloadFrom(spec, overrides) {
 
 console.log("\nmary-skills self-test  (offline: discovery + declared-inputs contract)\n");
 
-const oldTree = await discover(OLD_DIR);
 const newTree = await discover(NEW_DIR);
 
 if (newTree.missing) {
@@ -126,41 +121,26 @@ if (newTree.missing) {
   );
 }
 
-// ---- T1 — both trees discover cleanly ---------------------------------------
-console.log("T1   both trees discover cleanly");
-check("old tree ('2. Skills/') is readable", !oldTree.missing);
+// ---- T1 — the @mary tree discovers cleanly ----------------------------------
+console.log("T1   the @mary tree discovers cleanly");
 check("NEW tree ('3. Mary Skills/') exists and is readable", !newTree.missing);
-check(
-  `old tree has no import/export problems (${oldTree.problems.join("; ") || "none"})`,
-  oldTree.problems.length === 0
-);
 check(
   `NEW tree has no import/export problems (${newTree.problems.join("; ") || "none"})`,
   newTree.problems.length === 0
 );
-check("old tree discovered at least one skill", Object.keys(oldTree.byId).length >= 1);
 check("NEW tree discovered at least one skill", Object.keys(newTree.byId).length >= 1);
 
-// ---- T2 — same seven ids, per-flow maps DISJOINT ----------------------------
-console.log("\nT2   same seven ids, and the two trees are DISJOINT modules");
-const oldIds = Object.keys(oldTree.byId).sort();
+// ---- T2 — exactly the seven ids, each exposing a run() ----------------------
+console.log("\nT2   exactly the seven expected ids, each with a run()");
 const newIds = Object.keys(newTree.byId).sort();
 const want = [...EXPECTED].sort();
-check(
-  `old tree exposes exactly the seven expected ids (${oldIds.join(", ") || "none"})`,
-  JSON.stringify(oldIds) === JSON.stringify(want)
-);
 check(
   `NEW tree exposes exactly the seven expected ids (${newIds.join(", ") || "none"})`,
   JSON.stringify(newIds) === JSON.stringify(want)
 );
 for (const id of EXPECTED) {
-  const oldRun = oldTree.byId[id]?.run;
   const newRun = newTree.byId[id]?.run;
-  check(
-    `${id}: distinct run() in each tree (isolation, no shared module)`,
-    typeof oldRun === "function" && typeof newRun === "function" && oldRun !== newRun
-  );
+  check(`${id}: NEW tree exposes a run() function`, typeof newRun === "function");
 }
 
 // ---- T3 — every new manifest is a pure task ---------------------------------

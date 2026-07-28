@@ -1,27 +1,19 @@
 // ============================================================================
 //  SECRETARY (v2.0)  —  ORCHESTRATOR.
 //  Receives the Evolution webhook, filters (fromMe + trigger tag), builds the
-//  context, DISCOVERS the available skills (../2. Skills/*/skill.js), calls the
+//  context, DISCOVERS the available skills (../3. Mary Skills/*/skill.js), calls the
 //  ROUTER to classify intent and dispatches to the chosen skill(s).
 //
 //  Flow:  webhook -> filter -> context -> router -> skill(s)
 //
-//  Adding a new skill = create a folder under "2. Skills/" with a skill.js that
+//  Adding a new skill = create a folder under "3. Mary Skills/" with a skill.js that
 //  exports { manifest, run }. The orchestrator loads it on its own at boot; no
 //  need to edit this file or the router.
 //
-//  DUAL-TAG PARALLEL RUN. Two flows live in this one process, selected by the summon tag on
-//  each message, as early as possible in the webhook handler:
-//    - @assistant (SECRETARY_TAG)     -> the LEGACY flow: route -> dispatch, on FROZEN pre-card
-//                                        code under ./legacy/. This is the owner's daily driver
-//                                        and it is byte-for-byte the committed (HEAD) behaviour.
-//    - @mary (SECRETARY_TAG_NEW)      -> the NEW flow: the orchestrator turn loop (three-state
-//                                        cycle, converted skills, read-back). The owner tests
-//                                        this live without touching @assistant.
-//  The two flows share only the truly-invariant rails (message I/O, sessions, formatting, the
-//  wrapped Anthropic client, self-learning) — exactly what the legacy path used at HEAD. They do
-//  NOT share the router, the input contract, or assistant_settings. The NEW flow's turn loop is
-//  inline in the webhook handler; the OLD flow is runLegacyFlow() (frozen dispatch), below it.
+//  A SINGLE ALWAYS-@mary FLOW. A message summoned by the @mary tag (SECRETARY_TAG_NEW) runs the
+//  orchestrator turn loop: the model drives a three-state cycle (listen / execute / done), the
+//  orchestrator holds a marker between messages, and `execute` is non-terminal — a converted
+//  skill's return value drives a read-back turn. The turn loop is inline in the webhook handler.
 // ============================================================================
 import express from "express";
 import Anthropic from "@anthropic-ai/sdk";
@@ -46,13 +38,10 @@ import { createSettings } from "./lib/settings.js";
 import { withThinkingDefault } from "./lib/llm.js";
 import { checkPayload, describeProblems } from "./lib/inputs.js";
 import {
-  TAGS,
   NEW_TAGS,
-  setTags,
   setNewTags,
   headerFor,
   isOwnMessage,
-  matchedTag,
   matchedTagNew,
 } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
@@ -60,28 +49,13 @@ import { route } from "./router/router.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
 import { captureFailure } from "./lib/selflearning.js";
 
-// ── DUAL-TAG PARALLEL RUN (@assistant = OLD flow, @mary = NEW flow) ──────────
-// The legacy (@assistant) path runs entirely on FROZEN copies of the pre-card code under
-// ./legacy/ — its own router, prompt, input contract and assistant_settings — none of which the
-// new (@mary) path imports. That is the structural guarantee that a bug anywhere in the @mary
-// path cannot change what @assistant does: they do not share the code that differs between them.
-import { route as routeLegacy } from "./legacy/router.js";
-import { checkPayload as checkPayloadLegacy } from "./legacy/inputs.js";
-import {
-  run as runAssistantSettingsLegacy,
-  manifest as legacyAssistantSettingsManifest,
-} from "./legacy/assistant-settings.js";
-
 // SELF-LEARNING: wrap console so the secretary can read its own recent logs back when it
 // writes a failure report. Must run before anything else logs — including loadSkills()
 // below. stdout is untouched, so `docker logs` still works exactly as before.
 installLogBuffer();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SKILLS_DIR = path.join(__dirname, "..", "2. Skills");
-// The NEW (@mary) flow discovers its OWN isolated skill tree. Same discovery machinery
-// (loadSkills below is parametrized), a different folder — so @mary routes to the converted
-// pure-task stack while @assistant keeps loading "2. Skills/". See ARCHITECTURE.md.
+// The @mary flow discovers its skill tree (the converted pure-task stack) via loadSkills below.
 const NEW_SKILLS_DIR = path.join(__dirname, "..", "3. Mary Skills");
 
 // ---- Config -----------------------------------------------------------------
@@ -89,8 +63,8 @@ const EVOLUTION_URL = process.env.EVOLUTION_URL || "http://api:8080";
 const APIKEY = process.env.EVOLUTION_APIKEY;
 const INSTANCE = process.env.EVOLUTION_INSTANCE || "secretary";
 // Trigger tags + reply header live in lib/identity.js (single source of truth,
-// shared with skills). TAGS is the accepted-tag list; headerFor(lang)/isOwnMessage/
-// matchedTag are imported above.
+// shared with skills). NEW_TAGS is the accepted-tag list; headerFor(lang)/isOwnMessage/
+// matchedTagNew are imported above.
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 // Cheap model for the long-tail translation fallback (see localizeBody).
 const TRANSLATE_MODEL =
@@ -124,35 +98,26 @@ const REDIS_URL =
     : process.env.REDIS_URL;
 const sessions = createSessions({ url: REDIS_URL });
 // Durable settings on the SAME Redis (no TTL, own key space). Today: the tag list the owner
-// summons her with, which he can change by asking (the `assistant_settings` skill).
-// SECRETARY_TAG is the SEED; a stored value wins — see the boot load below.
-const settings = createSettings({ url: REDIS_URL });
-// The NEW (@mary) flow's OWN durable tag store, namespaced so it can never overwrite the legacy
-// (@assistant) tag key. Same Redis, different key (secretary:settings:new:tags).
+// summons her with, which he can change by asking (the `assistant_settings` skill). SECRETARY_TAG_NEW
+// is the SEED; a stored value wins — see the boot load below. Namespaced (secretary:settings:new:tags).
 const newSettings = createSettings({ url: REDIS_URL, ns: "new" });
 
 const seen = new Set(); // dedup by messageId
 
 // ---- Skill discovery --------------------------------------------------------
-// Scans "2. Skills/*/skill.js". Each skill exports:
+// Scans "3. Mary Skills/*/skill.js". Each skill exports:
 //   export const manifest = { id, description }
 //   export async function run(ctx) { ... }
-//   export const capabilities = { name: (ctx, ...args) => ... }   // OPTIONAL
 // -> SKILLS: { [id]: run }  |  CATALOG: [{ id, description }] (the router's menu)
-//  | CAPS: { [id]: capabilities } — the internal skill-to-skill API (see ctx.callSkill).
-//    Capabilities are NEVER shown to the router; they let one skill compose another
-//    (e.g. task_action delegating a "task for someone" to calendar_action.startCreate)
-//    without importing its file — decoupled from folder paths, graceful when absent.
-async function loadSkills(dir = SKILLS_DIR) {
+async function loadSkills(dir = NEW_SKILLS_DIR) {
   const skills = {};
   const catalog = [];
-  const caps = {};
   let entries = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (e) {
     console.error("Could not read the skills folder:", dir, e.message);
-    return { skills, catalog, caps };
+    return { skills, catalog };
   }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
@@ -180,21 +145,12 @@ async function loadSkills(dir = SKILLS_DIR) {
         conversation:
           mod.manifest.conversation === "orchestrator" ? "orchestrator" : "skill",
       });
-      if (mod.capabilities && typeof mod.capabilities === "object") {
-        caps[id] = mod.capabilities;
-        console.log(
-          `skill loaded: "${e.name}" -> ${id} (capabilities: ${Object.keys(
-            mod.capabilities
-          ).join(", ")})`
-        );
-      } else {
-        console.log(`skill loaded: "${e.name}" -> ${id}`);
-      }
+      console.log(`skill loaded: "${e.name}" -> ${id}`);
     } catch (err) {
       console.error(`failed to load skill "${e.name}":`, err.message);
     }
   }
-  return { skills, catalog, caps };
+  return { skills, catalog };
 }
 
 // LONG-TAIL TRANSLATION FALLBACK. Maintained languages (en/pt) are already
@@ -308,9 +264,6 @@ function orch(lang, key, ...args) {
   return fn(...args);
 }
 
-// Max depth of skill→skill delegation (ctx.callSkill), a loop/recursion backstop.
-const MAX_SKILL_DEPTH = 4;
-
 // The orchestrator turn-loop bounds. A model that can call skills in a loop can LOOP on skills —
 // the bound is code, never the model. `MAX_TURNS` counts only PRODUCTIVE turns (silence is free);
 // `MAX_DISPATCHES` is a DISPATCH ceiling, NOT "3 writes" (a dispatch can be a read). `MAX_REPAIRS`
@@ -334,42 +287,13 @@ async function fireCapture(ctx, info) {
 }
 
 // ---- Boot -------------------------------------------------------------------
-const { skills: SKILLS, catalog: CATALOG, caps: CAPS } = await loadSkills();
-console.log(
-  "available skills:",
-  CATALOG.map((c) => c.id).join(", ") || "(none!)"
-);
-// The NEW (@mary) flow's OWN discovered tree (the converted pure-task stack). CAPS is NOT
-// discovered here on purpose — the caps-based Tasks→Calendar startCreate delegation is legacy
-// only, and the new tree exports no capabilities (see SCOPE Issue 2 / ARCHITECTURE.md).
+// The @mary flow's discovered tree (the converted pure-task stack).
 const { skills: NEW_SKILLS, catalog: NEW_CATALOG } = await loadSkills(NEW_SKILLS_DIR);
 console.log("mary skills:", NEW_CATALOG.map((c) => c.id).join(", ") || "(none!)");
 
-// ---- DUAL-TAG: the LEGACY view of the discovered skills ----------------------
-// The discovered SKILLS/CATALOG are the NEW flow's (assistant_settings is the CONVERTED pilot,
-// conversation:"orchestrator"). The LEGACY flow gets its OWN catalog + skill map, which differ
-// from the NEW ones in exactly ONE skill — assistant_settings:
-//   - LEGACY_SKILLS runs the FROZEN propose/classify assistant_settings (from ./legacy/), not the
-//     converted one; every other skill's run() is shared (its module is byte-for-byte HEAD but for
-//     a one-line `conversation:"skill"` note the legacy router never reads).
-//   - LEGACY_CATALOG carries the legacy assistant_settings manifest (inputs:null, no conversation),
-//     so the frozen legacy router prompt renders exactly as it did at HEAD. Every other entry keeps
-//     its HEAD description + inputs (the `conversation` field is simply not read by legacy/inputs.js).
-const LEGACY_SKILLS = { ...SKILLS, assistant_settings: runAssistantSettingsLegacy };
-const LEGACY_CATALOG = CATALOG.map((c) =>
-  c.id === "assistant_settings"
-    ? {
-        id: c.id,
-        description: legacyAssistantSettingsManifest.description,
-        inputs: legacyAssistantSettingsManifest.inputs, // null — the propose flow declares no inputs
-      }
-    : { id: c.id, description: c.description, inputs: c.inputs }
-);
-
-// Per-flow context bits used to BUILD ctx (tags/catalog/settings). The dispatch code itself is the
-// NEW turn loop (inline in the webhook) and runLegacyFlow (the OLD frozen dispatch, below).
+// Context bits used to BUILD ctx (tags/catalog/settings). The dispatch code is the turn loop,
+// inline in the webhook.
 const NEW_FLOW = { tags: NEW_TAGS, catalog: NEW_CATALOG, settings: newSettings };
-const LEGACY_FLOW = { tags: TAGS, catalog: LEGACY_CATALOG, settings };
 
 const app = express();
 app.use(express.json({ limit: "8mb" }));
@@ -406,20 +330,12 @@ app.post("/webhook", async (req, res) => {
     // Pending conversation state for this chat (confirmations, clarifications, ...).
     const session = await sessions.get(remoteJid);
 
-    // START: a flow only begins when the OWNER uses a trigger tag. We check BOTH tag lists —
-    // the legacy (@assistant) and the new (@mary) — because the summon tag is what selects the
-    // flow. `tag` is the tag this message actually starts with (or null) — used below to slice it
-    // off. If a message somehow matched BOTH lists (they are meant to be disjoint), the LEGACY
-    // flow wins, so @assistant is never starved by a NEW-flow tag collision.
-    // The NEW-flow matcher also sees an attachment caption, so a captioned document (whose `text`
-    // is "") can open the @mary gate on its caption. The LEGACY matcher keeps seeing `text` only —
-    // byte-identical to HEAD. For a captioned image, text already carries the caption, so
-    // gateText === text and nothing changes on that path either.
+    // START: a flow only begins when the OWNER uses a trigger tag. `tag` is the tag this message
+    // actually starts with (or null) — used below to slice it off. The matcher sees an attachment
+    // caption, so a captioned document (whose `text` is "") can open the gate on its caption. For a
+    // captioned image, text already carries the caption, so gateText === text.
     const gateText = text || attachmentCaption;
-    const legacyTag = fromMe ? matchedTag(text) : null;
-    const newTag = fromMe ? matchedTagNew(gateText) : null;
-    const taggedNew = !!newTag && !legacyTag; // a fresh NEW-flow order
-    const tag = taggedNew ? newTag : legacyTag;
+    const tag = fromMe ? matchedTagNew(gateText) : null;
     const isTagged = !!tag;
 
     // CONTINUE: while a session is active, the owning skill inspects EVERY message
@@ -444,29 +360,16 @@ app.post("/webhook", async (req, res) => {
       if (seen.size > 500) seen.delete(seen.values().next().value);
     }
 
-    // WHICH FLOW OWNS THIS MESSAGE (decided as early as possible).
-    //  - A TAGGED message: the tag decides — a NEW-flow tag -> the new turn loop, else legacy.
-    //  - A CONTINUATION: a SKILL-owned session (it carries a `skill` field) is a legacy-style
-    //    hand-off (the legacy dispatch bypass); a MARKER (no `skill`) is the new turn loop. The
-    //    NEW flow's converted assistant_settings never opens a skill session, so a
-    //    `skill:"assistant_settings"` session can only be the legacy propose/confirm flow — which
-    //    makes the split unambiguous. A NEW-flow-dispatched skill (e.g. calendar) that opens its
-    //    own session is continued via the same shared skill run in either case, so routing its
-    //    continuation through the legacy bypass is behaviourally identical.
-    const useNewFlow = isTagged ? taggedNew : !session?.skill;
-    const flow = useNewFlow ? NEW_FLOW : LEGACY_FLOW;
+    // The single @mary flow owns every message the gate lets through.
+    const flow = NEW_FLOW;
 
-    // Slice off the matched tag by ITS own length (tags can differ in length). NEW flow only:
-    // source the order from the attachment caption so a caption-borne instruction reaches the model
-    // on BOTH the first (tagged) turn AND a mid-session (untagged) continuation of a captioned
-    // document — whose `text` is "" (Amendment). The LEGACY branch is byte-identical to HEAD.
-    const order = useNewFlow
-      ? isTagged
-        ? gateText.slice(tag.length).trim() // first message, tagged caption -> POST-TAG instruction
-        : text.trim() || attachmentCaption.trim() // mid-session continuation -> caption if text empty
-      : isTagged
-      ? text.slice(tag.length).trim()
-      : text.trim(); // LEGACY — byte-identical to HEAD
+    // Slice off the matched tag by ITS own length (tags can differ in length). Source the order
+    // from the attachment caption so a caption-borne instruction reaches the model on BOTH the
+    // first (tagged) turn AND a mid-session (untagged) continuation of a captioned document —
+    // whose `text` is "" (Amendment).
+    const order = isTagged
+      ? gateText.slice(tag.length).trim() // first message, tagged caption -> POST-TAG instruction
+      : text.trim() || attachmentCaption.trim(); // mid-session continuation -> caption if text empty
     const number = remoteJid.split("@")[0]; // reply in the originating chat
 
     // Conversation context (Evolution history + in-memory buffer).
@@ -488,7 +391,7 @@ app.post("/webhook", async (req, res) => {
     const ctx = {
       owner: OWNER_NAME,
       tag: tag || flow.tags[0], // the tag this order used (fallback: the flow's primary tag)
-      tags: flow.tags, // the ACTIVE flow's accepted-tag list (TAGS legacy | NEW_TAGS new)
+      tags: flow.tags, // the flow's accepted-tag list (NEW_TAGS)
       anthropic,
       model: MODEL,
       order,
@@ -505,16 +408,15 @@ app.post("/webhook", async (req, res) => {
       isTagged,
       quoted,
       hasQuotedAudio: !!quoted?.hasAudio,
-      catalog: flow.catalog, // the ACTIVE flow's catalog (legacy renders assistant_settings as HEAD)
+      catalog: flow.catalog, // the flow's catalog (NEW_CATALOG)
       env: process.env,
       evolution,
       sessions, // store: get/set/clear per-chat state
-      settings: flow.settings, // the ACTIVE flow's durable tag store (legacy | namespaced-new)
+      settings: flow.settings, // the flow's durable tag store (namespaced-new)
       session: isContinuation ? session : null, // present only on a continuation
-      // SELF-LEARNING: one failure report per webhook turn. This is an OBJECT, not a
-      // boolean, and that is load-bearing: ctx.callSkill spreads the ctx ({ ...ctx }), so a
-      // flag set by a callee on a boolean field would mutate a COPY and never be seen by
-      // the caller. The spread copies this object's reference, so every frame shares it.
+      // SELF-LEARNING: one failure report per webhook turn. This is an OBJECT, not a boolean,
+      // and that is load-bearing: ctx.sendFailure and the read-back both read/write it, so the
+      // frame must share one reference rather than a copied flag.
       _turn: { captured: false },
     };
 
@@ -569,29 +471,6 @@ app.post("/webhook", async (req, res) => {
       });
       return res;
     };
-
-    // Cross-skill composition. `hasSkill` guards a friendly fallback; `callSkill`
-    // invokes another skill's exported capability, auto-injecting THIS ctx (so the
-    // callee shares owner/lang/sessions/send) with a depth guard against loops. A
-    // session the callee opens is tagged with the callee's id, so its continuations
-    // route to the callee. Missing capability -> throws (caught by the per-skill catch).
-    ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
-    ctx.callSkill = async (id, name, ...args) => {
-      const fn = CAPS[id]?.[name];
-      if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
-      const depth = (ctx._skillDepth || 0) + 1;
-      if (depth > MAX_SKILL_DEPTH)
-        throw new Error(`skill-call depth exceeded at ${id}.${name}`);
-      return fn({ ...ctx, _skillDepth: depth }, ...args);
-    };
-
-    // LEGACY (@assistant) FLOW. A fresh @assistant order, OR any skill-session continuation (a
-    // follow-up owned by a SKILL — it carries a `skill` field), runs the FROZEN pre-card dispatch
-    // (runLegacyFlow) and returns. Routing every skill-session continuation here is deliberate: the
-    // NEW flow's converted skills never open a skill session, and a NEW-flow-dispatched skill (e.g.
-    // calendar) that does is continued via the same shared run, so the hand-off is behaviourally
-    // identical. The NEW (@mary) turn loop is below; a marker (no `skill` field) reaches it.
-    if (!useNewFlow) return await runLegacyFlow(ctx, { session, isContinuation, number });
 
     // ========================================================================
     //  THE ORCHESTRATOR TURN LOOP  (the NEW / @mary flow).
@@ -906,123 +785,12 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ============================================================================
-//  THE LEGACY (@assistant) FLOW  —  FROZEN pre-card dispatch, verbatim.
-//  This is the code the webhook ran at HEAD (before card 55e00052): continuation-bypass, then a
-//  single router call, then dispatch to each chosen skill. It runs on the FROZEN legacy modules —
-//  routeLegacy (legacy/router.js), checkPayloadLegacy (legacy/inputs.js), LEGACY_SKILLS/
-//  LEGACY_CATALOG (legacy assistant_settings swapped in) — so @assistant is byte-for-byte the
-//  committed behaviour, and no code the NEW (@mary) flow can reach is on this path.
-//  ctx is already built (with the LEGACY flow's tags/catalog/settings); this only dispatches.
-// ============================================================================
-async function runLegacyFlow(ctx, { session, isContinuation, number }) {
-  const { remoteJid } = ctx;
-
-  // CONTINUATION: a follow-up owned by the skill that opened the session. Bypass the router and
-  // hand it straight to that skill (it reads ctx.session), exactly as at HEAD.
-  if (isContinuation) {
-    const run = LEGACY_SKILLS[session.skill];
-    if (!run) {
-      await sessions.clear(remoteJid); // owning skill gone; drop stale state
-      return;
-    }
-    ctx._turn.skill = session.skill; // so a soft report names the skill, not just "soft"
-    try {
-      await run(ctx);
-    } catch (e) {
-      console.error(`Session skill '${session.skill}' error:`, e);
-      await send(number, orch(ctx.lang, "continuationError"), ctx.lang);
-      await fireCapture(ctx, {
-        phase: "throw:continuation",
-        taskId: session.skill,
-        error: e,
-      });
-    }
-    return;
-  }
-
-  // FRESH COMMAND: a new tagged order overrides any pending session.
-  if (session) await sessions.clear(remoteJid);
-
-  // ROUTER: decide which skill(s) to run, detect the language — and, in the SAME call, extract the
-  // chosen skill's declared inputs. (Frozen legacy router: returns the OLD { tasks, lang, info }.)
-  let tasks;
-  let infoFor = null; // the ONE task allowed to receive the extracted payload
-  let routedInfo = null;
-  try {
-    const routed = await routeLegacy(ctx);
-    tasks = routed.tasks;
-    ctx.lang = routed.lang || ctx.lang; // reply in the detected language
-    routedInfo = routed.info;
-
-    // Plain code (no AI) decides whether the payload is usable — shape-valid is handed over,
-    // shape-invalid is withheld and the skill re-extracts for itself (HEAD behaviour). Scoped to
-    // tasks[0]: on a dual-intent turn the payload belongs to the FIRST skill only.
-    const primary = LEGACY_CATALOG.find((c) => c.id === tasks[0]);
-    const gate = checkPayloadLegacy(primary?.inputs, routedInfo);
-    infoFor = gate.shapeOk ? tasks[0] : null;
-    if (!gate.shapeOk && routedInfo)
-      console.log("ROUTER payload withheld:", gate.problems.join("; "));
-  } catch (e) {
-    console.error("Router error:", e);
-    await send(number, orch(ctx.lang, "routerError"), ctx.lang);
-    await fireCapture(ctx, { phase: "throw:router", taskId: "router", error: e });
-    return;
-  }
-  console.log("ROUTER -> tasks:", tasks, "lang:", ctx.lang);
-
-  // No recognized skill — the router ran fine and understood nothing (a missing capability).
-  if (!tasks.length || tasks.every((x) => !LEGACY_SKILLS[x])) {
-    const names = LEGACY_CATALOG.map((c) => c.id).join(", ");
-    await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
-    await fireCapture(ctx, {
-      phase: "unrouted",
-      taskId: "router",
-      unroutedOrder: ctx.order,
-    });
-    return;
-  }
-
-  // Dispatch to each skill in the order decided by the router.
-  for (const task of tasks) {
-    const run = LEGACY_SKILLS[task];
-    if (!run) continue;
-    ctx._turn.skill = task; // so a soft report names the skill, not just "soft"
-    // The pre-extracted payload, for the ONE task it belongs to and no other. Every other skill
-    // sees null and extracts for itself — which is exactly what it does today.
-    ctx.info = task === infoFor ? routedInfo : null;
-    try {
-      await run(ctx);
-    } catch (e) {
-      console.error(`Skill '${task}' error:`, e);
-      await send(number, orch(ctx.lang, "skillError"), ctx.lang);
-      await fireCapture(ctx, { phase: "throw:skill", taskId: task, error: e });
-    }
-  }
-}
-
-// ---- Boot: the STORED tag list wins over the SECRETARY_TAG seed --------------
-// `await settings.ready` is the load-bearing word here. createSettings() fires its Redis
+// ---- Boot: the STORED tag list wins over the SECRETARY_TAG_NEW seed ----------
+// `await newSettings.ready` is the load-bearing word here. createSettings() fires its Redis
 // connect without blocking (same shape as sessions.js), so live() is false for the first
 // moments of the process. Reading the stored tags WITHOUT awaiting ready would race the
 // connection, miss them, and fall back to the env seed — she would answer to the changed tag
 // until the first restart and then silently forget it. Top-level await; the package is ESM.
-await settings.ready;
-try {
-  const stored = await settings.loadTags();
-  if (stored?.length && setTags(stored)) {
-    console.log(`tags: ${TAGS.join(", ")} (source: stored setting)`);
-  } else {
-    console.log(`tags: ${TAGS.join(", ")} (source: SECRETARY_TAG seed)`);
-  }
-} catch (e) {
-  // A settings store that cannot be read is a degraded store, not a failed boot: she still
-  // answers to the seed.
-  console.error("tags: could not read the stored setting, using the seed:", e.message);
-}
-
-// The NEW (@mary) flow's stored tags, from its OWN namespaced store — same load-over-seed rule,
-// fully independent of the legacy load above, so the two can never overwrite each other.
 await newSettings.ready;
 try {
   const stored = await newSettings.loadTags();

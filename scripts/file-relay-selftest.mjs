@@ -14,8 +14,8 @@
 //  WHAT THIS SUITE ASSERTS (the DETERMINISTIC layer only, per CONVENTIONS §5):
 //    A. inboundMedia() returns the turn's media LIST, both webhook shapes, id from key.id
 //    B. inboundMedia() multi-file (attachment + quoted) — attachment first, quote second
-//    C. the captioned-document gate opens (new flow), legacy stays shut; plus the
-//       mid-session (untagged) continuation order derivation (the Amendment)
+//    C. the captioned-document gate opens (@mary flow); plus the mid-session
+//       (untagged) continuation order derivation (the Amendment)
 //    D. extractText() BYTE-IDENTITY regression tripwire (its three callers)
 //    E. mediaBlockFor() — the extension point: native image/PDF vs defer-to-null
 //    F. route() — N-block array when media present, byte-identical string when absent,
@@ -43,8 +43,7 @@
 // ============================================================================
 
 // Deterministic tags, set BEFORE any import evaluates identity.js's env-seeded lists.
-process.env.SECRETARY_TAG = "@assistente,@assistant"; // legacy list
-process.env.SECRETARY_TAG_NEW = "@mary"; // new-flow list
+process.env.SECRETARY_TAG_NEW = "@mary"; // @mary-flow list
 
 let failures = 0;
 function check(name, cond) {
@@ -69,7 +68,7 @@ const PR = await import(
 const { extractText, getQuoted } = WA;
 const inboundMedia = WA.inboundMedia; // undefined today
 const mediaBlockFor = WA.mediaBlockFor; // undefined today
-const { matchedTag, matchedTagNew } = ID;
+const { matchedTagNew } = ID;
 const { route } = RT;
 const { buildRouterUser } = PR;
 
@@ -257,21 +256,17 @@ check(
 console.log("\n=== C. captioned-document gate open + mid-session order (Amendment) ===\n");
 
 // First message, tagged caption. extractText of a document is "" today; the caption
-// carries the tag+order. The NEW matcher sees (text || caption); the LEGACY stays shut.
+// carries the tag+order. The @mary matcher sees (text || caption).
 const cText = extractText(bareDoc.message).trim(); // "" for a document
 const cCap = attachCaption(im(bareDoc, null)); // "@mary total?"
 const gateText = typeof cCap === "string" ? cText || cCap : ABSENT;
 check(
-  'C.1  NEW matcher opens on (text||caption): matchedTagNew("@mary total?") === "@mary"',
+  'C.1  @mary matcher opens on (text||caption): matchedTagNew("@mary total?") === "@mary"',
   gateText !== ABSENT && matchedTagNew(gateText) === "@mary"
 );
 check(
-  'C.2  new-flow order slice (text||caption).slice(tag).trim() === "total?"',
+  'C.2  @mary-flow order slice (text||caption).slice(tag).trim() === "total?"',
   gateText !== ABSENT && gateText.slice("@mary".length).trim() === "total?"
-);
-check(
-  "C.3  LEGACY matcher stays shut for the same document: matchedTag(text) === null",
-  matchedTag(cText) === null
 );
 
 // Legacy image path unchanged: a captioned image's text ALREADY carries the caption,

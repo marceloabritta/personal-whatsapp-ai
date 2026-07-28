@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // ============================================================================
-//  Self-test for lib/identity.js — the trigger TAGS and the reply HEADER.
+//  Self-test for lib/identity.js — the trigger tags and the reply HEADER.
 //
 //  identity.js is the single source of truth for (a) which tags start a flow and
 //  (b) the header stamped on every outgoing message. Two lists, opposite answers:
 //
-//    TAGS            — what the bot ANSWERS TO. Retiring a tag means it stops matching.
+//    NEW_TAGS        — what the bot ANSWERS TO. Retiring a tag means it stops matching.
 //    LEGACY_HEADERS  — what the bot RECOGNISES AS ITS OWN. Nothing is ever retired here.
 //
 //  The second one is the load-bearing invariant, and it is the one that breaks
@@ -16,15 +16,15 @@
 //  feedback skill quietly stops recognising the bot's own defects. No error. No log line.
 //  Assertion 4a is the only thing standing between LEGACY_HEADERS and a future cleanup.
 //
-//    1  TAGS default is the new pair, and neither old tag survives
+//    1  NEW_TAGS default is @mary
 //    2  headerFor() returns the new en/pt headers
 //    3  headerFor() still falls back to en for an unmaintained/absent lang
 //    4a isOwnMessage() STILL recognises the RETIRED headers       <-- the standing guard
 //    4b isOwnMessage() recognises the NEW headers
 //    5  a genuine owner message is NOT mistaken for the bot's
-//    6  matchedTag() matches the new tags and NOT the old ones
+//    6  matchedTagNew() matches @mary and NOT other tags
 //    7  slice-by-matched-tag-length still yields the order (server.js:271's contract)
-//    8  SECRETARY_TAG still overrides the code default (the production trap)
+//    8  SECRETARY_TAG_NEW still overrides the code default (the production trap)
 //
 //  identity.js reads process.env at MODULE TOP LEVEL, and a static `import` is hoisted
 //  above any env setup — so the env is set FIRST and the module pulled in with a dynamic
@@ -40,10 +40,10 @@
 const MODULE = "../secretary/1. Orchestrator/lib/identity.js";
 
 // Env FIRST, import second.
-delete process.env.SECRETARY_TAG; // prove the CODE DEFAULT, not whatever the shell exports
+delete process.env.SECRETARY_TAG_NEW; // prove the CODE DEFAULT, not whatever the shell exports
 process.env.OWNER_NAME = "Marcelo"; // make the header assertions concrete
 
-const { TAGS, headerFor, isOwnMessage, matchedTag } = await import(MODULE);
+const { NEW_TAGS, headerFor, isOwnMessage, matchedTagNew } = await import(MODULE);
 
 let failures = 0;
 function check(name, cond) {
@@ -66,10 +66,10 @@ console.log("\nidentity self-test  (offline)\n");
 
 // ---- 1: the tag the bot answers to ------------------------------------------
 check(
-  "1 TAGS default",
-  eq(TAGS, ["@assistente", "@assistant"]) &&
-    !TAGS.includes("@secretaria") &&
-    !TAGS.includes("@secretary")
+  "1 NEW_TAGS default",
+  eq(NEW_TAGS, ["@mary"]) &&
+    !NEW_TAGS.includes("@assistente") &&
+    !NEW_TAGS.includes("@assistant")
 );
 
 // ---- 2: the header it stamps -------------------------------------------------
@@ -114,24 +114,27 @@ check(
   isOwnMessage("marque uma reuniao com o savio amanha") === false
 );
 
-// ---- 6: the new tags match, the old ones do not ------------------------------
+// ---- 6: the @mary tag matches, other tags do not -----------------------------
 check(
-  "6 matchedTag new-not-old",
-  matchedTag("@assistente marque uma reuniao") === "@assistente" &&
-    matchedTag("@Assistente marque uma reuniao") === "@assistente" &&
-    matchedTag("@assistant find me a flight") === "@assistant" &&
-    matchedTag("@secretaria marque uma reuniao") === null &&
-    matchedTag("@secretary find me a flight") === null
+  "6 matchedTagNew mary-not-other",
+  matchedTagNew("@mary marque uma reuniao") === "@mary" &&
+    matchedTagNew("@Mary marque uma reuniao") === "@mary" &&
+    matchedTagNew("@mary find me a flight") === "@mary" &&
+    matchedTagNew("@assistente marque uma reuniao") === null &&
+    matchedTagNew("@assistant find me a flight") === null
 );
 
 // ---- 7: server.js:271's contract — slice by the MATCHED tag's own length -----
-// "@assistente" is 11 chars, "@assistant" is 10: the caller must never slice by a fixed
-// constant. Guarded — at HEAD matchedTag() returns null here, and a bare `.length` would
-// throw a stack trace instead of reporting a clean failed assertion.
-const mPt = "@assistente marque uma reuniao com o savio amanha";
-const mEn = "@assistant find me a flight to Lisbon";
-const tPt = matchedTag(mPt);
-const tEn = matchedTag(mEn);
+// "@secretaria" is 11 chars, "@secretary" is 10: the caller must never slice by a fixed
+// constant. Driven with a two-tag NEW_TAGS list of differing lengths (via SECRETARY_TAG_NEW
+// + a cache-busting re-import), then sliced by the RETURNED tag's own length. Guarded — a
+// bare `.length` on a null match would throw a stack trace instead of a clean failed assertion.
+process.env.SECRETARY_TAG_NEW = "@secretaria,@secretary";
+const { matchedTagNew: matchLen } = await import(`${MODULE}?len=1`);
+const mPt = "@secretaria marque uma reuniao com o savio amanha";
+const mEn = "@secretary find me a flight to Lisbon";
+const tPt = matchLen(mPt);
+const tEn = matchLen(mEn);
 check(
   "7 slice-by-length",
   !!tPt &&
@@ -139,16 +142,17 @@ check(
     mPt.slice(tPt.length).trim() === "marque uma reuniao com o savio amanha" &&
     mEn.slice(tEn.length).trim() === "find me a flight to Lisbon"
 );
+delete process.env.SECRETARY_TAG_NEW;
 
 // ---- 8: the env var still wins over the code default ------------------------
-// This is the production trap in one assertion: the live compose sets SECRETARY_TAG, so
+// This is the production trap in one assertion: the live compose sets SECRETARY_TAG_NEW, so
 // the deployed value — not the code default — is what the bot actually answers to.
-process.env.SECRETARY_TAG = "@foo,@bar";
-const { TAGS: TAGS_ENV } = await import(`${MODULE}?env=1`); // ?env=1 = a distinct specifier
+process.env.SECRETARY_TAG_NEW = "@foo,@bar";
+const { NEW_TAGS: TAGS_ENV } = await import(`${MODULE}?env=1`); // ?env=1 = a distinct specifier
 check("8 env override", eq(TAGS_ENV, ["@foo", "@bar"]));
-delete process.env.SECRETARY_TAG;
+delete process.env.SECRETARY_TAG_NEW;
 
-// ---- 9: the PREFIX TRAP — a standing guard on matchedTag() -------------------
+// ---- 9: the PREFIX TRAP — a standing guard on matchedTagNew() ----------------
 // The owner can now change his tags at runtime (the `assistant_settings` skill), so a list
 // where one tag is a PREFIX of another is a supported combination, not a hypothetical. Two
 // ways it goes wrong, and both are silent — the order is not rejected, it is MANGLED:
@@ -157,16 +161,16 @@ delete process.env.SECRETARY_TAG;
 //   9b  length order alone still lets a tag that is NOT in the list through: with "@assist"
 //       live, a RETIRED "@assistant do X" starts with it, so she would answer and hand the
 //       router "ant do X". A tag must END (space/punctuation/end-of-message) to match.
-//   9c  the sort must be on a COPY: TAGS[0] is the primary tag (server.js:306 falls back to
-//       it for ctx.tag), so sorting TAGS itself would silently re-elect it.
+//   9c  the sort must be on a COPY: NEW_TAGS[0] is the primary tag (server.js falls back to
+//       it for ctx.tag), so sorting NEW_TAGS itself would silently re-elect it.
 // The full apply→live→persist flow is scripts/settings-tag-selftest.mjs; this is the guard
 // that stays behind in identity's own test.
-process.env.SECRETARY_TAG = "@assist,@assistente";
-const { TAGS: TAGS_PFX, matchedTag: matchPfx } = await import(`${MODULE}?prefix=1`);
+process.env.SECRETARY_TAG_NEW = "@assist,@assistente";
+const { NEW_TAGS: TAGS_PFX, matchedTagNew: matchPfx } = await import(`${MODULE}?prefix=1`);
 const pt = "@assistente marque uma reuniao";
 const tp = matchPfx(pt);
 check(
-  "9 prefix trap: longest-first, tag must end, TAGS not reordered",
+  "9 prefix trap: longest-first, tag must end, NEW_TAGS not reordered",
   tp === "@assistente" &&
     pt.slice(tp.length).trim() === "marque uma reuniao" && // 9a: not "ente marque…"
     matchPfx("@assist do X") === "@assist" &&
@@ -174,7 +178,7 @@ check(
     eq(TAGS_PFX, ["@assist", "@assistente"]) && // 9c: still the owner's order
     TAGS_PFX[0] === "@assist"
 );
-delete process.env.SECRETARY_TAG;
+delete process.env.SECRETARY_TAG_NEW;
 
 // ---- done -------------------------------------------------------------------
 console.log(`\n${failures === 0 ? "PASS" : `FAIL (${failures})`}\n`);

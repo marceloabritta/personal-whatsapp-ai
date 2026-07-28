@@ -48,32 +48,26 @@ You type "@secretary ..." in a chat
                           reply back on WhatsApp
 ```
 
-### Two flows in parallel (currently)
+### The @mary turn loop
 
-The system is mid-migration to an architecture where the **model holds the conversation** instead of
-each skill driving its own dialogue. Both run side by side in one server, chosen by which tag you
-summon:
+The **model holds the conversation** instead of each skill driving its own dialogue. You summon the
+secretary with a single tag — **`@mary`** by default, user-definable via `SECRETARY_TAG_NEW` — and
+the orchestrator runs a turn loop:
 
 ```
-@assistant <order>  ─→  OLD flow: router classifies → skill runs (the diagram above)
-@mary <order>       ─→  NEW flow: the orchestrator runs a turn loop —
-                        the model decides each turn to  LISTEN (ask/propose) · EXECUTE (run a
-                        skill) · DONE (close), and reads a skill's result back before closing.
+@mary <order>  ─→  the orchestrator runs a turn loop — the model decides each turn to
+                   LISTEN (ask/propose) · EXECUTE (run a skill) · DONE (close), and reads a
+                   skill's result back before closing.
 ```
 
 `@mary` can also **read images and PDFs attached in the conversation** — a receipt, an invoice —
 whether on the first message or as a reply to one, and use them as evidence for what you asked;
 other file types get a polite "can't read that yet."
 
-`@assistant` is the stable daily driver and is exactly the committed behaviour; `@mary` is the new
-system, tested live without touching `@assistant`. Each flow discovers its **own skill tree**:
-`@assistant` loads `secretary/2. Skills/` (each skill drives its own dialogue), and **`@mary` loads
-a second, fully-converted tree, `secretary/3. Mary Skills/`**, where the same seven skills are
-**pure tasks** — the orchestrator holds the conversation and each skill only validates its declared
-inputs, acts, and returns a value (calendar/tasks/flights use a READ-then-ACT contract). The two
-are fully isolated — a tag change, or any bug, in `@mary` cannot change what `@assistant` answers
-to. Set the tags with `SECRETARY_TAG` and `SECRETARY_TAG_NEW`. When the migration finishes and the
-default flips, only the converted tree + turn loop remains.
+The orchestrator discovers its skill tree — `secretary/3. Mary Skills/` — at boot, where each skill
+is a **pure task**: the orchestrator holds the conversation and each skill only validates its
+declared inputs, acts, and returns a value (calendar/tasks/flights use a READ-then-ACT contract).
+Set the summon tag with `SECRETARY_TAG_NEW` (default `@mary`).
 
 ## Skills (today)
 
@@ -84,7 +78,7 @@ default flips, only the converted tree + turn loop remains.
 - **`feedback`** — tell the secretary it got something **wrong** and it files itself a bug report. Reply to the offending message with `@secretary you made a mistake here`; the complaint, the bad output and its own recent logs become a report for triage. The only way a *confidently wrong* answer — the kind nothing throws on — ever gets caught. Say "…and fix it to 5pm" and it files the defect **and** does the fix.
 - **`flight_search`** — ask for a flight in a sentence (`@secretary find me a flight from São Paulo to Lisbon on the 14th, back on the 22nd`). It asks for anything missing, **confirms before it searches**, then shows the **3 cheapest options a person would actually pick** — the multi-stop, split-ticket, self-transfer itineraries the provider floats to the top of a cheapest-first list are **thrown away first** (which is why it sometimes shows fewer than three, and says so). Ask `link for option 2` and it sends that option's booking link. It **never buys**: say "book it" and it hands you the link and tells you the purchase is yours to make.
 
-Adding a skill is a drop-in: create a folder with a `skill.js` that exports `{ manifest, run }` under the tree for the flow you're extending — `secretary/2. Skills/` for `@assistant`, or `secretary/3. Mary Skills/` for `@mary` (a converted pure task: `manifest.conversation:"orchestrator"` + declared `inputs`). The orchestrator discovers it at boot into that flow's own map and the router starts offering it — no changes to the orchestrator or the router. In the old tree a skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else); the converted tree drops that coupling — the model chains skills itself. See `secretary/README.md`.
+Adding a skill is a drop-in: create a folder under `secretary/3. Mary Skills/` with a `skill.js` that exports `{ manifest, run }` — a pure task (`manifest.conversation:"orchestrator"` + declared `inputs`). The orchestrator discovers it at boot into the skill map and the router starts offering it — no changes to the orchestrator or the router. Skills don't call each other; the model chains them itself. See `secretary/README.md`.
 
 ## Repository layout
 
@@ -96,8 +90,7 @@ Adding a skill is a drop-in: create a folder with a `skill.js` that exports `{ m
 ├── .gitignore
 ├── secretary/             # the "secretary" (Node.js) — orchestrator + skills  ← run this
 │   ├── 1. Orchestrator/
-│   ├── 2. Skills/         #   @assistant's tree (each skill drives its own dialogue)
-│   └── 3. Mary Skills/    #   @mary's tree — the same seven skills as converted pure tasks
+│   └── 3. Mary Skills/    #   the skills, each a pure task the orchestrator runs
 ├── Board Inbox/           # staging that turns pulled specs/plans into kanban backlog cards
 │   └── ledger.tsv         #   tracked — the exactly-once record (queue/ + delivered/ are runtime)
 └── evolution/             # the WhatsApp gateway (Docker)
@@ -116,7 +109,7 @@ Adding a skill is a drop-in: create a folder with a `skill.js` that exports `{ m
 ## Setup
 
 1. **Bring up the stack.** Copy `evolution/` to `/opt/evolution` on the server, create `.env` from `.env.example`, and generate the two secrets with `openssl rand -hex 16` (`AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`). Then `docker compose up -d`.
-2. **Deploy the secretary.** Put the **contents of `secretary/`** in `/opt/secretary` (so `/opt/secretary/package.json`, `/opt/secretary/1. Orchestrator/`, `/opt/secretary/2. Skills/` exist). Create `/opt/secretary/.env` from `secretary/.env.example` and fill in your keys. The `secretary` service in the compose file runs `npm install && npm start`.
+2. **Deploy the secretary.** Put the **contents of `secretary/`** in `/opt/secretary` (so `/opt/secretary/package.json`, `/opt/secretary/1. Orchestrator/`, `/opt/secretary/3. Mary Skills/` exist). Create `/opt/secretary/.env` from `secretary/.env.example` and fill in your keys. The `secretary` service in the compose file runs `npm install && npm start`.
 3. **Link WhatsApp.** In the Evolution manager (`http://YOUR_IP:8080`), create an instance named `secretaria` (must match `EVOLUTION_INSTANCE`) and scan the QR code with WhatsApp → Linked devices.
 4. **Point the webhook** at the secretary for `MESSAGES_UPSERT` events:
 
@@ -156,13 +149,13 @@ Framing happens once, in the orchestrator's `send()` (`1. Orchestrator/lib/forma
 
 ## Roadmap
 
-- More skills (reminders, lookups, etc.) — each a new folder under `2. Skills/`.
+- More skills (reminders, lookups, etc.) — each a new folder under `3. Mary Skills/`.
 - Reply privately when `@secretary` is called in a group.
 - Calendar backlog: conflict/availability check on create, read/query events ("what's on my calendar tomorrow?"), and series edit/delete for recurring events (create is shipped).
 
 ## Contributing
 
-Issues and pull requests are welcome. New skills are the easiest contribution: follow the `{ manifest, run }` contract in `secretary/2. Skills/` and open a PR.
+Issues and pull requests are welcome. New skills are the easiest contribution: follow the `{ manifest, run }` contract in `secretary/3. Mary Skills/` and open a PR.
 
 ## License
 

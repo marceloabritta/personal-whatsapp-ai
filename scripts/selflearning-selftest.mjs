@@ -209,14 +209,12 @@ check("append to a missing file returns false", (await appendToReport("/nope/x.m
 // says "error/failed/unavailable/noMatch/noAction" is sent with plain send(). A forgotten
 // call site becomes a red test run, not a bug that quietly never reports itself.
 console.log("\n9    lint: failure replies are declared with ctx.sendFailure");
-const SKILLS_DIR = new URL("../secretary/2. Skills/", import.meta.url);
+const SKILLS_DIR = new URL("../secretary/3. Mary Skills/", import.meta.url);
 
-// The one deliberate exemption, with its reason.
-const EXEMPT = [
-  // feedback.logFailed: "I couldn't file that note". This is capture ITSELF having failed —
-  // routing it through sendFailure would just re-enter the capture that is already broken.
-  "reply(ctx.lang).logFailed()",
-];
+// No exemptions: the @mary tree sends every failure-named reply via ctx.sendFailure
+// (feedback.logFailed included — 3. Mary Skills/5. Feedback/skill.js), which the
+// !/sendFailure\(/ guard below already excludes, so the lint is clean with an empty list.
+const EXEMPT = [];
 
 let linted = 0;
 for (const dir of await readdir(SKILLS_DIR)) {
