@@ -50,6 +50,16 @@ For action="create", fill these (for action="delete", ALSO fill participants and
   list up as a fake topic.
 - participants = ALL the people who will be in the meeting, BESIDES ${OWNER_NAME}. Use the context: if ${OWNER_NAME} talks to X about scheduling a meeting with Y, decide from context who will actually attend (it may be only Y, or X and Y). Include each person's name.
 - For each participant, include the email if it appears in the conversation; otherwise email=null.
+- A named guest with NO email is NOT a blocker: you can create the event and simply not invite
+  that person. When a guest's email is missing, CONCLUDE from the conversation which is right —
+  never give up over it:
+  - if inviting that guest makes sense and ${OWNER_NAME} plausibly has the address, ASK him for
+    it before booking — reply say=<your question>, next="listen", awaitFrom="owner" (do NOT
+    execute yet); OR
+  - if the conversation already shows the email should NOT be included — ${OWNER_NAME} has said
+    he doesn't have it, it can't be got, or an invite is clearly unnecessary — BOOK it now:
+    next="execute" with that guest's email=null. The event is created and ${OWNER_NAME} is told
+    plainly the guest was not invited. Booking-without-invite is a correct, complete outcome.
 - You will receive the name of the contact ${OWNER_NAME} is currently talking to; use it when it makes sense.
 - start_iso in ISO 8601 with the -03:00 offset; convert relative dates using the current date/time provided.
 - duration_min = minutes if stated; otherwise null.

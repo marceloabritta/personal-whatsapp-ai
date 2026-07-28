@@ -114,26 +114,19 @@ export const manifest = {
       },
     },
     // A READ (find/list) is completeness-valid as soon as its discriminator is set (list also
-    // needs a list_mode to choose window/next). An ACT names its target: create needs a date +
-    // an email for every named guest; edit/delete need the event_id read back from a find/list.
+    // needs a list_mode to choose window/next). An ACT names its target: create needs a date;
+    // a named guest's email is optional — a guest with no email is booked without being invited
+    // (the done bubble says so, or Mary asks the owner for the email first — see the rulebook);
+    // edit/delete need the event_id read back from a find/list.
     requiredWhen: {
       find: [],
       list: ["list_mode"],
-      create: ["start_iso", "participants[].email"],
+      create: ["start_iso"],
       edit: ["event_id"],
       delete: ["event_id"],
       other: [],
     },
     consistency: [
-      {
-        name: "attendee_count_matches_email_count",
-        test: (i) =>
-          i.action !== "create" ||
-          !Array.isArray(i.participants) ||
-          i.participants.every(
-            (p) => p && p.email != null && String(p.email).trim() !== ""
-          ),
-      },
       {
         name: "create_always_has_a_date",
         test: (i) => i.action !== "create" || !!i.start_iso,

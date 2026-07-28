@@ -511,6 +511,19 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: @mary calendar create no longer gives up on an emailless guest; Mary now
+  asks-or-books.** The Calendar Actions `create` contract required `participants[].email` for
+  every named guest (`requiredWhen.create` + the `attendee_count_matches_email_count` consistency
+  rule), which is unsatisfiable when the guest's email was never in the chat — the truthful
+  `email:null` payload was rejected twice and the orchestrator sent `repairGiveUp` ("Não consegui
+  acertar isso…"). A migration regression: the legacy @assistant flow had an answerable "no email"
+  escape that the pure-task migration dropped. **Fix (two parts):** (1) guest email is now
+  **optional** on create — a named-but-emailless guest is booked **without** an invite (the done
+  bubble already says "Criei sem convidar X — não tenho o e-mail"); (2) the skill rulebook now
+  tells Mary to **conclude** per conversation whether to **ask** the owner for the missing email or
+  **book without** inviting that guest — she never gives up over it. Regression guard:
+  `scripts/mary-calendar-create-emailless-selftest.mjs` (gate only; the ask-vs-book judgement is
+  model behaviour, confirmed by a live check).
 - **2026-07-28 — feat(calendar): resolve a named venue into a full address from the model's own
   knowledge (both flows).** When the owner names a **venue** instead of giving a full address, the
   calendar extraction now **expands it to a full street address from the model's own knowledge** —

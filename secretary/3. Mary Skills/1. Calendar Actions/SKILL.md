@@ -305,9 +305,11 @@ pass against the real event; the other `CAL_SCHEMA` fields are ignored. The thre
 handlers.)
 
 ### Task: CREATE — fully stateful, confirm-first
-Required to create (everything else has a fallback and never blocks): a **date/time**, and an
-**email for every named guest the owner has not said he lacks one for**. **Zero guests is a
-complete, ordinary event** — an event has 0–n outside guests. `missingOf(draft)` /
+Required to create (everything else has a fallback and never blocks): a **date/time**. A named
+guest's **email is optional** — when it is missing Mary **concludes** from the conversation
+whether to **ask the owner** for it or **book the event without inviting that guest** (the done
+bubble says "Criei sem convidar X — não tenho o e-mail"); she never gives up over a missing
+email. **Zero guests is a complete, ordinary event** — an event has 0–n outside guests. `missingOf(draft)` /
 `isComplete(m)` compute this; `draftFromInfo` normalizes and applies fallbacks
 (title → meaningful topic, else `Owner/names`; `duration_min` → 45).
 
