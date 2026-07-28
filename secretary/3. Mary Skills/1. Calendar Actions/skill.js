@@ -117,13 +117,14 @@ export const manifest = {
     // needs a list_mode to choose window/next). An ACT names its target: create needs a date;
     // a named guest's email is optional — a guest with no email is booked without being invited
     // (the done bubble says so, or Mary asks the owner for the email first — see the rulebook);
-    // edit/delete need the event_id read back from a find/list.
+    // edit/delete carry no required field — the handler self-resolves the target from the quoted
+    // invite link or start_iso + attendee email (card 1600b424), sending *NoMatch if none resolves.
     requiredWhen: {
       find: [],
       list: ["list_mode"],
       create: ["start_iso"],
-      edit: ["event_id"],
-      delete: ["event_id"],
+      edit: [],
+      delete: [],
       other: [],
     },
     consistency: [
@@ -820,10 +821,25 @@ async function createFromDraft(ctx, draft) {
 // (updateEvent) and everything untouched — reminders, colorId, recurrence — rides along.
 async function handleEdit(ctx, info) {
   const { env, number } = ctx;
-  const eventId = info.event_id;
+  let eventId = info.event_id || null; // may already be supplied from a find/list read-back
+  if (!eventId) {
+    const emails = (Array.isArray(info.participants) ? info.participants : [])
+      .map((p) => p?.email)
+      .filter(Boolean);
+    const eidEventId = resolveEventId(ctx.quoted?.calendarLink); // may be null
+    const startIso = info.start_iso || null;
+    if (eidEventId || (startIso && emails.length)) {
+      try {
+        const matches = await matchEventTargets(env, { eidEventId, startIso, emails });
+        if (matches.length) eventId = matches[0].id;
+      } catch (e) {
+        console.error("Calendar edit match error:", e?.response?.data || e?.message || e);
+      }
+    }
+  }
   if (!eventId) {
     await ctx.sendFailure(number, reply(ctx.lang).editNoMatch());
-    return { ok: false, reason: "noEventId" };
+    return { ok: false, reason: "noMatch" };
   }
 
   let ev;
@@ -955,10 +971,25 @@ async function applyEditDraft(ctx, eventId, draft, ev, base) {
 // ---- DELETE (ACT) ----------------------------------------------------------
 async function handleDelete(ctx, info) {
   const { env, number } = ctx;
-  const eventId = info.event_id;
+  let eventId = info.event_id || null; // may already be supplied from a find/list read-back
+  if (!eventId) {
+    const emails = (Array.isArray(info.participants) ? info.participants : [])
+      .map((p) => p?.email)
+      .filter(Boolean);
+    const eidEventId = resolveEventId(ctx.quoted?.calendarLink); // may be null
+    const startIso = info.start_iso || null;
+    if (eidEventId || (startIso && emails.length)) {
+      try {
+        const matches = await matchEventTargets(env, { eidEventId, startIso, emails });
+        if (matches.length) eventId = matches[0].id;
+      } catch (e) {
+        console.error("Calendar delete match error:", e?.response?.data || e?.message || e);
+      }
+    }
+  }
   if (!eventId) {
     await ctx.sendFailure(number, reply(ctx.lang).deleteNoMatch());
-    return { ok: false, reason: "noEventId" };
+    return { ok: false, reason: "noMatch" };
   }
 
   // Fetch for the title/start the dedupe sweep + the confirmation copy use.

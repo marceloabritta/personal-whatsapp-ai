@@ -35,7 +35,9 @@
 //    4. guard rails still hold (relaxation opened no hole):
 //         - create with start_iso:null still fails
 //         - create with a malformed email still fails, with an email problem
-//         - edit with no event_id still fails
+//         - edit with no event_id now PASSES the gate (card 1600b424 dropped event_id
+//           from requiredWhen.{edit,delete}; the skill self-resolves the target), while
+//           create still REQUIRES its date — proving only the ACT-gate for edit/delete moved
 //
 //  EXPECTED STATE TODAY (before the PART-1 fix): assertions 1 & 2 FAIL — that
 //  failure is the point of this column. Assertions 3 & 4 PASS now and must keep
@@ -141,11 +143,13 @@ check(
   gBadEmail.ok === false && gBadEmail.problems.some((p) => /email/i.test(p))
 );
 
-// 4c. an edit with no event_id still fails — proves only the CREATE contract changed.
+// 4c. edit with no event_id now PASSES the gate (card 1600b424): the skill self-resolves the
+//     target from the quoted invite link or start_iso+attendee email, so event_id is no longer
+//     required-to-act. The CREATE guards (4a/4b) still hold — only the edit/delete ACT-gate moved.
 const gEditNoId = checkPayload(manifest.inputs, {
   ...createBase, action: "edit", event_id: null, title: "New title",
 });
-check("4c. edit with no event_id still FAILS the gate", gEditNoId.ok === false);
+check("4c. edit with no event_id now PASSES the gate (self-resolution restored)", gEditNoId.ok === true);
 
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");
 process.exit(failures ? 1 : 0);

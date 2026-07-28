@@ -497,6 +497,26 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: calendar edit/cancel of a just-referenced event could not find its target
+  (card 1600b424).** The @mary pure-task conversion (`d5369d7`) had unwired the ACT handlers'
+  self-resolution and left `event_id` required at the completeness gate, so an `event_id`-less
+  edit/delete was trapped in the orchestrator repair loop (→ `repairGiveUp`) and, even if it
+  reached the skill, `handleEdit`/`handleDelete` bailed `noEventId` before consulting the quoted
+  invite link or the `start_iso + attendee-email` locators the router already emits. Rewired the
+  two deterministic resolvers already in the file — `resolveEventId(ctx.quoted?.calendarLink)`
+  (the replied-to invite's Google Calendar link) and
+  `matchEventTargets(env, { eidEventId, startIso, emails })` (start-instant + attendee-email
+  match) — into both ACT handlers, dropped `event_id` from `requiredWhen.{edit,delete}`
+  (`3. Mary Skills/1. Calendar Actions/skill.js`), and rewrote the rulebook
+  (`…/prompt.js`, `buildExtractionRules`) so the model dispatches edit/delete DIRECTLY and lets
+  the skill resolve, instead of the unwalkable find-first chain. A target-less order still resolves
+  to nothing and sends `*NoMatch` (via `ctx.sendFailure`) — no accidental delete. Calendar-skill
+  local: no rails / `server.js` / router change (`ctx.quoted.calendarLink` is read-only and already
+  carried); `requiredWhen` + rulebook are router-facing prompt text, so a live
+  `scripts/router-selftest.mjs` is the human's call. Guard:
+  `scripts/calendar-editdelete-resolve-selftest.mjs` (offline, googleapis stubbed). Out of scope
+  (separate cards): the write-invariant/non-persisted-readback barrier and the
+  unconfirmed-create-draft edit-routing fault.
 - **2026-07-28 — Fix: router no longer logs graceful chit-chat / no-op closes as `unrouted`
   failures.** The orchestrator classified a first-turn *empty close* by shape alone, so the
   router's prompt-authorised graceful no-op close (a thank-you, a laugh, "deixa pra la", an

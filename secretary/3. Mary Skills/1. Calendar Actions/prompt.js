@@ -107,16 +107,19 @@ For action="create", fill these (for action="delete", ALSO fill participants and
   If the order gives an address AND asks for a video call, set virtual=true and location=null
   (video wins). Give NEITHER a value it was not told.
 
-To CHANGE or CANCEL an existing event, you FIRST need its id: dispatch action="find" (or
-action="list") to READ the matching events back, then act on the one you mean with its event_id.
-- action="find": set "query" to a short description of the event (its topic / who / when), and,
-  when you know them, start_iso (the event's start) and participants (with any emails). It returns
-  candidate events, each with an event_id.
-- action="edit": set event_id to the target's id, and set ONLY the fields that CHANGE (a new
-  start_iso, duration_min, title, summary, all_day/all_day_end_iso, or the full participants list).
-  Leave the rest null. Set location/virtual only when the PLACE changes (a new address, or making
-  it a video call); omit otherwise (absent = keep the event's current place).
-- action="delete": set event_id to the target's id.
+To CHANGE or CANCEL an existing event, dispatch action="edit" or action="delete" DIRECTLY — you
+do NOT need to action="find" first. The skill resolves WHICH event you mean from (a) the
+replied-to invite's Google Calendar link (when the order is a reply to that invite), or (b)
+start_iso (the event's CURRENT start) together with an attendee email. Provide whichever you have.
+- Set event_id ONLY if you already hold it from a prior find/list read-back; otherwise leave it null.
+- action="edit": set ONLY the fields that CHANGE (a new start_iso, duration_min, title, summary,
+  all_day/all_day_end_iso, or the full participants list). Leave the rest null. Set location/virtual
+  only when the PLACE changes (a new address, or making it a video call); omit otherwise
+  (absent = keep the event's current place).
+- action="delete": no id needed — the skill resolves the target from the quoted link or
+  start_iso + attendee email.
+- Use action="find" / action="list" only when you can give NEITHER locator (no quoted invite and
+  no start+email), or to disambiguate. It returns candidate events, each with an event_id.
 
 For action="list", resolve the time WINDOW the question implies and set list_mode:
 - list_mode: "next" when ${OWNER_NAME} asks for the NEXT / soonest upcoming event without

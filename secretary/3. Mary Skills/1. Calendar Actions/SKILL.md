@@ -9,7 +9,10 @@
 > `action ∈ find|list|create|edit|delete|other`) follow a **READ-then-ACT** contract: `find`/`list`
 > READ the calendar and return id-bearing candidates (`{event_id,title,start,…}`), sending nothing
 > (find) or the rendered schedule (list); `create` writes the event and returns `{ok,link,eventId}`;
-> `edit`/`delete` target the `event_id` the model read back and return `{ok,…}`. The deterministic
+> `edit`/`delete` need **no** prior `find` — the handler self-resolves the target from the quoted
+invite's Google Calendar link (`resolveEventId`) or from `start_iso` + an attendee email
+(`matchEventTargets`), acting on an `event_id` only if the model already read one back, and returns
+`{ok,…}` (or a `*NoMatch` if nothing resolves). The deterministic
 > Google / RRULE / all-day helpers below are unchanged. Everything below about the skill *proposing*
 > or *confirming* is now the orchestrator's job, not this skill's.
 
@@ -24,11 +27,13 @@
 >    "daily", "on the 5th every month") — the draft states the repeat in words, and it writes
 >    a real repeating Google event. *(Create-only: editing or cancelling a recurring event
 >    currently affects a single occurrence, not the series.)*
-> 2. **Edit/reschedule** an event you replied to — move it, change its length, rename it,
+> 2. **Edit/reschedule** an event you replied to (or that you name, e.g. "my 3pm with Laura") —
+>    move it, change its length, rename it,
 >    or add/remove an attendee. **Confirm-first**: it shows the updated event and waits
 >    for your **`yes`**, and **stays open** so you can keep telling it changes ("actually
 >    4:30", "also add bruno@x.com") before saving. Nothing is written until you confirm.
-> 3. **Cancel/delete** an event you replied to — with a "type *yes* to confirm" step.
+> 3. **Cancel/delete** an event you replied to (or that you name, e.g. "my 3pm with Laura") — with
+>    a "type *yes* to confirm" step.
 > 4. **Read/list** what's on the calendar — a **read-only** query ("what's on tomorrow?",
 >    "anything Friday afternoon?", "what's my next meeting?"). No draft, no confirm,
 >    **nothing is ever written**; it just replies with the events.
@@ -39,10 +44,11 @@
 >   (though you can: `@secretary schedule a Q3 budget review with ana@example.com tomorrow 3pm`).
 > - Edit: **reply to the invite message** (the one with the calendar link) with the change,
 >   e.g. `@secretary move it to 4pm`, `@secretary make it 30 min`, `@secretary add carlos@example.com`,
->   `@secretary rename to Kickoff`. If it's ambiguous ("move it earlier") it asks, and you can
->   answer without re-tagging.
+>   `@secretary rename to Kickoff` — or just **name the meeting** (`@secretary move my 3pm with Laura
+>   to 4pm`). If it's ambiguous ("move it earlier") it asks, and you can answer without re-tagging.
 > - Cancel: **reply to the invite message** (the one with the calendar link) with
->   `@secretary cancel this`, then just type **`yes`** to confirm (no tag needed).
+>   `@secretary cancel this` — or **name it** (`@secretary cancel my 3pm with Laura`), then just type
+>   **`yes`** to confirm (no tag needed).
 > - Read: just ask — `@secretary what's on my calendar tomorrow?`,
 >   `@secretary do I have anything Friday afternoon?`, `@secretary what's my next meeting?`.
 >   It replies right away; there's no confirm step because nothing is written.
@@ -123,7 +129,9 @@ it at the confirm step ("rename to …").
 
 1. You **reply to the invite message** (the one with the calendar link) with the change:
    `@secretary move it to 4pm` · `@secretary make it 30 min` · `@secretary add carlos@example.com` ·
-   `@secretary remove ana@example.com` · `@secretary rename to Kickoff`.
+   `@secretary remove ana@example.com` · `@secretary rename to Kickoff`. You don't have to reply to
+   the invite — **naming the meeting** ("change my 3pm with Laura to 4pm") also works: the secretary
+   resolves which event you mean from its time and an attendee, no prior lookup needed.
 2. **The secretary doesn't write to Google yet — it shows the updated event and asks you to
    confirm**, then watches this chat for your answer for 10 minutes (no tag needed):
    > Here's the updated event:
@@ -156,7 +164,8 @@ it at the confirm step ("rename to …").
 ### Cancelling an event (also waits for your answer)
 
 1. You **reply to the invite message** (the one with the calendar link) with
-   `@secretary cancel this`.
+   `@secretary cancel this` — or just **name the meeting** ("cancel my 3pm with Laura"): the
+   secretary resolves the target from its time and an attendee, no reply-to-invite required.
 2. The secretary looks the event up and asks to confirm — watching this chat for your answer
    for 10 minutes, no tag needed:
    > Confirm the cancelation of this event?
