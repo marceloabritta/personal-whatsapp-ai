@@ -497,6 +497,17 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: assistant switched languages mid-conversation (card 3ec5be77).** The
+  reply-language rail `ctx.lang` was re-derived from the router's per-turn `lang` every turn and
+  reset on each fresh `@mary` turn, so it drifted EN↔PT within one conversation instead of
+  holding the opener. Added `lib/lang.js` (`resolveTurnLang`, `shouldForceTranslateSay`,
+  `MAINTAINED_LANGS`); `server.js` now captures the opening language into the session marker
+  (`openingLang`), carries it across the fresh-turn session clear, and forces it back onto
+  `ctx.lang` every turn — the router's per-turn `lang` is subordinate to the pin. The router's
+  free-form `say` prose is force-translated to the pinned language on the en↔pt residual
+  (`localizeBody({force})`). The pin lives for the conversation's marker lifetime, so a genuinely
+  new conversation still detects its own opening language. No router-prompt or manifest change;
+  regression: `scripts/lang-pin-selftest.mjs`.
 - **2026-07-28 — Fix: calendar edit/cancel of a just-referenced event could not find its target
   (card 1600b424).** The @mary pure-task conversion (`d5369d7`) had unwired the ACT handlers'
   self-resolution and left `event_id` required at the completeness gate, so an `event_id`-less

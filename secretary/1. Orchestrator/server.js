@@ -48,6 +48,7 @@ import { frame } from "./lib/format.js";
 import { route } from "./router/router.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
 import { captureFailure } from "./lib/selflearning.js";
+import { MAINTAINED_LANGS, resolveTurnLang, shouldForceTranslateSay } from "./lib/lang.js";
 
 // SELF-LEARNING: wrap console so the secretary can read its own recent logs back when it
 // writes a failure report. Must run before anything else logs — including loadSkills()
@@ -79,7 +80,8 @@ const MAX_FILES_PER_TURN = 10; // per-turn file cap (a real turn holds 2–3; 10
 const OWNER_NAME = process.env.OWNER_NAME || "User";
 // Languages the secretary writes natively (skills carry en/pt maps). Any other
 // detected language is handled by the LLM-translation fallback in send().
-const MAINTAINED_LANGS = new Set(["en", "pt"]);
+// MAINTAINED_LANGS now lives in ./lib/lang.js (imported above) so the pin policy
+// and the maintained-language set share one rails module.
 
 // THE one Anthropic client, handed to everything via ctx.anthropic. It is WRAPPED so every
 // call site defaults to thinking:{type:"disabled"} — we throw every thinking block away
@@ -159,9 +161,9 @@ async function loadSkills(dir = NEW_SKILLS_DIR) {
 // it's never seen here) with a cheap model, preserving structure. On any failure
 // we return the source text rather than nothing — a message in English beats no
 // message.
-async function localizeBody(text, lang) {
+async function localizeBody(text, lang, { force = false } = {}) {
   const l = (lang || "en").toLowerCase();
-  if (!text || MAINTAINED_LANGS.has(l) || l === "en") return text;
+  if (!text || (!force && (MAINTAINED_LANGS.has(l) || l === "en"))) return text;
   try {
     const msg = await anthropic.messages.create({
       model: TRANSLATE_MODEL,
@@ -424,7 +426,12 @@ app.post("/webhook", async (req, res) => {
     // "yes" answers in the language the flow started in); on a fresh command the
     // router fills it in below. Default English. `ctx.send` reads ctx.lang lazily,
     // so setting it after routing still applies to every skill send.
-    ctx.lang = (isContinuation ? session?.lang : null) || "en";
+    // The conversation's opening language, carried across the fresh-turn session clear
+    // (:495) because `session` was read at :331, before that clear. Present on an ongoing
+    // conversation (continuation OR a fresh @mary that the marker still owns); null only
+    // when there is no live marker — i.e. a brand-new conversation, which will pin below.
+    let pinnedLang = session?.openingLang || null;
+    ctx.lang = pinnedLang || "en";
 
     // ctx.send — an ORDINARY reply. It is NEVER scanned, sniffed or second-guessed. It ALSO
     // records the body it sent onto ctx._turn.said (last outbound wins) — that is the outcome
@@ -472,6 +479,19 @@ app.post("/webhook", async (req, res) => {
       return res;
     };
 
+    // Send the router's own free-form prose in the PINNED language. localizeBody (inside
+    // send) already translates say into any non-maintained pinned lang, but passes en/pt
+    // through untouched — so the model can author say in PT under an EN-pinned header. When
+    // both langs are maintained and differ, force-translate say from its known source
+    // language (reply.lang) to ctx.lang first; send() then passes the already-correct body
+    // through. On the common case (say already in ctx.lang) this is a no-op, no LLM call.
+    const sendSay = async (say, sayLang) => {
+      const body = shouldForceTranslateSay(sayLang, ctx.lang)
+        ? await localizeBody(say, ctx.lang, { force: true })
+        : say;
+      return send(number, body, ctx.lang);
+    };
+
     // ========================================================================
     //  THE ORCHESTRATOR TURN LOOP  (the NEW / @mary flow).
     //  Reached by a FRESH @mary order, or by an untagged follow-up on a conversation the
@@ -508,7 +528,8 @@ app.post("/webhook", async (req, res) => {
         {
           open: true,
           awaitFrom: marker.awaitFrom,
-          lang: ctx.lang,
+          openingLang: pinnedLang, // NEW — the immutable opening language (the pin)
+          lang: ctx.lang, // keep for backward-compat with any legacy reader; harmless
           turns: marker.turns,
           dispatches: marker.dispatches,
         },
@@ -621,7 +642,8 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      ctx.lang = reply.lang || ctx.lang;
+      ctx.lang = resolveTurnLang(pinnedLang, reply.lang);
+      if (!pinnedLang) pinnedLang = ctx.lang; // first turn of a new conversation: pin it now
       console.log("TURN ->", JSON.stringify({ next: reply.next, skills: reply.skills, hasSay: !!reply.say }));
 
       // Productivity: a deliberate-silence turn ({say:null, next:"listen"}) is FREE — it does not
@@ -636,7 +658,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (reply.next === "listen") {
-        if (reply.say) await send(number, reply.say, ctx.lang);
+        if (reply.say) await sendSay(reply.say, reply.lang);
         marker.awaitFrom = reply.awaitFrom || marker.awaitFrom || "owner";
         await persistMarker();
         return; // wait for his next message
@@ -656,7 +678,7 @@ app.post("/webhook", async (req, res) => {
           await fireCapture(ctx, { phase: "unrouted", taskId: "router", unroutedOrder: ctx.order });
           return;
         }
-        if (reply.say) await send(number, reply.say, ctx.lang);
+        if (reply.say) await sendSay(reply.say, reply.lang);
         await closeMarker();
         return;
       }

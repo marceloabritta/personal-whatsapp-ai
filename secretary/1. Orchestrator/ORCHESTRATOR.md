@@ -126,9 +126,16 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     falls back to `NEW_TAGS[0]` and is therefore always truthy. A skill reads it to tell an order
     *addressed to it* from talk it merely overheard while a window was open (Tasks does —
     `3. Mary Skills/3. Tasks/SKILL.md`). `ctx.lang` is the
-    conversation language — from the session on a continuation, from the router on a fresh
-    command (set after `route()` returns), default `"en"`; `ctx.send` is bound to it (see
-    the localizing `send` above). `_turn` is the self-learning per-turn object (see below).
+    conversation language, and it is **PINNED to the opening language for the life of the
+    conversation** (card 3ec5be77). The first turn adopts the router's detection and persists it
+    on the session marker as `openingLang`; every later turn — continuation or a fresh `@mary`
+    that the marker still owns — HOLDS that pinned value via `resolveTurnLang(pinnedLang,
+    reply.lang)` (`lib/lang.js`), so the router's per-turn `lang` is subordinate and can no longer
+    drift the reply language EN↔PT mid-conversation. Default `"en"`; the pin lives only as long as
+    the marker (a `done`/expiry drops it, so a genuinely new conversation re-detects). `ctx.send`
+    is bound to it (see the localizing `send` above); the router's free-form `say` prose is
+    force-translated onto the pin for the en↔pt residual (`localizeBody({force})`). `_turn` is the
+    self-learning per-turn object (see below).
 12. **Dispatch — the turn loop (see "The conversation loop" below).** Both a fresh tagged order
     and an untagged follow-up on a conversation the orchestrator owns feed the **same** multi-turn
     loop: a fresh order first `sessions.clear`s any stale session (a new `@mary` overrides), a
