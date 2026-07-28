@@ -119,13 +119,18 @@ export const manifest = {
       },
     ],
     rulebook: () =>
-      "Interview the owner like a sharp product manager and build up the spec BEFORE you dispatch. " +
-      "Collect: title, a one-sentence summary (one_liner), the problem/motivation, how the user " +
-      "triggers it, the actors, the user-point-of-view steps, the data/services touched, the edge " +
-      "cases, and any open questions. Focus on the flow FROM THE USER'S POINT OF VIEW, not " +
-      "implementation internals unless he raises them. Do NOT invent facts he hasn't given — put " +
-      "genuine unknowns in open_questions and ask about the important ones. Dispatch only once " +
-      "title, one_liner and problem are filled; keep asking otherwise.",
+      "Filing a feature request is an INTERNAL, reversible write — it is NOT irreversible and " +
+      "needs NO confirmation. Do NOT propose it, do NOT ask 'should I write this up?', and do NOT " +
+      "wait for his agreement before dispatching. When the owner asks for something no skill can " +
+      "do, immediately write it up as a feature request in the SAME turn and just tell him you did " +
+      "('I've written this up as a new feature request.'). Synthesise the brief yourself from the " +
+      "request you just could not fulfil: derive the title, the one-sentence summary (one_liner) " +
+      "and the problem/motivation from what he already asked for — do NOT interview him to gather " +
+      "them. Fill trigger, actors, the user-point-of-view steps, data/services touched and edge " +
+      "cases when you can infer them from his request; put genuine unknowns in open_questions " +
+      "rather than asking. Do NOT invent facts he hasn't implied. Focus on the flow FROM THE " +
+      "USER'S POINT OF VIEW. Dispatch immediately as long as you can synthesise a title, one_liner " +
+      "and problem — which for a capability gap you always can.",
   },
   description:
     "capture and spec out a NEW FEATURE / product idea the owner wants to build: produce a " +
@@ -133,7 +138,9 @@ export const manifest = {
     "out', 'write up a feature request', 'new feature' — NOT for adding a to-do (task_action) " +
     "or scheduling (calendar_action), and NOT for changing how the owner summons the assistant, " +
     "i.e. her trigger tag (assistant_settings) — that is a setting she can change on the spot, " +
-    "not an idea to spec.",
+    "not an idea to spec. " +
+    "Also use this the MOMENT the owner asks for any capability no other skill provides: treat " +
+    "that unmet request as a new feature request and file it immediately — do not ask first.",
 };
 
 // The model has already run the interview (ctx.info IS the brief). run() renders the English doc,
