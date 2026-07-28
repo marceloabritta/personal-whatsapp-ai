@@ -38,6 +38,11 @@
 const CAL = await import(
   new URL("../secretary/2. Skills/1. Calendar Actions/skill.js", import.meta.url).href
 );
+// The prompt module is imported for §8's render assertions (the confirm/done bubbles). It is
+// a pure string builder — no network, no key — so importing it is as offline as skill.js.
+const CALP = await import(
+  new URL("../secretary/2. Skills/1. Calendar Actions/prompt.js", import.meta.url).href
+);
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -476,6 +481,290 @@ const base = {
   const d = { ...base, emails: ["a@example.com", "b@example.com", "c@example.com"], notify: false };
   check("7e. attendee set differs -> 'all'",
     call("resolveSendUpdates", d, base) === "all", call("resolveSendUpdates", d, base));
+}
+
+// ---------------------------------------------------------------------------
+// 8. DERIVED-ADDRESS FLAG (card df2dcfad — "Resolve addresses from context",
+//    NATIVE route). The @assistant flow gains a nullable boolean `location_derived`
+//    that rides the draft alongside `location`/`virtual`, and a confirm-bubble marker
+//    that renders ONLY when the model DERIVED a physical address from its own knowledge.
+//
+//    WHAT THIS COVERS (deterministic layer ONLY — CONVENTIONS §5):
+//      - the flag THREADS through draftFromInfo, coherent with the location XOR;
+//      - the create-review ECHO through applyDraftUpdate (edge #10);
+//      - the edit FOLD through applyPatchToDraft (set / carry-over / XOR-clamp);
+//      - the edit SEED through editDraftFromEvent (a stored event has no provenance);
+//      - the marker RENDERS on the CONFIRM bubble, never on DONE, and only for a
+//        derived PHYSICAL place (never on a virtual/Meet line).
+//    It NEVER asserts the model's *judgement* of whether a phrase is a named venue vs a
+//    full address — that classification is the paid live layer (scripts/router-selftest.mjs),
+//    not this file. Here we prove the code around it is correct GIVEN a good flag.
+//
+//    EXPECTED STATE TODAY: the derived-flag assertions FAIL. draftFromInfo /
+//    applyDraftUpdate / applyPatchToDraft / editDraftFromEvent do not yet thread or
+//    seed `location_derived` (it reads back `undefined`), and locationLineEn/Pt carry
+//    no derived marker and createConfirm/editConfirm do not pass one — so the "contains
+//    the marker" render checks are absent from the output string. The Coding column
+//    makes them green.
+// ---------------------------------------------------------------------------
+console.log("\n=== 8. derived-address flag — thread / echo / fold / seed / marker ===\n");
+
+// The ONE user-facing marker string, en + pt (prompt.js step 9). The render assertions
+// pin the substring, not the full sentence, so an en/pt copy-edit to the tail won't churn.
+const EN_MARKER = "I looked this address up";
+const PT_MARKER = "Procurei este endereço";
+
+// Render a (possibly-missing) reply builder without letting a TypeError abort the run — the
+// render mirror of `call`. If the builder throws or the key is absent, return a sentinel so
+// `.includes()` reports FAIL cleanly rather than crashing the whole script.
+function renderReply(lang, key, obj) {
+  try {
+    const set = CALP.reply(lang);
+    if (!set || typeof set[key] !== "function") return `MISSING_REPLY:${lang}.${key}`;
+    return set[key](obj);
+  } catch (e) {
+    return `THREW: ${e.message}`;
+  }
+}
+
+// --- 8.1 Flag threads through draftFromInfo (XOR-coherent) ---
+{
+  const d = call("draftFromInfo", ctx, {
+    title: "Sync",
+    participants: [],
+    start_iso: "2026-07-20T15:00:00-03:00",
+    duration_min: 30,
+    location: "Av. Faria Lima 1215",
+    virtual: false,
+    location_derived: true,
+  });
+  check(
+    "8a. draftFromInfo(physical, location_derived:true) -> d.location_derived === true",
+    d && d.location_derived === true,
+    d && { location: d.location, virtual: d.virtual, location_derived: d.location_derived }
+  );
+}
+{
+  const d = call("draftFromInfo", ctx, {
+    title: "Sync",
+    participants: [],
+    start_iso: "2026-07-20T15:00:00-03:00",
+    duration_min: 30,
+    location: "Rua Augusta 123",
+    location_derived: false,
+  });
+  check(
+    "8b. draftFromInfo(explicit address, location_derived:false) -> d.location_derived === false",
+    d && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // XOR coherence: virtual wins, so there is no physical place to flag — the derived flag
+  // is forced false even though the model returned true (a marker must never ride a Meet).
+  const d = call("draftFromInfo", ctx, {
+    title: "Sync",
+    participants: [],
+    start_iso: "2026-07-20T15:00:00-03:00",
+    duration_min: 30,
+    location: "Rua Augusta 123",
+    location_derived: true,
+    virtual: true,
+  });
+  check(
+    "8c. draftFromInfo(virtual + derived:true) -> location null AND location_derived === false",
+    d && d.location === null && d.location_derived === false,
+    d && { location: d.location, virtual: d.virtual, location_derived: d.location_derived }
+  );
+}
+{
+  // No place at all -> no flag.
+  const d = call("draftFromInfo", ctx, {
+    title: "Sync",
+    participants: [],
+    start_iso: "2026-07-20T15:00:00-03:00",
+    duration_min: 30,
+    location: null,
+    location_derived: true,
+  });
+  check(
+    "8d. draftFromInfo(no location + derived:true) -> location_derived === false",
+    d && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+
+// --- 8.2 applyDraftUpdate echo (edge #10): the flag rides the create-review modify ---
+const prevDerived = {
+  title: "Lunch",
+  participants: [{ name: "John", email: "john@example.com", noEmail: false }],
+  start_iso: "2026-07-20T12:00:00-03:00",
+  duration_min: 60,
+  all_day: false,
+  all_day_end_iso: null,
+  summary: "",
+  recurrence: null,
+  location: "Av. Faria Lima 1215",
+  virtual: false,
+  location_derived: true,
+};
+{
+  // Review echoes the derived location unchanged -> flag stays true (direct read, like location).
+  const d = call("applyDraftUpdate", ctx, prevDerived, {
+    location: "Av. Faria Lima 1215",
+    virtual: false,
+    location_derived: true,
+  });
+  check(
+    "8e. applyDraftUpdate echoing a derived location KEEPS location_derived === true",
+    d && d.location === "Av. Faria Lima 1215" && d.location_derived === true,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // Owner replaced it with a full explicit address at the confirm step -> flag drops to false.
+  const d = call("applyDraftUpdate", ctx, prevDerived, {
+    location: "Rua Augusta 123",
+    virtual: false,
+    location_derived: false,
+  });
+  check(
+    "8f. applyDraftUpdate replacing with an explicit address -> location_derived === false",
+    d && d.location === "Rua Augusta 123" && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+
+// --- 8.3 applyPatchToDraft fold (edit): set / carry-over / XOR-clamp ---
+const derivedPhysicalDraft = {
+  title: "Dentist",
+  start_iso: "2026-07-20T10:00:00-03:00",
+  duration_min: 60,
+  all_day: false,
+  all_day_end_iso: null,
+  summary: "",
+  emails: [],
+  location: "Av. Faria Lima 1215",
+  virtual: false,
+  location_derived: true,
+  notify: false,
+};
+{
+  const d = call("applyPatchToDraft", derivedPhysicalDraft, {
+    new_location: "Av. Faria Lima 1215",
+    new_location_derived: true,
+  });
+  check(
+    "8g. applyPatchToDraft({new_location, new_location_derived:true}) -> location_derived === true",
+    d && d.location === "Av. Faria Lima 1215" && d.location_derived === true,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // A new address with NO derived flag on the patch -> explicit address, no flag.
+  const d = call("applyPatchToDraft", derivedPhysicalDraft, { new_location: "Rua Augusta 123" });
+  check(
+    "8h. applyPatchToDraft({new_location} only, no flag) -> location_derived === false",
+    d && d.location === "Rua Augusta 123" && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // A non-location edit carries the existing derived flag over (the {...draft} echo).
+  const d = call("applyPatchToDraft", derivedPhysicalDraft, { new_title: "X" });
+  check(
+    "8i. applyPatchToDraft({new_title}) on a derived draft CARRIES location_derived === true over",
+    d && d.title === "X" && d.location === "Av. Faria Lima 1215" && d.location_derived === true,
+    d && { title: d.title, location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // Switch to a Meet -> no physical place -> flag clamped false.
+  const d = call("applyPatchToDraft", derivedPhysicalDraft, { new_virtual: true });
+  check(
+    "8j. applyPatchToDraft({new_virtual:true}) on a derived draft -> location_derived === false",
+    d && d.virtual === true && d.location === null && d.location_derived === false,
+    d && { virtual: d.virtual, location: d.location, location_derived: d.location_derived }
+  );
+}
+{
+  // Clear the place -> flag clamped false.
+  const d = call("applyPatchToDraft", derivedPhysicalDraft, { remove_location: true });
+  check(
+    "8k. applyPatchToDraft({remove_location:true}) on a derived draft -> location_derived === false",
+    d && d.location === null && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+
+// --- 8.4 editDraftFromEvent seed: a stored event has no derivation provenance ---
+{
+  const d = call("editDraftFromEvent", physEvent);
+  check(
+    "8l. editDraftFromEvent(physical event) SEEDS location_derived === false",
+    d && d.location_derived === false,
+    d && { location: d.location, location_derived: d.location_derived }
+  );
+}
+
+// --- 8.5 Marker renders on CONFIRM, not DONE, and only for a derived PHYSICAL place ---
+{
+  const s = renderReply("en", "createConfirm", {
+    title: "Sync", emails: "", when: "tomorrow", duration: 30, uninvited: [], recurrence: null,
+    location: "Av. Faria Lima 1215", virtual: false, location_derived: true,
+  });
+  check("8m. createConfirm(en, derived physical) CONTAINS the en marker", s.includes(EN_MARKER), s);
+}
+{
+  const s = renderReply("pt", "createConfirm", {
+    title: "Sync", emails: "", when: "amanhã", duration: 30, uninvited: [], recurrence: null,
+    location: "Av. Faria Lima 1215", virtual: false, location_derived: true,
+  });
+  check("8n. createConfirm(pt, derived physical) CONTAINS the pt marker", s.includes(PT_MARKER), s);
+}
+{
+  // Not derived (explicit address) -> no marker.
+  const s = renderReply("en", "createConfirm", {
+    title: "Sync", emails: "", when: "tomorrow", duration: 30, uninvited: [], recurrence: null,
+    location: "Rua Augusta 123", virtual: false, location_derived: false,
+  });
+  check("8o. createConfirm(en, NOT derived) does NOT contain the marker", !s.includes(EN_MARKER), s);
+}
+{
+  // DONE bubble stays plain even if a derived flag is passed (owner already approved).
+  const s = renderReply("en", "createDone", {
+    reused: false, title: "Sync", emails: "", when: "tomorrow", duration: 30, link: "http://x",
+    uninvited: [], recurrence: null, location: "Av. Faria Lima 1215", virtual: false,
+    meetLink: null, location_derived: true,
+  });
+  check("8p. createDone(en, even with derived:true) does NOT contain the marker", !s.includes(EN_MARKER), s);
+}
+{
+  const s = renderReply("en", "editConfirm", {
+    title: "Sync", emails: "", when: "tomorrow", duration: 30,
+    location: "Av. Faria Lima 1215", virtual: false, notifyGuests: false, location_derived: true,
+  });
+  check("8q. editConfirm(en, derived physical) CONTAINS the en marker", s.includes(EN_MARKER), s);
+}
+{
+  const s = renderReply("en", "editDone", {
+    title: "Sync", when: "tomorrow", duration: 30, emails: "", link: "http://x",
+    location: "Av. Faria Lima 1215", virtual: false, meetLink: null, notified: false,
+    location_derived: true,
+  });
+  check("8r. editDone(en, even with derived:true) does NOT contain the marker", !s.includes(EN_MARKER), s);
+}
+{
+  // A VIRTUAL confirm never shows the marker — it shows the Meet line, even if derived:true leaked.
+  const s = renderReply("en", "createConfirm", {
+    title: "Sync", emails: "", when: "tomorrow", duration: 30, uninvited: [], recurrence: null,
+    location: "Rua Augusta 123", virtual: true, location_derived: true,
+  });
+  check(
+    "8s. createConfirm(en, virtual + derived) shows the Meet line, NOT the marker",
+    s.includes("Google Meet") && !s.includes(EN_MARKER),
+    s
+  );
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");

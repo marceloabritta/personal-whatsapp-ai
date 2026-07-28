@@ -496,9 +496,17 @@ dia até 30 de ago. de 2026"*.
 An event can carry a **place** — on create and on edit — exactly like `all_day` / `recurrence`,
 via **two coupled, nullable** `manifest.inputs.fields`:
 
-- **`location`** (string|null) — the **VERBATIM** physical address/venue/room, copied
-  word-for-word from the owner's order (`"Rua Augusta 123"`, `"Café Blue"`, `"sala 4"`) — never
-  invented, looked up, completed, or reformatted. `null` when no place is given.
+- **`location`** (string|null) — the physical address/venue/room. A **named venue** (`"o
+  McDonald's da Faria Lima"`, `"Café Blue"`, `"Hospital Albert Einstein"`) is **expanded to its
+  full address from the model's own knowledge**, then **proposed and confirmed in prose** ("I
+  looked up X — is that the right place?") before the event is created; a **full explicit
+  address** (`"Rua Augusta 123"`) or a **bare room** (`"sala 4"`) is kept **verbatim**, unflagged
+  — an address the owner gave in full needs no confirmation. Unresolvable venue → kept verbatim,
+  **fail-open**, never fabricated. `null` when no place is given. **@mary carries NO
+  `location_derived` flag** — unlike @assistant, the "I looked this up" cue is model-written
+  prose in the conversation, not a structured field (this card is prompt-only for @mary: rulebook
+  + `location.desc`, no schema/draft change). The resolved address is plain data on the existing
+  `location` line.
 - **`virtual`** (bool|null) — `true` iff the order asks for a **Google Meet video call** ("por
   Meet", "chamada de vídeo", "make it virtual"). A Meet is auto-provisioned via
   `conferenceData.createRequest` with a **deterministic** `requestId` (`meet-<seed>`, seeded off

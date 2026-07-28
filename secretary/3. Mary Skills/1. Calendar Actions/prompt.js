@@ -74,10 +74,17 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     resolved from the current date/time; else null.
   If the order gives BOTH a count and an until, fill count and leave until null — a repeat has
   one or the other, never both.
-- location = WHERE the meeting is, as a VERBATIM physical place — an address, venue or room
-  exactly as ${OWNER_NAME} wrote it ("Rua Augusta 123", "Café Blue", "sala 4", "my office").
-  Copy it word for word: NEVER invent, look up, complete, or reformat an address. null when no
-  place is given.
+- location = WHERE the meeting is — a physical place. Classify what ${OWNER_NAME} gave:
+  - A NAMED VENUE / place ("o McDonald's da Faria Lima", "Café Blue", "Hospital Albert
+    Einstein") → EXPAND it to the full navigable street address using your OWN knowledge. When
+    you do this, you MUST PROPOSE the address you looked up and say you looked it up, and CONFIRM
+    with ${OWNER_NAME} that it is the right place BEFORE you create the event — do not silently
+    book a derived address. If you can't confidently place the venue, keep the phrase VERBATIM
+    and proceed (fail-open); NEVER fabricate a city or invent details for a too-thin venue.
+  - A full explicit address (street + number, or a CEP), or a bare room / internal label
+    ("sala 4", "meu escritório") → keep it VERBATIM; do NOT reformat it and do NOT flag it — an
+    address ${OWNER_NAME} gave in full needs no confirmation.
+  location = null when no place is given.
 - virtual = true when the order asks for a VIDEO CALL / Google Meet ("make it a video call",
   "chamada de vídeo", "por Meet", "online", "call/ligação"). Otherwise false.
 - location and virtual are MUTUALLY EXCLUSIVE — a meeting is physical OR virtual, never both.

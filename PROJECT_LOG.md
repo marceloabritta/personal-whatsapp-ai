@@ -511,6 +511,24 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — feat(calendar): resolve a named venue into a full address from the model's own
+  knowledge (both flows).** When the owner names a **venue** instead of giving a full address, the
+  calendar extraction now **expands it to a full street address from the model's own knowledge** —
+  no API, no key, no `lib/` module, prompt + schema only. `@assistant` flags the lookup via a new
+  nullable `location_derived` on `CAL_SCHEMA`/`REVIEW_SCHEMA` + `manifest.inputs.fields`
+  (`new_location_derived` on `EDIT_SCHEMA`/`EDIT_REVIEW_SCHEMA`), threaded through
+  `draftFromInfo`/`applyDraftUpdate`/`applyPatchToDraft` and surfaced by a new **en+pt
+  confirm-bubble marker** ("I looked this address up — check it's the right place." / "Procurei
+  este endereço…"); the **done** bubble stays plain (owner already approved). XOR-coherence is
+  clamped in code (`draftFromInfo`/`applyPatchToDraft`), so the flag can never ride a Meet or a
+  placeless event. A **full explicit address / bare room / video call** is left **verbatim,
+  unflagged**; an unresolvable venue is **fail-open** (kept verbatim, never fabricated). `@mary` is
+  **prompt-only** (rulebook + `location.desc`) — it proposes and confirms the looked-up address in
+  **model-written prose**, no schema field, no draft change. **No rails / `ctx` / `lib` /
+  dependency change.** Editing `buildExtractionRules` + the router-carried `location.desc` on both
+  flows means the live router self-test (`scripts/router-selftest.mjs`, real money) is the human's
+  call at the gate. Deterministic layer pinned by `scripts/calendar-location-selftest.mjs` §8 and
+  `scripts/mary-calendar-location-selftest.mjs` §6.
 - **2026-07-18 — feat(@mary): generalized inbound-media relay in stateful conversations.** `@mary`
   now **reads files attached in the conversation** — detect any attachment on every turn (first /
   mid-session / quoted), relay all supported files to the turn call as **N multimodal content

@@ -35,6 +35,17 @@
 //  presence check and every behaviour assertion fails. That is the correct
 //  pre-implementation red; the Coding column makes it green.
 //
+//  §6 — DERIVED-ADDRESS ASYMMETRY PIN (card df2dcfad, "Resolve addresses from
+//  context", NATIVE route). @mary's feature layer for that card is PROMPT-ONLY —
+//  a rulebook + location.desc flip that tells the model to expand a named venue and
+//  PROPOSE it in prose. There is NO schema field, NO code-rendered marker, and NO new
+//  draft key. @mary's derive/propose behaviour is therefore the PAID LIVE layer
+//  (CONVENTIONS §5) and is NOT offline-testable — the only honest offline pin is a
+//  regression + asymmetry guard: the derived address still rides `info.location`
+//  verbatim through the UNCHANGED draftFromInfo, and the @mary draft carries NO
+//  `location_derived` key (that flag lives on the @assistant flow alone). §6 is GREEN
+//  before AND after the card (it asserts current behaviour + the absence of the flag).
+//
 //  Run:  node scripts/mary-calendar-location-selftest.mjs
 // ============================================================================
 const CAL = await import(
@@ -328,6 +339,41 @@ console.log("\n=== 5. locationUpdateFields — the five update branches (Nits C 
     r && r.fields && r.fields.location === "Rua New 1" &&
       !("conferenceData" in r.fields) && r.conferenceVersion === false,
     r
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 6. DERIVED-ADDRESS ASYMMETRY PIN (card df2dcfad, NATIVE route). @mary is
+//    prompt-only for this card: the model may EXPAND a named venue to its full address
+//    and propose it in prose, but that resolved address is plain data — it rides
+//    `info.location` through the UNCHANGED draftFromInfo, VERBATIM. There is no
+//    `location_derived` flag on @mary (that is the @assistant flow's code-rendered
+//    marker). This pin is GREEN before and after the card; it guards two invariants:
+//      (1) the (derived-or-not) address is stored on d.location verbatim — the
+//          rulebook/desc flip did not break threading;
+//      (2) the @mary draft has NO `location_derived` key — the derived proposal is
+//          model-written prose, never a structured flag.
+//    @mary's derive/propose *judgement* is the paid live layer, not asserted here.
+// ---------------------------------------------------------------------------
+console.log("\n=== 6. derived-address asymmetry pin — verbatim store + NO flag key ===\n");
+{
+  const d = call("draftFromInfo", ctx, {
+    title: "Sync",
+    participants: [],
+    start_iso: "2026-07-20T15:00:00-03:00",
+    duration_min: 30,
+    location: "Av. Faria Lima 1215",
+    virtual: false,
+  });
+  check(
+    "6a. draftFromInfo stores the (derived) address VERBATIM on d.location",
+    d && d.location === "Av. Faria Lima 1215" && d.virtual === false,
+    d && { location: d.location, virtual: d.virtual }
+  );
+  check(
+    "6b. the @mary draft carries NO `location_derived` key (asymmetry with @assistant)",
+    d && typeof d === "object" && !("location_derived" in d),
+    d && Object.keys(d)
   );
 }
 

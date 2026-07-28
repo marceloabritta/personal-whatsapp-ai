@@ -259,7 +259,7 @@ names of `CAL_SCHEMA`** — which is what makes it a drop-in and why `handleCrea
 **one** LLM call before the reply instead of three. User-visible behaviour is unchanged: it is
 faster, not different.
 
-> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all FOURTEEN names.**
+> 🔴 **`manifest.inputs.fields` MUST equal `CAL_SCHEMA.required`, as a set — all FIFTEEN names.**
 > That binding is load-bearing, and it is a new way to break this skill *silently*: add a field
 > to `CAL_SCHEMA` and forget the declaration, and the merged prompt simply stops asking for it,
 > `draftFromInfo` reads `undefined`, and the feature that field implements dies **without a
@@ -489,21 +489,39 @@ dia até 30 de ago. de 2026"*.
 > card**, deliberately out of scope here.
 
 #### LOCATION — physical XOR virtual
-A create or edit can give the event a **place**: either a **verbatim physical address** ("Rua
-Augusta 123", "Café Blue", "sala 4") or a **Google Meet video call** ("make it a video call",
-"chamada de vídeo", "por Meet"). The two are **mutually exclusive** — an event is physical **or**
-virtual, never both.
+A create or edit can give the event a **place**: either a **physical address** ("Rua Augusta
+123", "Café Blue", "sala 4") or a **Google Meet video call** ("make it a video call", "chamada de
+vídeo", "por Meet"). The two are **mutually exclusive** — an event is physical **or** virtual,
+never both. A physical place is either kept **verbatim** (a full explicit address, a bare room)
+or, when the owner names a **venue**, **expanded to its full address from the model's own
+knowledge** and flagged for a double-check — see `location_derived` below.
 
 - **Two coupled draft fields**, carried exactly like `all_day` / `recurrence`: `location:
-  string|null` (the verbatim address, outer-trimmed, **never looked up or reformatted**) and
-  `virtual: boolean` (true iff it's a Meet). The XOR is enforced in **one** normalizer,
-  **`normalizeLocation(location, virtual)`** — **virtual wins**, then a non-empty address means
-  physical, everything else means no location. Every create merge path funnels through it (via
-  `draftFromInfo`); the edit fold (`applyPatchToDraft`) re-applies it too. They are the
-  **thirteenth and fourteenth** `CAL_SCHEMA`/`manifest.inputs.fields`, ride `REVIEW_SCHEMA` so
-  the confirm step can set / switch / clear them, and — like `recurrence` — `applyDraftUpdate`
-  reads `review.location`/`review.virtual` **directly** (null = clear), so the review prompt
-  makes the model **echo** the current pair on any non-location modify.
+  string|null` (the address — kept verbatim for an explicit address / bare room, or the model's
+  looked-up address for a named venue) and `virtual: boolean` (true iff it's a Meet). The XOR is
+  enforced in **one** normalizer, **`normalizeLocation(location, virtual)`** — **virtual wins**,
+  then a non-empty address means physical, everything else means no location. Every create merge
+  path funnels through it (via `draftFromInfo`); the edit fold (`applyPatchToDraft`) re-applies it
+  too. They are the **thirteenth and fourteenth** `CAL_SCHEMA`/`manifest.inputs.fields` (the
+  **fifteenth** is `location_derived`, below), ride `REVIEW_SCHEMA` so the confirm step can set /
+  switch / clear them, and — like `recurrence` — `applyDraftUpdate` reads
+  `review.location`/`review.virtual` **directly** (null = clear), so the review prompt makes the
+  model **echo** the current pair on any non-location modify.
+- **`location_derived` — the "I looked this up" flag.** When the owner names a **venue** rather
+  than giving a full address, the model **expands it to a full street address from its own
+  knowledge** (no API, no lookup service) and sets `location_derived: true`; a full explicit
+  address, a bare room, an unresolvable venue (**fail-open** — kept verbatim, never fabricated),
+  or a video call all leave it `false`/`null`. It is the **fifteenth**
+  `CAL_SCHEMA`/`manifest.inputs.fields` field, also on `REVIEW_SCHEMA` (create-review echo, edge
+  #10) and — as `new_location_derived` — on `EDIT_SCHEMA`/`EDIT_REVIEW_SCHEMA`. **XOR-coherence
+  is enforced in code, never the model:** `draftFromInfo` sets `location_derived = !!(location &&
+  info.location_derived === true)` and `applyPatchToDraft` clamps it to `false` on any
+  Meet/cleared place, so the flag can **never** ride a virtual or placeless event. On the
+  **confirm bubble** (create and edit) a derived physical line appends a marker — *"I looked this
+  address up — check it's the right place."* / *"Procurei este endereço…"* — the agreed
+  mitigation for a plausible-but-wrong lookup; the **done** bubble stays plain (the owner already
+  approved). The model's venue-vs-address *judgement* is the paid live layer; the deterministic
+  threading/clamp/marker is pinned by `scripts/calendar-location-selftest.mjs` §8.
 - **The wire.** A virtual event provisions a Meet through
   `conferenceData.createRequest` with a **deterministic** `requestId` (`meet-<seed>`, seed =
   the event's start/title on insert, the eventId on update — no `Date.now`/`Math.random`, and

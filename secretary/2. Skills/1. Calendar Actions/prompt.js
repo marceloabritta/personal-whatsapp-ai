@@ -68,6 +68,7 @@ export const CAL_SCHEMA = {
     "recurrence",
     "location",
     "virtual",
+    "location_derived",
   ],
   properties: {
     action: { type: "string", enum: ["create", "delete", "edit", "list", "other"] },
@@ -102,6 +103,11 @@ export const CAL_SCHEMA = {
     // Physical XOR virtual is enforced by normalizeLocation (skill.js), the sole normalizer.
     location: { type: ["string", "null"] },
     virtual: { type: ["boolean", "null"] },
+    // true ONLY when the model EXPANDED a named venue into its full address from its own
+    // knowledge (so the confirm bubble flags it for a double-check); false for a full explicit
+    // address / bare room / video call / verbatim place; null when there is no place. XOR
+    // coherence (a flag only ever rides a physical location) is clamped in code (draftFromInfo).
+    location_derived: { type: ["boolean", "null"] },
   },
 };
 
@@ -123,6 +129,7 @@ export const REVIEW_SCHEMA = {
     "recurrence",
     "location",
     "virtual",
+    "location_derived",
   ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
@@ -146,6 +153,10 @@ export const REVIEW_SCHEMA = {
     // normalizeLocation; the model echoes the current pair on non-location modifies.
     location: { type: ["string", "null"] },
     virtual: { type: ["boolean", "null"] },
+    // Same meaning as CAL_SCHEMA's location_derived — HERE so the confirm step can echo the
+    // draft's derived flag on a non-location modify (edge #10) and set it true when a NEW
+    // named venue is derived at confirm time. applyDraftUpdate reads it DIRECTLY, like location.
+    location_derived: { type: ["boolean", "null"] },
   },
 };
 
@@ -195,6 +206,7 @@ export const EDIT_SCHEMA = {
     "new_virtual",
     "remove_location",
     "notify_guests",
+    "new_location_derived",
   ],
   properties: {
     new_start_iso: { type: ["string", "null"] },
@@ -215,6 +227,10 @@ export const EDIT_SCHEMA = {
     new_virtual: { type: ["boolean", "null"] },
     remove_location: { type: "boolean" },
     notify_guests: { type: ["boolean", "null"] },
+    // true when the NEW place (new_location) is a named venue the model expanded from its own
+    // knowledge; false/null for a full explicit address or no location change. applyPatchToDraft
+    // reads it only alongside new_location and clamps it to false on a Meet / cleared place.
+    new_location_derived: { type: ["boolean", "null"] },
   },
 };
 
@@ -240,6 +256,7 @@ export const EDIT_REVIEW_SCHEMA = {
     "new_virtual",
     "remove_location",
     "notify_guests",
+    "new_location_derived",
   ],
   properties: {
     decision: { type: "string", enum: ["confirm", "modify", "cancel", "unrelated"] },
@@ -261,6 +278,9 @@ export const EDIT_REVIEW_SCHEMA = {
     new_virtual: { type: ["boolean", "null"] },
     remove_location: { type: "boolean" },
     notify_guests: { type: ["boolean", "null"] },
+    // Same meaning as EDIT_SCHEMA's new_location_derived — HERE so a NEW named venue derived at
+    // the confirm step is flagged too (edge #7). Read only alongside new_location, clamped in code.
+    new_location_derived: { type: ["boolean", "null"] },
   },
 };
 
@@ -331,10 +351,23 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     resolved from the current date/time; else null.
   If the order gives BOTH a count and an until, fill count and leave until null — a repeat has
   one or the other, never both.
-- location = WHERE the meeting is, as a VERBATIM physical place — an address, venue or room
-  exactly as ${OWNER_NAME} wrote it ("Rua Augusta 123", "Café Blue", "sala 4", "my office").
-  Copy it word for word: NEVER invent, look up, complete, or reformat an address. null when no
-  place is given.
+- location = WHERE the meeting is — a physical place. Classify what ${OWNER_NAME} gave and set
+  location_derived accordingly:
+  - A NAMED VENUE / place ("o McDonald's da Faria Lima", "Café Blue", "Hospital Albert
+    Einstein", "shopping Iguatemi") → EXPAND it to the full navigable street address using your
+    OWN knowledge, and set location_derived = true.
+  - An ALREADY-FULL street address (a street + number, or a CEP) → leave it VERBATIM,
+    location_derived = false. Do NOT reformat it.
+  - A BARE room / internal label ("sala 4", "meu escritório", "recepção") → leave it VERBATIM,
+    location_derived = false.
+  - If you CAN'T place the venue or are unsure → leave the phrase VERBATIM, location_derived =
+    false, and proceed (fail-open — NEVER block). NEVER fabricate a city or invent details for a
+    too-thin venue ("o McDonald's" with no way to tell which one).
+  location = null when no place is given. location_derived = false whenever there is no physical
+  place (including a video call — see virtual).
+- location_derived = true ONLY in the named-venue case above (you supplied the address from your
+  own knowledge); false in every other case. It rides alongside location; it is never true when
+  location is null or the meeting is virtual.
 - virtual = true when the order asks for a VIDEO CALL / Google Meet ("make it a video call",
   "chamada de vídeo", "por Meet", "online", "call/ligação"). Otherwise false.
 - location and virtual are MUTUALLY EXCLUSIVE — a meeting is physical OR virtual, never both.
@@ -402,7 +435,8 @@ For "modify", apply the change on top of the current draft:
 - when adding/removing an attendee, keep the others; each participant is {name, email|null};
 - "participants" is the FULL attendee list. An empty array [] means the event has NO outside guests — return [] ONLY when ${OWNER_NAME} says nobody should be invited. NEVER return [] when you are only changing the time, the title or the duration: echo the draft's attendees exactly.
 - recurrence: the repeat rule {freq, interval, byday, count, until} or null, SAME shape and rules as the first extraction. On any modify that is NOT about the repetition (a rename, a new time, an added guest), ECHO the draft's current recurrence EXACTLY — carry it over unchanged. Change it only when the latest message changes the repeat ("make it every other Monday" -> interval 2; "only until August" -> set until; "add Wednesdays" -> add "WE"). Return recurrence = null ONLY when the owner cancels the repetition ("actually just once", "na verdade só uma vez", "not recurring") — that clears it to a single event. NEVER return null just because the modify was about something else: a null you did not mean DROPS the whole series.
-- location / virtual: WHERE the event is — a VERBATIM physical address in "location" (never looked up or reformatted), or virtual=true for a Google Meet video call. Physical XOR virtual — never both. On any modify that is NOT about the place, ECHO the draft's current location and virtual EXACTLY. Change them only when the latest message changes the place: a new address ("na verdade é na Rua X") sets location and virtual=false; "make it a video call" / "por Meet" sets virtual=true and location=null; "remove the location" / "sem local" clears BOTH (location=null, virtual=false). Like recurrence, a location=null you did not mean DROPS the address — echo it unless the owner cleared or changed it.
+- location / virtual: WHERE the event is — a physical place in "location", or virtual=true for a Google Meet video call. Physical XOR virtual — never both. When a NEW place is a NAMED VENUE ("o McDonald's da Faria Lima", "Café Blue"), EXPAND it to its full street address from your own knowledge and set location_derived=true; a full explicit address (street + number, or a CEP), a bare room, or a place you can't confidently expand stays VERBATIM with location_derived=false. On any modify that is NOT about the place, ECHO the draft's current location and virtual EXACTLY. Change them only when the latest message changes the place: a new address ("na verdade é na Rua X") sets location and virtual=false; "make it a video call" / "por Meet" sets virtual=true and location=null; "remove the location" / "sem local" clears BOTH (location=null, virtual=false). Like recurrence, a location=null you did not mean DROPS the address — echo it unless the owner cleared or changed it.
+- location_derived: ECHO the draft's current location_derived alongside location on any non-location modify. Set it TRUE only when you newly derive a named venue's address at this step; FALSE when the owner gives a full explicit address, a bare room, or clears the place. Never true when location is null or virtual=true.
 - change ONLY what the latest message asks to change; echo everything else from the draft.
 For any decision other than "modify", the draft fields are ignored — you may echo the current draft.`;
 }
@@ -488,7 +522,8 @@ export function buildEditSystem(OWNER_NAME) {
 - new_all_day_end_iso: ONLY when the request changes the RANGE of an all-day event ("na verdade vai até sexta", "só quarta mesmo", "a semana toda"). The LAST day the event STILL COVERS, at 00:00 with the -03:00 offset — INCLUSIVE: "até sexta" is FRIDAY, do not add a day. null when the range is not changing, and null when the event collapses back to a single day. A rename/duration/attendee change touches NEITHER this field NOR new_all_day.
 - add_emails: array of email addresses to ADD as attendees (["carlos@x.com"]). Empty array if none. Only include addresses that actually appear in the request/conversation — NEVER invent one.
 - remove_emails: array of email addresses to REMOVE from the attendees. Empty array if none.
-- new_location: a NEW VERBATIM physical address if the request sets or changes the place ("na verdade é na Rua Augusta 123", "move it to Café Blue"). Copy it word for word — NEVER look up or reformat. Also use new_location to switch a VIDEO call BACK to a physical place ("actually let's meet in person at X"). null when the place is not changing.
+- new_location: the NEW physical place if the request sets or changes it. When it is a NAMED VENUE ("move it to Café Blue", "no McDonald's da Faria Lima"), EXPAND it to the full street address from your own knowledge; a full explicit address ("na verdade é na Rua Augusta 123"), a bare room, or a place you can't confidently expand stays VERBATIM. Also use new_location to switch a VIDEO call BACK to a physical place ("actually let's meet in person at X"). null when the place is not changing.
+- new_location_derived: true ONLY when new_location is a named venue you expanded from your own knowledge; false/null when new_location is a full explicit address, a bare room, or is not changing. It pairs with new_location.
 - new_virtual: true ONLY when the request makes it a Google Meet VIDEO call ("make it virtual", "faz por Meet", "chamada de vídeo"). null otherwise. Do NOT emit false to turn video off — a switch back to a physical meeting is expressed with new_location (the address they give), never with new_virtual:false.
 - remove_location: true when the request removes the place entirely with no replacement ("remove the location", "tira o local", "sem local"). Clears both the address and any Meet. false otherwise.
 - notify_guests: true ONLY when the request explicitly asks to let the attendees know about the change ("and let the guests know", "avisa o pessoal"). null/false otherwise — a location-only change is silent unless asked.
@@ -524,14 +559,15 @@ Choose the "decision":
 - "cancel": the latest message calls the edit off / wants to keep the event as it was (e.g. no, leave it, forget it, deixa, mantém).
 - "unrelated": normal conversation, NOT a response to this confirmation. If unsure, choose "unrelated".
 
-Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, new_all_day, new_all_day_end_iso, add_emails[], remove_emails[], new_location, new_virtual, remove_location, notify_guests. Change ONLY what the latest message asks; never invent a time, an email, or an address — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.
+Change fields (used only for "modify"): new_start_iso (ISO 8601, -03:00; resolve relative times against the current date/time and the proposed start), new_duration_min, new_title, new_summary, new_all_day, new_all_day_end_iso, add_emails[], remove_emails[], new_location, new_location_derived, new_virtual, remove_location, notify_guests. Change ONLY what the latest message asks; never invent a time, an email, or an address — ask via clarify instead. For confirm/cancel/unrelated, leave every change field null/empty.
 
 The WHOLE-DAY fields, same rules as the first pass:
 - new_all_day = true when ${OWNER_NAME} now says it is the whole day ("na verdade, o dia todo"); false ONLY when he gives it a TIME ("na verdade às 10h") — and then you MUST also fill new_start_iso with that time. In EVERY other case leave it null. A rename, a duration change, an attendee change, or moving an all-day event to another DAY all leave it null — NEVER false.
 - new_all_day_end_iso = the LAST day the event STILL COVERS (INCLUSIVE, 00:00 -03:00) when the RANGE changes ("só até sexta" → FRIDAY, do not add a day); null when the range is not changing or the event collapses back to a single day.
 
 The LOCATION fields, same rules as the first pass:
-- new_location = a NEW VERBATIM physical address when the place is set or changed (copy word for word, never look up); also how a switch back from a video call to an in-person place is expressed. null when unchanged.
+- new_location = the NEW physical place when it is set or changed. A NAMED VENUE ("no Café Blue") is EXPANDED to its full street address from your own knowledge; a full explicit address, a bare room, or a place you can't confidently expand stays VERBATIM. Also how a switch back from a video call to an in-person place is expressed. null when unchanged.
+- new_location_derived = true ONLY when new_location is a named venue you expanded from your own knowledge; false/null for a full explicit address, a bare room, or no location change. Pairs with new_location.
 - new_virtual = true ONLY to make it a Google Meet video call ("faz por Meet", "make it virtual"); null otherwise. NEVER emit false to turn video off — give the address in new_location instead.
 - remove_location = true to clear the place entirely ("sem local", "remove the location"); false otherwise.
 - notify_guests = true ONLY when ${OWNER_NAME} explicitly asks to notify the attendees ("avisa o pessoal", "let them know"); null/false otherwise.
@@ -748,14 +784,26 @@ function renderDays(lang, events) {
 // it — edge #8), the join URL beneath it. No location -> "" (no bullet at all). Returns the
 // bullet(s) WITH the leading "\n- " so callers append it inline, exactly like the recurrence
 // line. Kept here, not in skill.js, so the prose stays localized.
-function locationLineEn({ location, virtual, meetLink }) {
+// The ONE derived-address marker (en + pt). Rendered on a PHYSICAL location line only, at
+// CONFIRM time only, when the model EXPANDED a named venue into its full address
+// (location_derived) — a nudge to double-check the looked-up place before the write. NEVER on a
+// virtual/Meet line, and NEVER on a done bubble (the owner already approved). CONVENTIONS §6:
+// user-facing prose lives here as { en, pt }, never inline in skill.js.
+const derivedMarker = {
+  en: "(I looked this address up — check it's the right place.)",
+  pt: "(Procurei este endereço — confira se é o lugar certo.)",
+};
+
+// `derived` (default falsy) appends the marker beneath a physical address line; a virtual/Meet
+// line never carries it. Callers that omit `derived` (createDone/editDone) render plainly.
+function locationLineEn({ location, virtual, meetLink, derived }) {
   if (virtual) return `\n- 📹 Google Meet (video call)${meetLink ? `\n  ${meetLink}` : ""}`;
-  if (location) return `\n- 📍 ${location}`;
+  if (location) return `\n- 📍 ${location}${derived ? `\n  ${derivedMarker.en}` : ""}`;
   return "";
 }
-function locationLinePt({ location, virtual, meetLink }) {
+function locationLinePt({ location, virtual, meetLink, derived }) {
   if (virtual) return `\n- 📹 Google Meet (chamada de vídeo)${meetLink ? `\n  ${meetLink}` : ""}`;
-  if (location) return `\n- 📍 ${location}`;
+  if (location) return `\n- 📍 ${location}${derived ? `\n  ${derivedMarker.pt}` : ""}`;
   return "";
 }
 
@@ -769,13 +817,13 @@ const REPLY = {
     // empty "- " bullet says nothing, and a person must NEVER be dropped silently.
     // `duration` is null for an all-day event (the caller passes null) — `when` already
     // says "All day", and "(1440 min)" is exactly the thing the owner should never see.
-    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual, location_derived }) => {
       const guests = emails || "(no guests)";
       const without = uninvited?.length
         ? `\n- Without ${joinListEn(uninvited)} — I don't have their email.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
-      const loc = locationLineEn({ location, virtual });
+      const loc = locationLineEn({ location, virtual, derived: location_derived });
       return `Confirm this event:
 - ${title}
 - ${guests}${without}
@@ -839,8 +887,8 @@ Reply "yes" to confirm and I'll send the invites, or tell me what to change and 
     // `when` arrives PRE-RENDERED by localizeWhen (all-day -> "14 de jul. de 2026 · All
     // day (3 days)"), and `duration` is null for an all-day event — the same contract
     // createConfirm has. "(1440 min)" is the bug, not the event.
-    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests }) => {
-      const loc = locationLineEn({ location, virtual });
+    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests, location_derived }) => {
+      const loc = locationLineEn({ location, virtual, derived: location_derived });
       // notifyGuests is false for a silent location-only edit — say so, don't promise to
       // "notify everyone" when we won't. A substantive change (time, title, attendees) sets it
       // true and keeps the original wording.
@@ -883,13 +931,13 @@ ${close}`;
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     noAction: ({ summary }) =>
       `Não identifiquei uma ação de calendário. ${summary || ""}`.trim(),
-    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual }) => {
+    createConfirm: ({ title, emails, when, duration, uninvited, recurrence, location, virtual, location_derived }) => {
       const guests = emails || "(ninguém convidado)";
       const without = uninvited?.length
         ? `\n- Sem convidar ${joinListPt(uninvited)} — não tenho o e-mail.`
         : "";
       const rec = recurrence ? `\n- ${recurrence}` : "";
-      const loc = locationLinePt({ location, virtual });
+      const loc = locationLinePt({ location, virtual, derived: location_derived });
       return `Confirme este evento:
 - ${title}
 - ${guests}${without}
@@ -952,8 +1000,8 @@ Responda "sim" para confirmar e eu envio os convites, ou me diga o que mudar que
     editClarify: (question) => question,
     editNoChange: () =>
       "Não consegui entender o que mudar. Me diga o novo horário, a duração, o título, ou qual participante adicionar/remover.",
-    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests }) => {
-      const loc = locationLinePt({ location, virtual });
+    editConfirm: ({ title, emails, when, duration, location, virtual, notifyGuests, location_derived }) => {
+      const loc = locationLinePt({ location, virtual, derived: location_derived });
       const close = notifyGuests
         ? 'Responda "sim" para salvar e avisar todo mundo, ou me diga o que mais mudar.'
         : 'Responda "sim" para salvar — não vou avisar os convidados desta mudança. Me diga o que mais mudar, ou peça para avisá-los.';

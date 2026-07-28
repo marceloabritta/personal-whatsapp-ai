@@ -123,12 +123,17 @@ export const manifest = {
       location: {
         type: "string",
         nullable: true,
-        desc: "the VERBATIM physical address/venue of the meeting, exactly as written — NEVER invented, looked up, or reformatted. null when no place is given or when it is a video call.",
+        desc: "the physical address/venue of the meeting; a NAMED VENUE is expanded to its full address from your own knowledge, while a full explicit address / bare room / unknown place is kept verbatim. null for a video call or no place.",
       },
       virtual: {
         type: "bool",
         nullable: true,
         desc: 'true when the meeting is a Google Meet VIDEO CALL ("chamada de vídeo", "por Meet", "online"). Physical XOR virtual: if both an address and a video call are asked for, virtual wins and location is null.',
+      },
+      location_derived: {
+        type: "bool",
+        nullable: true,
+        desc: "true ONLY when YOU expanded a named venue into its full address from your own knowledge (so the owner is asked to double-check it). false when the owner gave a full explicit address, a bare room, a video call, or you left the place verbatim. null when there is no place.",
       },
     },
     // A faithful transcription of missingOf()/isComplete() below. `participants[].email` means
@@ -872,6 +877,11 @@ export function draftFromInfo(ctx, info) {
   // physical XOR virtual is decided here, once, by normalizeLocation — virtual wins, then a
   // non-empty verbatim address, else neither.
   const { location, virtual } = normalizeLocation(info.location, info.virtual);
+  // The derivation flag rides alongside the location and is XOR-coherent: TRUE only when a
+  // physical location SURVIVED normalization AND the model derived it from its own knowledge. A
+  // virtual/empty result forces it false, so a confirm marker can never render on a Meet or a
+  // placeless event. Decided HERE, in code, never trusted from the model in isolation.
+  const location_derived = !!(location && info.location_derived === true);
 
   return {
     title,
@@ -887,6 +897,7 @@ export function draftFromInfo(ctx, info) {
     recurrence: info.recurrence || null,
     location,
     virtual,
+    location_derived,
   };
 }
 
@@ -941,6 +952,7 @@ async function openCreateConfirm(ctx, draft) {
       recurrence: recurrenceLineFor(draft, ctx.lang),
       location: draft.location,
       virtual: draft.virtual,
+      location_derived: draft.location_derived,
     })
   );
 }
@@ -1082,6 +1094,10 @@ export function applyDraftUpdate(ctx, prev, review) {
     // correct. normalizeLocation (inside draftFromInfo) re-applies the XOR.
     location: review.location,
     virtual: review.virtual,
+    // DIRECT, same contract as location: the review echoes the draft's derived flag on a
+    // non-location modify (edge #10) and sets it true only for a newly-derived venue.
+    // draftFromInfo clamps it to XOR-coherence, so a stray true on a Meet/empty place is dropped.
+    location_derived: review.location_derived,
   });
 }
 
@@ -1342,6 +1358,9 @@ export function editDraftFromEvent(ev) {
     emails: (ev.attendees || []).map((a) => a.email).filter(Boolean),
     location,
     virtual,
+    // A stored Google event carries no derivation provenance — seed false so the draft always
+    // holds the key and the applyPatchToDraft echo has a defined base.
+    location_derived: false,
     notify: false,
   };
 }
@@ -1416,16 +1435,21 @@ export function applyPatchToDraft(draft, patch) {
   if (patch.new_virtual === true) {
     d.virtual = true;
     d.location = null;
+    d.location_derived = false;
   } else if (typeof patch.new_location === "string" && patch.new_location.trim()) {
     d.location = patch.new_location;
     d.virtual = false;
+    d.location_derived = patch.new_location_derived === true;
   } else if (patch.remove_location === true) {
     d.location = null;
     d.virtual = false;
+    d.location_derived = false;
   }
+  // else: no location change -> d.location_derived carries over from the {...draft} spread (echo).
   const loc = normalizeLocation(d.location, d.virtual);
   d.location = loc.location;
   d.virtual = loc.virtual;
+  if (!d.location) d.location_derived = false; // XOR coherence: no physical place -> no flag
 
   // notify is STICKY across the edit's refinements: once the owner asks to let the guests know,
   // it stays on. Set true ONLY on an explicit request (resolveSendUpdates reads it).
@@ -1552,6 +1576,7 @@ async function openEditConfirm(ctx, eventId, draft, base) {
       location: draft.location,
       virtual: draft.virtual,
       notifyGuests: willNotify,
+      location_derived: draft.location_derived,
     })
   );
 }
