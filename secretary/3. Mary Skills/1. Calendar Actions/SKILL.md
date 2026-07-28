@@ -509,8 +509,11 @@ via **two coupled, nullable** `manifest.inputs.fields`:
 
 - **`location`** (string|null) — the physical address/venue/room. A **named venue** (`"o
   McDonald's da Faria Lima"`, `"Café Blue"`, `"Hospital Albert Einstein"`) is **expanded to its
-  full address from the model's own knowledge**, then **proposed and confirmed in prose** ("I
-  looked up X — is that the right place?") before the event is created; a **full explicit
+  full address from the model's own knowledge**, then handled by the model's **confidence** in
+  that resolution — an **unambiguous match** is kept as a settled field and **booked directly**
+  (not re-asked on its own, no confirmation step); a **vague venue (many plausible matches)** is
+  **asked about on its own turn** ("I looked up X — which one did you mean?") before booking and
+  is **never booked verbatim**; a **full explicit
   address** (`"Rua Augusta 123"`) or a **bare room** (`"sala 4"`) is kept **verbatim**, unflagged
   — an address the owner gave in full needs no confirmation. Unresolvable venue → kept verbatim,
   **fail-open**, never fabricated. `null` when no place is given. **@mary carries NO

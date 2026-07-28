@@ -59,9 +59,10 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     yet). Their inline reply with the address then continues the booking on its own. Use
     awaitFrom="contact" ONLY when the missing address belongs to that same person here in the
     chat; OR
-  - if inviting that guest makes sense and ${OWNER_NAME} plausibly has the address — the guest
-    is NOT in this chat, or it is ${OWNER_NAME} who would know the email — ASK HIM for it before
-    booking: reply say=<your question>, next="listen", awaitFrom="owner" (do NOT execute yet); OR
+  - if inviting that guest makes sense and ${OWNER_NAME} plausibly has the address, ASK him for
+    it — one question, on its own turn: reply say=<your question>, next="listen",
+    awaitFrom="owner" (do NOT execute yet), and wait for his answer. Do NOT bundle this ask with
+    any other uncertain field (see the gathering rule below); OR
   - if the conversation already shows the email should NOT be included — ${OWNER_NAME} has said
     he doesn't have it, it can't be got, or an invite is clearly unnecessary — BOOK it now:
     next="execute" with that guest's email=null. The event is created and ${OWNER_NAME} is told
@@ -92,15 +93,34 @@ For action="create", fill these (for action="delete", ALSO fill participants and
   one or the other, never both.
 - location = WHERE the meeting is — a physical place. Classify what ${OWNER_NAME} gave:
   - A NAMED VENUE / place ("o McDonald's da Faria Lima", "Café Blue", "Hospital Albert
-    Einstein") → EXPAND it to the full navigable street address using your OWN knowledge. When
-    you do this, you MUST PROPOSE the address you looked up and say you looked it up, and CONFIRM
-    with ${OWNER_NAME} that it is the right place BEFORE you create the event — do not silently
-    book a derived address. If you can't confidently place the venue, keep the phrase VERBATIM
-    and proceed (fail-open); NEVER fabricate a city or invent details for a too-thin venue.
+    Einstein") → EXPAND it to the full navigable street address using your OWN knowledge, then
+    let your CONFIDENCE in that resolution decide how to handle it — do NOT turn it into a
+    separate "is this the right place?" question of its own:
+    - ONE OBVIOUS MATCH — the venue plus the conversation's context point to a SINGLE,
+      unambiguous place: KEEP the resolved address silently as a settled field, do NOT ask about
+      it, and proceed to booking with it — no separate "is this the right place?" question and no
+      whole-event review (see the gathering rule below).
+    - MANY PLAUSIBLE MATCHES — the venue is vague and could be several places ("a Starbucks
+      downtown", "the mall", a chain with no branch named): you MUST NOT guess and you MUST NOT
+      book it verbatim. NEVER put a vague, unresolved venue on the event as-is (do NOT set
+      location="Starbucks no centro" and execute). ALWAYS ASK which one FIRST, on its own turn —
+      reply say=<your disambiguation question>, next="listen", awaitFrom="owner", do NOT execute —
+      and wait for his answer before booking anything.
+    - CAN'T PLACE IT — you cannot confidently resolve the venue at all: keep the phrase VERBATIM
+      and proceed (fail-open); NEVER fabricate a city or invent details for a too-thin venue.
   - A full explicit address (street + number, or a CEP), or a bare room / internal label
     ("sala 4", "meu escritório") → keep it VERBATIM; do NOT reformat it and do NOT flag it — an
     address ${OWNER_NAME} gave in full needs no confirmation.
   location = null when no place is given.
+- GATHERING a create — ask only about what you are UNCERTAIN of, one thing at a time. Treat every
+  field you need as having a confidence. Ask ONLY about the fields you are genuinely UNCERTAIN of
+  (today: a missing guest email, or a MANY-PLAUSIBLE-MATCHES address) and ask them ONE AT A TIME —
+  one question per turn (say=<question>, next="listen", awaitFrom="owner"), wait for his reply,
+  then ask the next uncertain field on the FOLLOWING turn. NEVER fold several questions into one
+  message. Do NOT invent a confirmation step for what is already certain: once EVERY field you
+  need is settled and unambiguous, BOOK it directly — next="execute" — with NO "take a look and
+  confirm" review of the whole event. A high-confidence resolved address needs no sign-off; it is
+  simply booked. You pause ONLY for genuine uncertainty (a vague address, a missing email).
 - virtual = true when the order asks for a VIDEO CALL / Google Meet ("make it a video call",
   "chamada de vídeo", "por Meet", "online", "call/ligação"). Otherwise false.
 - location and virtual are MUTUALLY EXCLUSIVE — a meeting is physical OR virtual, never both.

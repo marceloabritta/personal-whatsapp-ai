@@ -377,5 +377,40 @@ console.log("\n=== 6. derived-address asymmetry pin — verbatim store + NO flag
   );
 }
 
+// ---------------------------------------------------------------------------
+// 7. CONFIDENCE / ONE-AT-A-TIME RULEBOOK PIN (card 1885034a, "Confidence level on
+//    address"). PROMPT-ONLY: the location bullet is reworded to BOOK DIRECTLY once
+//    every field is settled — the whole-event confirmation mandate is DROPPED (human
+//    decision "option B") — while the vague-venue tier is HARDENED (must ask, must
+//    never book a many-plausible-matches venue verbatim). Three confidence tiers
+//    (one obvious match / many plausible matches / can't place) plus a gathering rule
+//    that asks uncertain fields ONE AT A TIME. This is a rulebook-content pin — it
+//    proves the prompt was reworded, not that the model BEHAVES per the tiers (that
+//    is the paid live behavioural eval the plan flags). The rulebook is reached at
+//    manifest.inputs.rulebook() (conversation is the string "orchestrator").
+// ---------------------------------------------------------------------------
+console.log("\n=== 7. confidence / one-at-a-time rulebook pin — new tiers present, old mandate gone ===\n");
+{
+  const rb = CAL.manifest.inputs.rulebook();
+  // 7a — the new confidence-tier + one-at-a-time markers are present.
+  check(
+    "7a. rulebook names the tiers + one-at-a-time flow (ONE OBVIOUS MATCH / MANY PLAUSIBLE MATCHES / one at a time)",
+    /ONE OBVIOUS MATCH/.test(rb) && /MANY PLAUSIBLE MATCHES/.test(rb) && /one at a time/i.test(rb),
+    { one_obvious: /ONE OBVIOUS MATCH/.test(rb), many_plausible: /MANY PLAUSIBLE MATCHES/.test(rb), one_at_a_time: /one at a time/i.test(rb) }
+  );
+  // 7b — the old unconditional "MUST PROPOSE … CONFIRM … BEFORE you create" mandate is gone.
+  check(
+    "7b. old unconditional mandate is gone (no MUST PROPOSE … CONFIRM … BEFORE you create)",
+    !/MUST PROPOSE[\s\S]*CONFIRM[\s\S]*BEFORE you create/.test(rb),
+    { still_present: /MUST PROPOSE[\s\S]*CONFIRM[\s\S]*BEFORE you create/.test(rb) }
+  );
+  // 7c — direct-booking wording is in AND the whole-event confirmation mandate is gone (option B).
+  check(
+    "7c. direct-booking wording present, whole-event confirmation mandate gone",
+    /book it directly/i.test(rb) && !/whole-event confirmation/i.test(rb),
+    { book_directly: /book it directly/i.test(rb), whole_event_confirmation_still_present: /whole-event confirmation/i.test(rb) }
+  );
+}
+
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");
 process.exit(failures ? 1 : 0);

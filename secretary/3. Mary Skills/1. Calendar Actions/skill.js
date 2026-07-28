@@ -105,7 +105,7 @@ export const manifest = {
       location: {
         type: "string",
         nullable: true,
-        desc: "WHERE — a physical place; a NAMED VENUE is expanded to its full address from your own knowledge (proposed and confirmed in prose), while a full explicit address / bare room is kept verbatim; null if none",
+        desc: "WHERE — a physical place; a NAMED VENUE is expanded to its full address from your own knowledge (kept as a settled field and booked directly on one obvious match; asked about on its own turn before booking when several places plausibly match, never booked verbatim), while a full explicit address / bare room is kept verbatim; null if none",
       },
       virtual: {
         type: "bool",
