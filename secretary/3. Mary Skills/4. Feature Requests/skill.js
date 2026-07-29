@@ -3,7 +3,8 @@
 //  In the NEW (@mary) flow the ORCHESTRATOR runs the open-ended clarifying interview over
 //  `listen` turns and hands the finished BRIEF in ctx.info. This skill no longer holds a
 //  session or asks questions: it RENDERS the Markdown feature spec (ALWAYS English) from the
-//  brief, spools a copy, delivers it as a real `.md` document, and RETURNS what it filed.
+//  brief, spools a copy (the one that reaches the board), sends ONE plain-text reply, and
+//  RETURNS what it filed.
 //
 //  Run by the orchestrator when the router picks "feature_request".
 //
@@ -12,11 +13,9 @@
 //    export async function run(ctx) -> a JSON-serializable value (the read-back)
 //  Localized outcome strings live in prompt.js (reply(ctx.lang)); the DOCUMENT is always
 //  English. ctx.send is pre-bound to the conversation language. No capability registry, no new
-//  env, no OAuth — pure Anthropic + Evolution (sendMedia).
+//  env, no OAuth — pure Anthropic + the spool.
 // ============================================================================
 import { buildDocSystem, buildDocUser, slugify, reply } from "./prompt.js";
-import { headerFor } from "../../1. Orchestrator/lib/identity.js";
-import { frame } from "../../1. Orchestrator/lib/format.js";
 import { readText } from "../../1. Orchestrator/lib/llm.js";
 // ESM PRELUDE — REQUIRED. secretary/package.json is "type": "module", so this file is an ES
 // module and `__dirname` DOES NOT EXIST. It must be built, and node:fs/promises + node:path +
@@ -146,7 +145,7 @@ export const manifest = {
 // The model has already run the interview (ctx.info IS the brief). run() renders the English doc,
 // spools a copy, delivers it, and returns what it filed.
 export async function run(ctx) {
-  const { number, evolution } = ctx;
+  const { number } = ctx;
   const draft = ctx.info || {};
 
   let md;
@@ -162,43 +161,17 @@ export async function run(ctx) {
   }
 
   const slug = slugify(draft.title);
-  const fileName = `feature-${slug}.md`; // THE ATTACHMENT NAME — unchanged
-  // Spool the spec to secretary/specs BEFORE the send, so a failed send never loses it. Never
-  // throws; a null return means the copy was not filed.
+  // Spool the spec to secretary/specs — this is the copy that reaches the board. Never throws; a
+  // null return means the copy was not filed.
   const spooled = await spoolSpec(draft, md);
-  const base64 = Buffer.from(md, "utf8").toString("base64");
-  // sendMedia bypasses the orchestrator's send(), so frame the caption here — same bold header +
-  // italic body as every other secretary message.
-  const caption = frame(
-    headerFor(ctx.lang),
-    reply(ctx.lang).docCaption({ title: draft.title || slug })
-  );
 
-  let ok = false;
-  try {
-    ok = await evolution.sendMedia(number, {
-      mediatype: "document",
-      mimetype: "text/markdown",
-      media: base64,
-      fileName,
-      caption,
-    });
-  } catch (e) {
-    console.error("feature_request/sendMedia error:", e?.message || e);
-    ok = false;
+  const title = draft.title || slug;
+  if (!spooled) {                                    // couldn't even record it → be honest
+    await ctx.sendFailure(number, reply(ctx.lang).logFailed({ title }));
+    return { ok: false, reason: "logFailed", path: null };
   }
-
-  // D3: if both fail, the send-failure wins and the owner gets exactly one reply — he needs to
-  // know he never received the file, not that it merely wasn't filed.
-  if (!ok) {
-    await ctx.sendFailure(number, reply(ctx.lang).sendFailed());
-    return { ok: false, reason: "sendFailed", path: spooled };
-  }
-  if (!spooled) {
-    await ctx.sendFailure(number, reply(ctx.lang).specFileFailed());
-    return { ok: true, path: null, title: draft.title || slug };
-  }
-  return { ok: true, path: spooled, title: draft.title || slug };
+  await ctx.send(number, reply(ctx.lang).logged({ title }));
+  return { ok: true, path: spooled, title };
 }
 
 // ---- Document generation (ALWAYS English; returns markdown PROSE, not JSON) ---

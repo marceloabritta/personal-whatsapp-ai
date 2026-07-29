@@ -77,23 +77,19 @@ const REPLY = {
     thinkingError: () => "I hit an error while thinking. Try again?",
     renderError: () =>
       "I couldn't generate the document. Your notes are safe — say \"write it up\" to try again.",
-    sendFailed: () =>
-      "I wrote the spec but couldn't send the file. Error in the log — try again?",
-    specFileFailed: () =>
-      "I sent you the spec, but I couldn't file my own copy — so it won't reach the board. Save the file yourself.",
-    docCaption: ({ title }) =>
-      `Here's the spec for "${title}". Save it and drop it into your repo. 📄`,
+    logFailed: () =>
+      "I can't do that myself yet, and I just failed to record it as a feature request — so it wasn't logged. Can you tell me again?",
+    logged: ({ title }) =>
+      `I can't do that myself yet — but I've written it up as a feature request to build: "${title}". 🛠️`,
   },
   pt: {
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
     renderError: () =>
       'Não consegui gerar o documento. Suas anotações estão salvas — diga "pode escrever" para tentar de novo.',
-    sendFailed: () =>
-      "Escrevi a spec mas não consegui enviar o arquivo. O erro está no log — tentar de novo?",
-    specFileFailed: () =>
-      "Te mandei a spec, mas não consegui salvar minha cópia — então ela não vai chegar no board. Guarde o arquivo.",
-    docCaption: ({ title }) =>
-      `Aqui está a spec de "${title}". Salve e coloque no seu repositório. 📄`,
+    logFailed: () =>
+      "Ainda não consigo fazer isso sozinha, e não consegui registrar como pedido de novo recurso — então nada foi salvo. Pode me dizer de novo?",
+    logged: ({ title }) =>
+      `Ainda não consigo fazer isso sozinha — mas registrei como um pedido de novo recurso pra construir: "${title}". 🛠️`,
   },
 };
 
