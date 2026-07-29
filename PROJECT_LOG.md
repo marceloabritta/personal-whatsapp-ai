@@ -497,6 +497,17 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-29 — Fix: outgoing messages no longer ship a doubled header (card d37ae619).**
+  The send-boundary framer `lib/format.js:frame()` stamped its language-aware header
+  unconditionally, so any body that *already* opened with a header (the router occasionally
+  authors one inside its `say` prose) shipped two stacked headers. `frame()` now strips a
+  leading header from the body first, via a new pure `stripLeadingHeader()` in
+  `lib/identity.js` that matches the known header set (both languages + legacy). Whole-class
+  cure at the choke point — every `frame()` caller benefits; header-free bodies are byte-for-byte
+  unchanged. Rails: additive `stripLeadingHeader` export + a strip step in `frame()`; no
+  manifest/router change, so no router-selftest. Regression: `scripts/doubled-header-selftest.mjs`
+  (offline). Router-side origin (why `say` sometimes carries a header) is a separate follow-up.
+
 - **2026-07-29 — Feature: Calendar Actions looks up & saves guest emails via Google Contacts
   (card 3c946c4e).** `calendar_action` gained a Google People (Contacts) integration on the
   **create** path, all inside `3. Mary Skills/1. Calendar Actions/skill.js` (People client built

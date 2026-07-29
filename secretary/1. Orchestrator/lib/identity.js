@@ -110,6 +110,23 @@ export function isOwnMessage(text) {
   return ALL_HEADERS.some((h) => t.startsWith(h));
 }
 
+// If `text` OPENS with one of the assistant's own headers (bolded *…* or not),
+// remove that header line and the single blank line that follows it, returning the
+// bare body. Returns `text` UNCHANGED when there is no leading header — the normal case,
+// so a header-free body is never altered. Recognizes every header variant via ALL_HEADERS
+// (both live languages + the retired ones), so this can never stamp-then-double.
+// Pure: no env, no I/O.
+export function stripLeadingHeader(text) {
+  if (!text) return text;
+  const nl = text.indexOf("\n");
+  const firstLine = nl === -1 ? text : text.slice(0, nl);
+  // strip surrounding WhatsApp markers/space, then require the WHOLE first line to BE a header
+  const bare = firstLine.replace(/^[*_~\s]+/, "").replace(/[*_~\s]+$/, "");
+  if (!ALL_HEADERS.some((h) => bare === h)) return text;
+  let rest = nl === -1 ? "" : text.slice(nl + 1);
+  return rest.replace(/^\r?\n/, ""); // consume the blank line after the header, if present
+}
+
 // A tag ends where the word ends: end-of-message, a space, a newline, a comma, a colon.
 // Another LETTER OR DIGIT means the message opened with a different word that merely BEGINS
 // with a tag — not the tag itself.

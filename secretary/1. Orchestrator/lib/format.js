@@ -18,6 +18,8 @@
 //   - already contains _ * or ~ : emails (bruno_x@...), verbatim task titles,
 //     transcripts. An unbalanced marker inside the span breaks the italics.
 // Plain-but-correct beats italic-but-broken.
+import { stripLeadingHeader } from "./identity.js";
+
 const URL_RE = /https?:\/\//i;
 const MARKER_RE = /[_*~]/;
 
@@ -44,5 +46,6 @@ export function italicizeBody(body) {
 // is not the secretary's own voice. No caller needs it today (the audio transcript
 // used to, and is now italic like everything else).
 export function frame(header, body, { italic = true } = {}) {
-  return `*${header}*\n\n${italic ? italicizeBody(body) : body}`;
+  const bare = stripLeadingHeader(body); // refuse to stamp a second header
+  return `*${header}*\n\n${italic ? italicizeBody(bare) : bare}`;
 }

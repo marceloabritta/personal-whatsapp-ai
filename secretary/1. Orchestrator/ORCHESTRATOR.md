@@ -381,6 +381,10 @@ is never translated (it comes from `headerFor(lang)`, which falls back to the En
 unmaintained languages). English never calls the model. Skills receive a `ctx.send` already
 bound to the conversation's `ctx.lang`, so their call sites don't pass a language.
 
+`frame()` first strips any header the body already opens with (`stripLeadingHeader`,
+`lib/identity.js`), so the header is stamped exactly once even if a caller's body arrives
+pre-headered.
+
 The orchestrator's own strings ("I didn't understand…", router/continuation/skill errors)
 live in an `en`/`pt` map (`ORCH_MSG` + `orch(lang, key, …)`); a non-en/pt language is
 produced from the English copy by the same fallback. See the "Localization convention" in
