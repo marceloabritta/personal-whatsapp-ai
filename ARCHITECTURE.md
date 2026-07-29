@@ -213,6 +213,24 @@ to-do assigned to **someone else** has no private-list equivalent (Tasks emails 
 so a to-do for someone else is **not** a task op — the model **chains** a `calendar_action` create
 (step 5) instead: a 5-min invite that notifies them by email.
 
+### 5c. skill → Google People / Contacts (look up & save a guest email) — calendar_action
+
+Same OAuth client as Calendar/Tasks (the refresh token must **also** carry the
+`https://www.googleapis.com/auth/contacts` scope — read **and** write, not `contacts.readonly`; and
+the People API must be enabled). On the calendar **create** path (1:1 chats only), `calendar_action`
+resolves a guest's missing email from the owner's address book by phone number, and saves a
+freshly-supplied one back:
+```
+GET   https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,metadata   (paged; match a phone → collect emails)
+PATCH https://people.googleapis.com/v1/{resourceName}:updateContact?updatePersonFields=emailAddresses   (additively append a second email + etag)
+POST  https://people.googleapis.com/v1/people:createContact   (new contact when the number is unknown)
+```
+One match → the email is filled onto the invite silently; several → the model asks the owner which;
+none / any error → today's book-without-invite fallback (both seams **never throw**, so a Contacts
+outage never blocks a booking). The save-back is **additive** — a second email, never an overwrite.
+Nothing here 401s the booking: without the scope every People call fails and the lookup degrades to
+no-match. Detail: `3. Mary Skills/1. Calendar Actions/SKILL.md` §CONTACTS + §Setup.
+
 ### 6. skill → Evolution (fetch audio) — transcribe_audio
 
 When you reply to a voice message, the secretary reads `contextInfo.stanzaId` (the quoted
@@ -420,6 +438,15 @@ you mean?"), and empty-but-true answers ("your list is empty"). Asking for more 
 not failing. The test is not whether the message *sounds* apologetic — it's whether the owner
 asked for something and didn't get it. A lint in `scripts/selflearning-selftest.mjs` fails the
 test run if a reply named `*Error`/`*Failed`/`noAction` is sent with plain `send()`.
+
+**A private note to the owner with `ctx.dmOwner(text)`.** Additive `ctx` field (constructed in
+`server.js`) that sends a framed, localized message to the owner's **own** number
+(`OWNER_JID`/`OWNER_NUMBER`) rather than to the current chat — a **no-op when that env var is
+unset**. It exists because the orchestrator only ever knows the *current* chat's number, which in
+an `awaitFrom:"contact"` booking is the guest's; a side note to the owner needs its own send path.
+Today only `calendar_action` uses it (the Contacts "email saved" note). It is an **outcome** note,
+so it rides `ctx.dmOwner`/`ctx.send`, never `ctx.sendFailure`. Guard the call with a `typeof`
+check so a skill stays safe in a deployment where the field is absent.
 
 ### The shared lib (`1. Orchestrator/lib/`) — don't re-implement these
 

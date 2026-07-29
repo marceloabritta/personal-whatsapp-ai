@@ -497,6 +497,27 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-29 — Feature: Calendar Actions looks up & saves guest emails via Google Contacts
+  (card 3c946c4e).** `calendar_action` gained a Google People (Contacts) integration on the
+  **create** path, all inside `3. Mary Skills/1. Calendar Actions/skill.js` (People client built
+  like the calendar client; four pure exported helpers `normalizePhone` / `phoneMatches` /
+  `mergeEmails` / `counterpartParticipant` + two injected-client seams `resolveCounterpartEmail`
+  / `saveEmailBack`, both of which **never throw**). **READ:** before booking, in a 1:1 chat, it
+  resolves the chat counterpart's **null** email from Contacts by their phone number — one match
+  → fill silently; several → send nothing and hand back a "which email?" read-back the model asks
+  the owner about; none / any API error → today's book-without-invite / ask-owner fallback,
+  unchanged. Counterpart selection is **identity-gated** (a single participant is filled only when
+  its name matches the chat contact — never a non-counterpart, silence beats misattribution).
+  **WRITE:** after a successful create, a **freshly-supplied** counterpart email (not one looked
+  up this turn) is additively saved back to Contacts — a second email, never overwriting; the
+  contact is created if absent. **Option A shipped:** an additive `ctx.dmOwner(text)` rail
+  (`server.js`, guarded no-op when `OWNER_JID`/`OWNER_NUMBER` is unset) sends the owner a private
+  `savedContactNote` (en/pt) when an email is saved. **BLOCKING setup:** the shared
+  `GOOGLE_REFRESH_TOKEN` must be re-consented with the People **`contacts`** scope (read + write,
+  NOT `contacts.readonly`) and the People API enabled — until then every lookup 401s and degrades
+  to no-match (safe but inert). Scope: **create only** (edit add-attendee lookup is a follow-up).
+  Regression: `scripts/mary-contacts-selftest.mjs` (offline, 22 assertions). Rails: additive
+  `ctx.dmOwner` + `OWNER_JID`/`OWNER_NUMBER` only; no manifest/router change, so no router-selftest.
 - **2026-07-28 — Fix: Mary now reads a file *referenced* after the `@mary` tag (card beba8beb).**
   Turn assembly sourced media only from the current message's attachment + its quoted reply
   (`inboundMedia`), and `fetchHistory` discarded each row's media id — so a PDF/image sent on an

@@ -80,6 +80,10 @@ const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // Anthropic per-image cap (~5 MB)
 const PDF_MAX_BYTES = 32 * 1024 * 1024; // Anthropic per-request PDF cap (32 MB)
 const MAX_FILES_PER_TURN = 10; // per-turn file cap (a real turn holds 2–3; 10 is hostile-payload headroom)
 const OWNER_NAME = process.env.OWNER_NAME || "User";
+// The owner's OWN WhatsApp number/JID, for the additive owner-DM note (ctx.dmOwner below).
+// Optional — when unset, ctx.dmOwner is a no-op. Whether Evolution delivers a message the
+// account sends to its own number is an ops question, not a code assumption.
+const OWNER_NUMBER = process.env.OWNER_JID || process.env.OWNER_NUMBER || null;
 // Languages the secretary writes natively (skills carry en/pt maps). Any other
 // detected language is handled by the LLM-translation fallback in send().
 // MAINTAINED_LANGS now lives in ./lib/lang.js (imported above) so the pin policy
@@ -442,6 +446,17 @@ app.post("/webhook", async (req, res) => {
     ctx.send = (number, text, opts) => {
       ctx._turn.said = String(text);
       return send(number, text, ctx.lang, opts);
+    };
+
+    // ctx.dmOwner — an ADDITIVE private note to the OWNER'S OWN number (OWNER_JID/OWNER_NUMBER),
+    // framed and localized exactly like ctx.send (via the same choke-point send()). A NO-OP when
+    // OWNER_NUMBER is unset, so a skill that calls it stays safe in a deployment that never set
+    // the var. Additive: it changes no existing signature or caller — today only
+    // calendar_action's Contacts save-back uses it. It is NOT recorded onto ctx._turn.said (it is
+    // a side note to the owner, not this chat's outbound reply).
+    ctx.dmOwner = (text) => {
+      if (!OWNER_NUMBER) return Promise.resolve(null);
+      return send(OWNER_NUMBER, text, ctx.lang);
     };
 
     // SELF-LEARNING (soft failures) — the BIG category, and the one a skill must DECLARE.

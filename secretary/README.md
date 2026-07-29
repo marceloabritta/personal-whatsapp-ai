@@ -84,10 +84,14 @@ reaches into it.
 The `ctx` object handed to skills carries everything they need (no imports back to
 the orchestrator): `owner, anthropic, model, order, transcript, nowStr, contact,
 number, remoteJid, quoted, hasQuotedAudio, catalog, tag, fromMe, sessions, session,
-env, evolution, send, lang`. `ctx.quoted` is
+env, evolution, send, dmOwner, lang`. `ctx.quoted` is
 `{ id, hasAudio, mediaType, text, calendarLink }`. `ctx.sessions` is the Redis-backed
 session store and `ctx.session` is the current chat's state, so a skill can drive a
-multi-step, stateful flow (confirmations, clarifications).
+multi-step, stateful flow (confirmations, clarifications). `ctx.dmOwner(text)` is an
+**additive** helper that sends a framed, localized note to the owner's **own** number
+(`OWNER_JID`/`OWNER_NUMBER`) instead of the current chat — a **no-op when that var is
+unset**; today only `calendar_action` uses it (a Contacts "email saved" note). Guard
+calls with `typeof ctx.dmOwner === "function"`.
 
 ## Localization
 

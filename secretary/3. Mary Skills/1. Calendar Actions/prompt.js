@@ -67,6 +67,13 @@ For action="create", fill these (for action="delete", ALSO fill participants and
     he doesn't have it, it can't be got, or an invite is clearly unnecessary — BOOK it now:
     next="execute" with that guest's email=null. The event is created and ${OWNER_NAME} is told
     plainly the guest was not invited. Booking-without-invite is a correct, complete outcome.
+- CONTACTS-LOOKUP READ-BACK: before booking, the skill may look a missing guest email up in
+  ${OWNER_NAME}'s Google Contacts by that guest's phone number. If it hands back a read-back
+  reporting SEVERAL possible emails for the guest (a "which email?" case), do NOT execute — ASK
+  ${OWNER_NAME} which one to use: reply say=<your question, listing the options>, next="listen",
+  awaitFrom="owner", and book once he picks. If instead the email was filled (one match) or none
+  was found, just proceed as usual — a found email is already on the invite, and none falls back
+  to the ask-owner / book-without-invite handling above.
 - You will receive the name of the contact ${OWNER_NAME} is currently talking to; use it when it makes sense.
 - start_iso in ISO 8601 with the -03:00 offset; convert relative dates using the current date/time provided.
 - duration_min = minutes if stated; otherwise null.
@@ -385,6 +392,10 @@ const REPLY = {
       return `Your next event:\n${renderDays("en", [event])}`;
     },
     listError: () => "I hit an error reading the calendar. Try again?",
+    // A private note to the owner after a guest's email was saved to Contacts (Option A). Sent
+    // via ctx.dmOwner — an outcome note, not a failure.
+    savedContactNote: ({ name, email }) =>
+      `Saved ${email} to ${name || "the contact"} in your Google Contacts.`,
   },
   pt: {
     thinkingError: () => "Tive um erro ao processar. Pode tentar de novo?",
@@ -441,6 +452,10 @@ const REPLY = {
       return `Seu próximo evento:\n${renderDays("pt", [event])}`;
     },
     listError: () => "Tive um erro ao ler o calendário. Pode tentar de novo?",
+    // Nota privada ao dono depois que o e-mail de um convidado foi salvo nos Contatos (Opção A).
+    // Enviada via ctx.dmOwner — uma nota de resultado, não uma falha.
+    savedContactNote: ({ name, email }) =>
+      `Salvei ${email} em ${name || "o contato"} nos seus Contatos do Google.`,
   },
 };
 

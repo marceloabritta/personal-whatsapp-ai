@@ -554,6 +554,62 @@ says nothing about the place carries it through unchanged. `normalizeLocation` r
 here:** *removing* a place on edit (no clear-signal in the single-pass overlay), and Nit A's silent
 location-only notify — @mary always writes `sendUpdates:"all"`.
 
+#### CONTACTS — look up & save guest emails (Google People, CREATE only)
+Before a **create** writes the event, and after it succeeds, `handleCreate` consults the owner's
+**Google Contacts** (People API) to fill in — and to remember — a guest's email. Both directions
+run **only in a 1:1 person chat** (`ctx.remoteJid` ends `@s.whatsapp.net`); a group booking skips
+them entirely. Everything lives in `skill.js` (no rails change for the baseline); the People client
+is built like the calendar client (`google.people({ version:"v1", auth: googleAuth(env) })`).
+
+- **READ (before the write).** `counterpartParticipant(draft.participants, ctx)` picks the ONE
+  participant who **is** the chat counterpart — **identity-gated**: the participant whose name
+  matches `ctx.contact` (a single participant is filled ONLY when it is that counterpart, never a
+  third party named in the order; when none matches, it returns `null` and nothing is filled —
+  *silence beats misattribution*). If that counterpart has a **null** email,
+  `resolveCounterpartEmail(peopleClient, normalizePhone(ctx.number))` looks the number up in
+  Contacts and collects the DISTINCT emails across every matched contact:
+  - **one** → fill it silently onto the draft participant (the invite goes out with it), marked
+    `_lookedUp` so it is **not** saved straight back;
+  - **several** → **write NOTHING**, return `{ needEmail:true, candidate, emails:[…] }` — the
+    read-back the model reads to ask the owner *which* email (the rulebook's "which email?" note:
+    `say`, `next:"listen"`, `awaitFrom:"owner"`);
+  - **none / any API error** → do nothing; the existing book-without-invite / ask-owner fallback
+    (`draftUninvited`) handles it. `resolveCounterpartEmail` **never throws** (every API error
+    degrades to `"none"`), so a Contacts outage never blocks the booking.
+- **WRITE (after the write).** When the counterpart's email was **freshly supplied** (non-null and
+  **not** looked up this turn — `!_lookedUp`), `saveEmailBack(peopleClient, {jidNumber, name,
+  email})` saves it back **additively**: `mergeEmails` appends it (case-insensitive) as a **second**
+  email — **never overwriting or reordering** an existing address — via `updateContact` with the
+  fetched `etag`; if **no** contact carries that number it `createContact`s one (name + phone +
+  email). A duplicate → no-op. `saveEmailBack` **never throws**; the whole block is also
+  fire-and-forget (wrapped) so it can never affect the calendar reply.
+
+**Phone matching** (`normalizePhone` / `phoneMatches`, offline-pinned) is BR-aware: it reconciles
+formatting, the `55` country code, and the mobile **9th-digit** variance (`9XXXXXXXX` ≡ `XXXXXXXX`
+after the area code). A different area/subscriber is a **NO match** — a near-miss never becomes a
+wrong match; a miss is a **safe** no-fill, never a wrong invite.
+
+**Option A — owner note.** When a save succeeds and `ctx.dmOwner` exists, the skill sends the owner
+a private `savedContactNote` (en/pt) via `ctx.dmOwner` — an **outcome** note (not a `*Failed`, so
+plain `dmOwner`, never `sendFailure`). `ctx.dmOwner` is an additive rails field
+(`server.js`, guarded no-op when `OWNER_JID`/`OWNER_NUMBER` is unset); the `typeof` guard keeps the
+skill safe where it is absent.
+
+> **Scope:** **create only.** The **edit** add-attendee lookup is a deliberate follow-up — the
+> edit path overlays participants as bare email strings (`editDraftFromEvent → draft.emails`),
+> dropping the names counterpart-matching needs. Standalone email-dictation ("save Ana's email as …")
+> is also out of scope (it needs its own routing target).
+
+### Setup — OAuth scope (blocking)
+Google People (Contacts) needs `https://www.googleapis.com/auth/contacts` — **read *and* write**,
+**NOT** `contacts.readonly` (the save-back writes). The refresh token was minted for Calendar +
+Tasks, so **re-consent with ALL scopes at once** (calendar + tasks + contacts) and update
+`GOOGLE_REFRESH_TOKEN`; also **enable the People API** in the Google Cloud project. Until this is
+done every People call returns **401** and the lookup degrades to no-match — safe (the booking
+still works, uninvited), but the feature is inert. Keep the consent screen **"In production"** (a
+Testing token expires in ~7 days). Same class as the Tasks scope (`3. Mary Skills/3. Tasks/SKILL.md`
+§Setup; done-in-prod precedent 2026-07-11).
+
 ### Task: DELETE — `handleDelete` + `resumeDelete`
 **Unchanged.** The target is found by **matching the event's captured identity against the
 calendar**, not by trusting a decoded link alone. `interpret` fills `participants` (with
@@ -696,7 +752,11 @@ localized "(Showing the first 50.)" note rather than truncating silently; the em
   `events.insert` (create), `events.update` (edit — a full-resource REPLACE, `sendUpdates:"all"`;
   see §Task: EDIT for why it is not `patch`), `events.delete`
   (cancel). `sendUpdates:"all"` sends invite / change / cancellation emails.
-- **WhatsApp:** all user-facing text via `ctx.send`.
+- **Google People / Contacts (same OAuth client + refresh token, `contacts` scope):**
+  `people.connections.list` (page the address book to match a phone number), `people.updateContact`
+  (additively append a second email + `etag`), `people.createContact` (a new contact when the
+  number is unknown) — CREATE path only, both seams never-throw. See §CONTACTS + §Setup.
+- **WhatsApp:** all user-facing text via `ctx.send`; the Option-A owner note via `ctx.dmOwner`.
 
 ### Stateful behavior, timeouts, completion
 - **LIST is stateless** — no session, no confirm, no write; it replies in one shot and is done.

@@ -388,6 +388,197 @@ function calId(env) {
   return env.GOOGLE_CALENDAR_ID || "primary";
 }
 
+// ---- CONTACTS (Google People) ----------------------------------------------
+// Resolve a null guest email from the owner's Google Contacts by the chat counterpart's phone
+// number before a create, and additively save a freshly-supplied guest email back after one.
+// Built exactly like calendarClient — the same OAuth2 client from lib/google.js. googleapis@173
+// ships google.people({version:"v1"}) with connections.list / updateContact / createContact.
+function peopleClient(env) {
+  return google.people({ version: "v1", auth: googleAuth(env) });
+}
+
+// Digits only. "+55 (31) 9 3334-4455" -> "5531933344455". null/""/non-numeric -> "".
+export function normalizePhone(raw) {
+  return String(raw == null ? "" : raw).replace(/\D+/g, "");
+}
+
+// Lowercased, outer-trimmed name for identity comparison (module-private).
+function normalizeName(s) {
+  return String(s == null ? "" : s).trim().toLowerCase();
+}
+
+// A BR phone canonical form that reconciles the country code and the mobile 9th digit, so two
+// spellings of the same line compare equal. Strips a leading "55" country code (only at the
+// national+CC lengths 12/13 — never off a bare local number), then drops the mobile 9th digit
+// (national "9XXXXXXXX" (9) collapses to "XXXXXXXX" (8) after the 2-digit area code). A different
+// area code or subscriber survives distinct, so a near-miss is a NO match, never a wrong match.
+function brCanonical(digits) {
+  let d = String(digits || "");
+  if ((d.length === 12 || d.length === 13) && d.startsWith("55")) d = d.slice(2);
+  if (d.length === 11) {
+    const area = d.slice(0, 2);
+    let local = d.slice(2); // 9 digits
+    if (local.length === 9 && local[0] === "9") local = local.slice(1); // drop the mobile 9
+    d = area + local;
+  }
+  return d;
+}
+
+// Do two phone numbers identify the same BR line? Reconciles formatting, the "55" country code,
+// and the mobile 9th-digit variance. An empty side never matches (never a false positive).
+export function phoneMatches(a, b) {
+  const na = normalizePhone(a);
+  const nb = normalizePhone(b);
+  if (!na || !nb) return false;
+  return brCanonical(na) === brCanonical(nb);
+}
+
+// Append newEmail to existing ONLY if not already present (case-insensitive). NEVER overwrites,
+// removes, or reorders an existing address. -> { emails: string[], changed: boolean }.
+export function mergeEmails(existingEmails, newEmail) {
+  const emails = Array.isArray(existingEmails) ? existingEmails.slice() : [];
+  const add = String(newEmail == null ? "" : newEmail).trim();
+  if (!add) return { emails, changed: false };
+  const present = emails.some((e) => String(e).toLowerCase() === add.toLowerCase());
+  if (present) return { emails, changed: false };
+  return { emails: [...emails, add], changed: true };
+}
+
+// First whitespace-delimited token of an already-normalized name ("" -> ""). The "first name".
+function firstNameToken(normalized) {
+  return String(normalized || "").split(/\s+/)[0] || "";
+}
+
+// Does an extracted participant name identify the chat counterpart? The owner refers to people
+// by FIRST name ("marca jantar com a Ingra") while the identity is the counterpart's self-set
+// WhatsApp display name (ctx.contact / pushName), which is frequently a FULL name ("Ingra Silva").
+// So it is a match when the normalized names are equal OR share the same FIRST name (first token) —
+// first-name matching, and no fuzzier (no edit-distance). A name that shares NO token with the
+// identity ("Bob"/"Igor" vs "Ingra Silva") never matches, so a non-counterpart is never filled
+// with the counterpart's email (silence beats misattribution).
+function nameMatchesIdentity(name, identity) {
+  const n = normalizeName(name);
+  const id = normalizeName(identity);
+  if (!n || !id) return false;
+  if (n === id) return true;
+  return firstNameToken(n) === firstNameToken(id);
+}
+
+// The ONE participant who IS the chat counterpart: the participant whose name matches
+// ctx.contact / pushName by the first-name rule above. IDENTITY-GATED — a single participant is
+// used ONLY when it is that counterpart; a single third party who is NOT in the chat, or a set
+// where none matches, returns null so NEITHER the lookup nor the save-back ever fills a
+// non-counterpart with the counterpart's email (silence beats misattribution).
+export function counterpartParticipant(participants, ctx) {
+  const list = Array.isArray(participants) ? participants : [];
+  const identity = normalizeName(ctx?.contact) || normalizeName(ctx?.pushName);
+  if (!identity) return null;
+  const match = list.find((p) => nameMatchesIdentity(p?.name, identity));
+  return match || null;
+}
+
+// Page through every connection in the owner's address book. personFields pins exactly the
+// facets the lookup/save-back read. Paginated on nextPageToken (People caps a page).
+async function listAllConnections(peopleClient) {
+  const all = [];
+  let pageToken = null;
+  do {
+    const r = await peopleClient.people.connections.list({
+      resourceName: "people/me",
+      personFields: "names,emailAddresses,phoneNumbers,metadata",
+      pageSize: 1000,
+      ...(pageToken ? { pageToken } : {}),
+    });
+    const conns = (r && r.data && r.data.connections) || [];
+    all.push(...conns);
+    pageToken = (r && r.data && r.data.nextPageToken) || null;
+  } while (pageToken);
+  return all;
+}
+
+// Look the counterpart's number up in People and collect the DISTINCT emails across every matched
+// contact. NEVER throws — 0 emails / no match / any API error all degrade to "none" so the
+// booking is never blocked.
+//   0 emails / no match / error -> { status:"none",    emails:[] }
+//   exactly 1 distinct email    -> { status:"one",     emails:[e] }
+//   >1 distinct email           -> { status:"several", emails:[...] }
+export async function resolveCounterpartEmail(peopleClient, jidNumber) {
+  const none = { status: "none", emails: [] };
+  try {
+    const connections = await listAllConnections(peopleClient);
+    const emails = [];
+    const seen = new Set();
+    for (const c of connections) {
+      const phones = (c?.phoneNumbers || []).map((p) => p?.value).filter(Boolean);
+      if (!phones.some((ph) => phoneMatches(jidNumber, ph))) continue;
+      for (const e of c?.emailAddresses || []) {
+        const v = e?.value;
+        if (!v) continue;
+        const key = String(v).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        emails.push(v);
+      }
+    }
+    if (emails.length === 0) return none;
+    if (emails.length === 1) return { status: "one", emails };
+    return { status: "several", emails };
+  } catch {
+    return none; // degrade, never block the calendar action
+  }
+}
+
+// Additively save `email` to the contact matched by `jidNumber`. NEVER throws.
+//   match found, email is NEW  -> updateContact(merged list, fetched etag) -> { saved:true,  created:false }
+//   match found, email present -> no-op                                    -> { saved:false, created:false, reason:"duplicate" }
+//   no match                   -> createContact(name + phone + email)      -> { saved:true,  created:true }
+//   any API error              -> { saved:false, created:false, reason:"error" }
+export async function saveEmailBack(peopleClient, { jidNumber, name, email }) {
+  try {
+    const add = String(email == null ? "" : email).trim();
+    if (!add) return { saved: false, created: false, reason: "error" };
+    const connections = await listAllConnections(peopleClient);
+    const match = connections.find((c) =>
+      (c?.phoneNumbers || [])
+        .map((p) => p?.value)
+        .filter(Boolean)
+        .some((ph) => phoneMatches(jidNumber, ph))
+    );
+    if (match) {
+      const existing = (match.emailAddresses || []).map((e) => e?.value).filter(Boolean);
+      const { emails, changed } = mergeEmails(existing, add);
+      if (!changed) return { saved: false, created: false, reason: "duplicate" };
+      await peopleClient.people.updateContact({
+        resourceName: match.resourceName,
+        updatePersonFields: "emailAddresses",
+        requestBody: {
+          resourceName: match.resourceName,
+          etag: match.etag,
+          emailAddresses: emails.map((value) => ({ value })),
+        },
+      });
+      return { saved: true, created: false };
+    }
+    // No contact carries this number — create one (name + phone + the email).
+    await peopleClient.people.createContact({
+      requestBody: {
+        names: name ? [{ givenName: name }] : [],
+        phoneNumbers: jidNumber ? [{ value: `+${jidNumber}` }] : [],
+        emailAddresses: [{ value: add }],
+      },
+    });
+    return { saved: true, created: true };
+  } catch {
+    return { saved: false, created: false, reason: "error" }; // never throws out
+  }
+}
+
+// A 1:1 person chat (not a group / broadcast): the JID ends with @s.whatsapp.net. Both People
+// ops no-op on anything else, so a group booking never fills or saves a counterpart email.
+function isDirectChat(ctx) {
+  return typeof ctx?.remoteJid === "string" && ctx.remoteJid.endsWith("@s.whatsapp.net");
+}
+
 // The ONE events.insert in the repo. An ALL-DAY event is a different WIRE SHAPE.
 async function createEvent(
   env,
@@ -699,8 +890,53 @@ async function handleCreate(ctx, info) {
     await ctx.sendFailure(number, reply(ctx.lang).noAction({ summary: info?.summary }));
     return { ok: false, reason: "noDate" };
   }
+  // READ (Contacts lookup) — before the write, in a 1:1 person chat only: resolve the chat
+  // counterpart's null email from Google People by their phone number. One -> fill it silently
+  // (and mark it looked-up so we don't save it straight back); several -> send NOTHING and hand
+  // the orchestrator a read-back so the model asks the owner which; none / any API error ->
+  // fall through to the existing book-without-invite / ask-owner fallback. Never blocks the
+  // booking — resolveCounterpartEmail swallows every API error to "none".
+  if (isDirectChat(ctx)) {
+    const cp = counterpartParticipant(draft.participants, ctx);
+    if (cp && !cp.email) {
+      const r = await resolveCounterpartEmail(peopleClient(ctx.env), normalizePhone(ctx.number));
+      if (r.status === "one") {
+        cp.email = r.emails[0];
+        cp._lookedUp = true;
+      } else if (r.status === "several") {
+        return { needEmail: true, candidate: cp.name, emails: r.emails };
+      }
+      // "none" -> do nothing; draftUninvited / the rulebook's ask-owner path handle it.
+    }
+  }
   try {
     const res = await createFromDraft(ctx, draft); // sends createDone
+    // WRITE (Contacts save-back) — after a successful create, in a 1:1 person chat only, save a
+    // FRESHLY-SUPPLIED counterpart email back to Contacts (not one we just looked up: !_lookedUp).
+    // Additive (never overwrites; creates the contact if absent) and fire-and-forget: wrapped so
+    // it can never affect the calendar reply, and saveEmailBack itself already never throws.
+    try {
+      if (isDirectChat(ctx)) {
+        const cp = counterpartParticipant(draft.participants, ctx);
+        if (cp && cp.email && !cp._lookedUp) {
+          const saved = await saveEmailBack(peopleClient(ctx.env), {
+            jidNumber: normalizePhone(ctx.number),
+            name: cp.name || ctx.contact || null,
+            email: cp.email,
+          });
+          // Option A — a private "email saved" note to the owner. The typeof guard keeps the
+          // skill safe where ctx.dmOwner is absent (it is an outcome note, not a *Failed, so
+          // ctx.dmOwner/ctx.send is correct — never ctx.sendFailure).
+          if (saved.saved && typeof ctx.dmOwner === "function") {
+            await ctx.dmOwner(
+              reply(ctx.lang).savedContactNote({ name: cp.name || ctx.contact || null, email: cp.email })
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Contacts save-back error:", e?.response?.data || e?.message || e);
+    }
     return { ok: true, link: res.link, eventId: res.eventId, reused: res.reused };
   } catch (e) {
     console.error("Calendar create error:", e?.response?.data || e?.message || e);

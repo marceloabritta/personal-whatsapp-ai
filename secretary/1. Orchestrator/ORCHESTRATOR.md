@@ -386,6 +386,18 @@ live in an `en`/`pt` map (`ORCH_MSG` + `orch(lang, key, …)`); a non-en/pt lang
 produced from the English copy by the same fallback. See the "Localization convention" in
 `../../ARCHITECTURE.md`.
 
+### `ctx.dmOwner(text)` — an additive private note to the owner
+An **additive** `ctx` field: it sends a framed, localized message (through the same `send()`
+choke point, on `ctx.lang`) to the owner's **own** number — `OWNER_NUMBER = process.env.OWNER_JID
+|| process.env.OWNER_NUMBER || null` — rather than to the current chat. It is a **no-op when
+`OWNER_NUMBER` is unset** (returns without sending), and it does **not** record onto
+`ctx._turn.said` (a side note, not this chat's outbound reply). It exists because the orchestrator
+only ever holds the *current* chat's number, which in an `awaitFrom:"contact"` booking is the
+**guest's**; originating a note to the owner needs a distinct send path. Additive — no existing
+`ctx` field or `send()` caller changes; today only `calendar_action` calls it (the Contacts
+"email saved" note). Skills guard the call with `typeof ctx.dmOwner === "function"` so they stay
+safe where the field is absent.
+
 ### State the orchestrator holds
 - **`sessions`** (Redis / in-memory) — per-chat pending actions; skills open/clear them,
   the orchestrator only reads them to decide start-vs-continue. TTLs are set by skills.
