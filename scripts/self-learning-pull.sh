@@ -41,9 +41,13 @@ pull_spool() {
   # 1. Capture the file list BEFORE the transfer. THIS list — not the directory contents
   #    after the pull — is what gets archived, so a file written into the spool mid-pull is
   #    never archived out from under itself (edge 18).
+  #    `cd && ls` yields bare basenames; the trailing `; true` makes the REMOTE shell exit 0
+  #    whenever SSH connects — so an EMPTY spool (or a missing dir) is a clean skip, and only
+  #    an actual connection/auth failure (ssh exits 255) trips the `||` below. The old form
+  #    (`ls *.md | xargs basename`) errored on an empty spool and mis-reported it as a failure.
   local names
-  names="$(ssh "$REMOTE" "ls -1 $remote_dir/*.md 2>/dev/null | xargs -n1 basename")" || {
-    echo "ls FAILED for $label (droplet unreachable?) — nothing pulled, nothing archived"
+  names="$(ssh "$REMOTE" "cd '$remote_dir' 2>/dev/null && ls -1 *.md 2>/dev/null; true")" || {
+    echo "ssh FAILED for $label (droplet unreachable?) — nothing pulled, nothing archived"
     return 1
   }
 

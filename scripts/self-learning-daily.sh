@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  The daily self-learning run — pull the secretary's spools, triage the reports, and
-#  turn every triaged plan (and every owner-reported failure) into a card on the kanban
-#  backlog. Driven by launchd (~/Library/LaunchAgents/com.marcelo.secretary-triage.plist).
+#  The self-learning TRIAGE run (every 30 min via launchd) — pull the secretary's spools,
+#  triage the error reports into bugfix plans, and turn every triaged plan (and every
+#  owner-reported failure) into a card on the kanban backlog. Driven by launchd
+#  (~/Library/LaunchAgents/com.marcelo.secretary-triage.plist).
+#
+#  The FAST lane (board-fetch.sh, every ~60s) also does pull+enqueue+drain, so feature
+#  requests are carded within ~1 min without waiting for this loop; those steps here are
+#  idempotent and simply guarantee a triaged plan is delivered even between fast ticks.
+#  This loop's UNIQUE job is step 2: the triage that filters noisy machine error logs.
 #
 #  1. pull reports + specs off the droplet   -> "Bugs and Malfunctions/inbox/", "New Features Plans/"
 #  2. if the inbox has reports, run `/triage-failures` headless -> "Bugs and Malfunctions/bugfix-<slug>.md"
