@@ -50,7 +50,7 @@ import { frame } from "./lib/format.js";
 import { route, answer } from "./router/router.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
 import { captureFailure } from "./lib/selflearning.js";
-import { MAINTAINED_LANGS, resolveTurnLang, shouldForceTranslateSay } from "./lib/lang.js";
+import { MAINTAINED_LANGS, resolveTurnLang, shouldForceTranslateSay, translationNeeded } from "./lib/lang.js";
 
 // SELF-LEARNING: wrap console so the secretary can read its own recent logs back when it
 // writes a failure report. Must run before anything else logs — including loadSkills()
@@ -167,14 +167,14 @@ async function loadSkills(dir = NEW_SKILLS_DIR) {
 // it's never seen here) with a cheap model, preserving structure. On any failure
 // we return the source text rather than nothing — a message in English beats no
 // message.
-async function localizeBody(text, lang, { force = false } = {}) {
+async function localizeBody(text, lang, { force = false, sourceLang } = {}) {
   const l = (lang || "en").toLowerCase();
-  if (!text || (!force && (MAINTAINED_LANGS.has(l) || l === "en"))) return text;
+  if (!text || !translationNeeded(sourceLang, l, { force })) return text;
   try {
     const msg = await anthropic.messages.create({
       model: TRANSLATE_MODEL,
       max_tokens: 1024,
-      system: `Translate the user's message into the language with ISO 639-1 code "${l}". Output ONLY the translation — no preamble, no quotes, no notes. Preserve EXACTLY, unchanged: URLs, email addresses, numbers, dates, times, and every line break and bullet/dash character. Do NOT translate proper nouns (people's names, event titles). Translate the prose only and keep the original layout and formatting.`,
+      system: `Translate the user's message into the language with ISO 639-1 code "${l}". Output ONLY the translation — no preamble, no quotes, no notes. Preserve EXACTLY, unchanged: URLs, email addresses, numbers, dates, times, and every line break and bullet/dash character. Do NOT translate proper nouns (people's names, event titles). Translate the prose only and keep the original layout and formatting. If the message is ALREADY written entirely in that language, output it EXACTLY as received, verbatim — do not translate it, do not comment on it, output nothing else.`,
       messages: [{ role: "user", content: text }],
     });
     const out = (msg?.content || [])
@@ -196,7 +196,7 @@ async function localizeBody(text, lang, { force = false } = {}) {
 // line breaks, but says nothing about `_`/`*`). `opts.italic:false` sends a plain body.
 // Skills receive a `ctx.send` already bound to the conversation's language.
 async function send(number, text, lang = "en", opts = {}) {
-  const body = await localizeBody(text, lang);
+  const body = await localizeBody(text, lang, { sourceLang: opts.sourceLang });
   return evolution.sendText(number, frame(headerFor(lang), body, opts));
 }
 
@@ -526,9 +526,9 @@ app.post("/webhook", async (req, res) => {
     // through. On the common case (say already in ctx.lang) this is a no-op, no LLM call.
     const sendSay = async (say, sayLang) => {
       const body = shouldForceTranslateSay(sayLang, ctx.lang)
-        ? await localizeBody(say, ctx.lang, { force: true })
+        ? await localizeBody(say, ctx.lang, { force: true, sourceLang: sayLang })
         : say;
-      return send(number, body, ctx.lang);
+      return send(number, body, ctx.lang, { sourceLang: sayLang });
     };
 
     // ========================================================================

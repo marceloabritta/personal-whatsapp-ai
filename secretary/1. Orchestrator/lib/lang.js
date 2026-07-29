@@ -29,3 +29,15 @@ export function shouldForceTranslateSay(sayLang, targetLang) {
   const s = norm(sayLang), t = norm(targetLang);
   return !!s && !!t && s !== t && MAINTAINED_LANGS.has(s) && MAINTAINED_LANGS.has(t);
 }
+
+// Whether localizeBody must actually invoke the translate model. Returns FALSE (→ caller
+// returns the text unchanged, no LLM call) when the body is already in the target — the
+// no-op guard that stops the cheap model being asked to "translate X into X" (card bea6dea5)
+// — OR when the existing maintained-language early-return applies. `sourceLang` is the
+// body's known source language when the caller has one (undefined otherwise).
+export function translationNeeded(sourceLang, targetLang, { force = false } = {}) {
+  const s = norm(sourceLang), t = norm(targetLang) || "en";
+  if (s && s === t) return false;                                  // NEW: never translate X→X
+  if (!force && (MAINTAINED_LANGS.has(t) || t === "en")) return false; // preserve existing early-return
+  return true;
+}

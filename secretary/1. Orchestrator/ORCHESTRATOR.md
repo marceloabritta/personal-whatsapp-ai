@@ -392,7 +392,10 @@ pass through untouched; for any **other** detected language (`ctx.lang`) it LLM-
 the **body only** (a cheap model, `TRANSLATE_MODEL`) — the header is added afterwards and
 is never translated (it comes from `headerFor(lang)`, which falls back to the English header for
 unmaintained languages). English never calls the model. Skills receive a `ctx.send` already
-bound to the conversation's `ctx.lang`, so their call sites don't pass a language.
+bound to the conversation's `ctx.lang`, so their call sites don't pass a language. The body is
+**not** re-translated when it is already in the target language: the `translationNeeded`
+no-op guard (`lib/lang.js`) returns the text unchanged whenever a known source language equals
+the target, so the cheap model is never asked to "translate X into X" (card bea6dea5).
 
 `frame()` first strips any header the body already opens with (`stripLeadingHeader`,
 `lib/identity.js`), so the header is stamped exactly once even if a caller's body arrives
