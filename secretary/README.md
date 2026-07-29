@@ -19,12 +19,16 @@ secretary/
 │   │   │                    #     (wraps the ONE Anthropic client: every call defaults thinking:disabled)
 │   │   ├── inputs.js        #     the declared-inputs contract: describeInputs (prompt text) +
 │   │   │                    #     checkPayload (the plain-code, no-AI gate). Knows declarations, not skills.
-│   │   └── sessions.js      #     per-chat conversation state in Redis (confirmations, clarifications)
+│   │   ├── sessions.js      #     per-chat conversation state in Redis (confirmations, clarifications)
+│   │   └── nativeTools.js   #     buildNativeTools(env): the native server-side tool bundle (web_search +
+│   │                        #     web_fetch, code_execution when NATIVE_CODE_EXEC) for the answer pass
 │   └── router/
 │       ├── prompt.js        #     the MERGED prompt: classifies AND asks for the chosen skill's declared
 │       │                    #     inputs. No output_config — the format is demanded in the prompt, which is
 │       │                    #     what keeps the orchestrator from having to know what a calendar is.
-│       └── router.js        #     ONE Claude call; returns { tasks, lang, info }
+│       │                    #     Also holds buildAnswerSystem/buildAnswerUser (the answer-pass prompts).
+│       └── router.js        #     ONE Claude classification call ({ tasks, lang, info }); plus answer(): the
+│                            #     tool-carrying prose pass for the "answer" state (pause_turn loop + ceilings)
 ├── improvements/           # runtime failure-report spool (gitignored; pulled to Bugs and Malfunctions/)
 ├── specs/                  # runtime feature-spec spool (gitignored; pulled to New Features Plans/)
 └── 3. Mary Skills/          # one folder per skill; the orchestrator scans this at boot

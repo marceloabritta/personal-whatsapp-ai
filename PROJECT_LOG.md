@@ -490,12 +490,46 @@ purpose — this list went stale once already by counting.*
   **filed as feedback, not executed as a calendar order**. Costs a few cents. Run it after any
   edit to `router/prompt.js` or to a skill manifest: every guard there is a prompt, and prompts
   regress silently.
+- `node scripts/native-tools-selftest.mjs` — offline. Pins the **deterministic layer** of the native
+  server-side-tools **answer pass**: `buildNativeTools(env)` builds the right tools array (web tool
+  version strings + names, `max_uses`, `code_execution` iff `NATIVE_CODE_EXEC`, `[]` when off); a
+  tool-carrying reply is extracted as **prose** by `readText` (never the JSON parser / degraded menu);
+  `answer()`'s `pause_turn` resume loop is bounded by `NATIVE_MAX_TOOL_HOPS`; and the outcome
+  arithmetic (`timeout`/`tool_error`/`refusal`) plus `route()` accepting `next:"answer"` (while an
+  unknown `next` still degrades to `done`) all hold. The model's *decision* to emit `answer` / to fire
+  a tool is a live judgement, not asserted here — that rides the live `router-selftest.mjs` + a real
+  end-to-end tool-firing turn (the human's real-spend calls).
 
 ---
 
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-29 — Feature: native server-side tools in stateful @mary conversations (card
+  6c09b8ab).** @mary can now answer a direct question inline — a live-web fact, a URL already in
+  the thread, real computation, or general knowledge no skill covers — by searching the web,
+  reading a page, and (optionally) running code, then replying in prose in the **same** WhatsApp
+  message. **Design: two passes, not one.** The classification call is byte-identical (still no
+  tools, still JSON); a NEW fourth `next` state, `"answer"`, triggers a **second, tool-carrying**
+  model call, `answer(ctx, turn)` (`router/router.js`), that returns prose delivered via the
+  existing `sendSay` path. Because the tool-carrying call is *supposed* to return prose, there is
+  no JSON to fail and an `answer` turn can never reach the degraded "didn't understand" menu.
+  Server-tool `pause_turn` is resumed up to `NATIVE_MAX_TOOL_HOPS`, each call bounded by
+  `NATIVE_ANSWER_TIMEOUT_MS`, the conversation capped at `NATIVE_MAX_ANSWERS` on the marker; a
+  refusal stays silent, a timeout/tool-error sends a notice and closes. **No skill was added** —
+  the §1 skill list is unchanged (still seven). New rails: `lib/nativeTools.js`
+  (`buildNativeTools(env)` → `web_search_20260209` + `web_fetch_20260209`, plus
+  `code_execution_20260521` when `NATIVE_CODE_EXEC` is on — off by default; version strings +
+  no-beta-header re-verified against the claude-api skill at build time). Rails edits, all
+  additive: `router/prompt.js` (the `"answer"` state + `buildAnswerSystem`/`buildAnswerUser`),
+  `router/router.js` (`route()` allows `"answer"`; new `answer()` export), `server.js` (the
+  `answer` turn-loop branch, three `ORCH_MSG` notices `toolTimeout`/`toolError`/`costCapHit` in
+  en+pt, `NATIVE_MAX_ANSWERS`, the `marker.answers` field). New env vars documented in
+  `secretary/.env.example`. Regression: `scripts/native-tools-selftest.mjs` (offline, 22
+  assertions — see §9). **Live checks are the human's real-spend calls, NOT auto-run:** this card
+  touches `router/prompt.js`, so `ANTHROPIC_API_KEY=… node scripts/router-selftest.mjs` is
+  required; and a real end-to-end tool-firing @mary turn (search → inline answer) — both pending.
 
 - **2026-07-29 — Fix: outgoing messages no longer ship a doubled header (card d37ae619).**
   The send-boundary framer `lib/format.js:frame()` stamped its language-aware header

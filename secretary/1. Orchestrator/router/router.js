@@ -15,12 +15,17 @@
 //      alarm. A legitimate empty close (the model deliberately ending chit-chat / a no-op) is
 //      degraded:false and closes silently.
 // ============================================================================
+import { APIConnectionTimeoutError } from "@anthropic-ai/sdk";
 import {
   buildRouterSystem,
   buildRouterUser,
   buildReadbackUser,
   buildRepairUser,
+  buildAnswerSystem,
+  buildAnswerUser,
 } from "./prompt.js";
+import { buildNativeTools } from "../lib/nativeTools.js";
+import { readText } from "../lib/llm.js";
 
 // Robustly pull a JSON object out of an LLM reply. Extracts the FIRST balanced {...},
 // tolerating ```json fences and stray prose. Returns the object or null.
@@ -171,7 +176,7 @@ export async function route(ctx, turn = {}) {
   if (!parsed)
     return { say: null, next: "done", skills: [], info: null, lang: "en", awaitFrom: null, degraded: true };
 
-  const next = ["listen", "execute", "done"].includes(parsed.next) ? parsed.next : "done";
+  const next = ["listen", "execute", "done", "answer"].includes(parsed.next) ? parsed.next : "done";
 
   let skills = Array.isArray(parsed.skills) ? parsed.skills.filter((s) => valid.has(s)) : [];
   // An execute that names no valid skill degrades to ["other"] — server.js's existing
@@ -189,4 +194,115 @@ export async function route(ctx, turn = {}) {
   const awaitFrom = typeof parsed.awaitFrom === "string" ? parsed.awaitFrom : null;
 
   return { say, next, skills, info: parsed.info ?? null, lang, awaitFrom, degraded: false };
+}
+
+// ============================================================================
+//  THE ANSWER PASS  —  a SECOND, tool-carrying prose call, distinct from route().
+//  route() classifies (JSON, no tools). When it returns next="answer", server.js calls answer()
+//  which attaches the native toolset (buildNativeTools) and asks Claude to answer the question in
+//  PROSE — no JSON contract to fail, so an answer turn can NEVER reach the "didn't understand" menu.
+//
+//  Server-side tools run an internal sampling loop: when it hits its iteration cap the reply comes
+//  back with stop_reason "pause_turn" and MUST be resumed by resending [user, assistant(content)]
+//  (the API resumes automatically off the trailing server_tool_use block — no "Continue." text).
+//  We bound that resume loop with NATIVE_MAX_TOOL_HOPS and each create() with NATIVE_ANSWER_TIMEOUT_MS.
+//
+//  ctx  : { owner, anthropic, model, env, order, transcript, nowStr, contact, lang, media }
+//  turn : { labeledTranscript?: string }
+//  -> { text: string|null, lang: string, hops: number,
+//       outcome: "ok" | "timeout" | "tool_error" | "empty" | "refusal" }
+//  NEVER throws: a thrown create is caught and classified (timeout -> "timeout", else "tool_error").
+// ============================================================================
+const NATIVE_ANSWER_TIMEOUT_MS_DEFAULT = 30000;
+const NATIVE_MAX_TOOL_HOPS_DEFAULT = 4;
+
+// Detect the production timeout. The SDK throws APIConnectionTimeoutError when a create()'s
+// { timeout } elapses; its `.name` may be left as "Error", so match by instanceof / constructor,
+// NOT a name==="APITimeoutError" string (that class does not exist here).
+function isTimeoutError(e) {
+  if (!e) return false;
+  if (e instanceof APIConnectionTimeoutError) return true;
+  const name = e.name || e.constructor?.name || "";
+  return /timeout/i.test(name) || /timed out/i.test(e.message || "");
+}
+
+// A web_search_tool_result / web_fetch_tool_result block whose `content` is an error object
+// (not an array of results) means the tool failed. A successful result carries an ARRAY.
+function hasToolError(msg) {
+  for (const b of msg?.content || []) {
+    if (b.type === "web_search_tool_result" || b.type === "web_fetch_tool_result") {
+      const c = b.content;
+      if (c == null) return true;
+      if (!Array.isArray(c) && typeof c === "object") return true; // an error object
+      if (Array.isArray(c) && c.length === 0) return true;
+    }
+  }
+  return false;
+}
+
+export async function answer(ctx, turn = {}) {
+  const { owner, anthropic, model, env = {}, order, transcript, nowStr, contact, media } = ctx;
+  const lang =
+    typeof ctx.lang === "string" && ctx.lang.trim() ? ctx.lang.trim().toLowerCase() : "en";
+  const timeoutMs = Number(env.NATIVE_ANSWER_TIMEOUT_MS) || NATIVE_ANSWER_TIMEOUT_MS_DEFAULT;
+  const maxHops = Number(env.NATIVE_MAX_TOOL_HOPS) || NATIVE_MAX_TOOL_HOPS_DEFAULT;
+  const tools = buildNativeTools(env);
+
+  const system = buildAnswerSystem(owner, lang);
+  const user = buildAnswerUser(owner, {
+    order,
+    transcript: turn.labeledTranscript ?? transcript,
+    nowStr,
+    contact,
+    hasMedia: !!media,
+  });
+
+  // Media present -> attach the file blocks and pin the vision model, mirroring route()'s handling.
+  const mediaBlocks = media ? media.blocks : null;
+  const content = mediaBlocks
+    ? user && user.trim()
+      ? [...mediaBlocks, { type: "text", text: user }]
+      : [...mediaBlocks]
+    : user;
+  const useModel = mediaBlocks ? media.model : model;
+  const userMsg = { role: "user", content };
+
+  let hops = 0;
+  let msg;
+  try {
+    msg = await anthropic.messages.create(
+      { model: useModel, max_tokens: 2048, system, messages: [userMsg], tools },
+      { timeout: timeoutMs }
+    );
+    // pause_turn resume loop: resend [user, assistant(content)] until finished or the hop cap is hit.
+    while (msg?.stop_reason === "pause_turn" && hops < maxHops) {
+      hops++;
+      msg = await anthropic.messages.create(
+        {
+          model: useModel,
+          max_tokens: 2048,
+          system,
+          messages: [userMsg, { role: "assistant", content: msg.content }],
+          tools,
+        },
+        { timeout: timeoutMs }
+      );
+    }
+  } catch (e) {
+    if (isTimeoutError(e)) return { text: null, lang, hops, outcome: "timeout" };
+    console.error("answer: tool-carrying call failed:", e?.message || e);
+    return { text: null, lang, hops, outcome: "tool_error" };
+  }
+
+  // Still paused after the hop cap -> treat as a timeout (bounded, never runs away).
+  if (msg?.stop_reason === "pause_turn") return { text: null, lang, hops, outcome: "timeout" };
+  // A model refusal stays SILENT downstream (server.js does NOT send the tool-error notice on it),
+  // matching the classification refusal path (router.js: refusal -> silent close).
+  if (msg?.stop_reason === "refusal") return { text: null, lang, hops, outcome: "refusal" };
+
+  const text = readText(msg);
+  // A tool that errored, or no usable prose at all, is a tool_error (server.js sends the notice).
+  if (hasToolError(msg) || !text) return { text: null, lang, hops, outcome: "tool_error" };
+
+  return { text, lang, hops, outcome: "ok" };
 }

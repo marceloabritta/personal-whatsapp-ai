@@ -47,7 +47,7 @@ import {
   matchedTagNew,
 } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
-import { route } from "./router/router.js";
+import { route, answer } from "./router/router.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
 import { captureFailure } from "./lib/selflearning.js";
 import { MAINTAINED_LANGS, resolveTurnLang, shouldForceTranslateSay } from "./lib/lang.js";
@@ -262,6 +262,20 @@ const ORCH_MSG = {
     pt: () =>
       "Fiz a primeira coisa que você pediu, mas só consigo cuidar de uma dessas por vez — me mande a outra parte separadamente que eu resolvo.",
   },
+  // Answer pass (native server-side tools) notices — the orchestrator's OWN, like turnCap/
+  // dispatchCap. Informational (not a skill's *Failed/*Error), so sent via bare send().
+  toolTimeout: {
+    en: () => "That took too long to look up — try asking me again.",
+    pt: () => "Isso demorou demais para pesquisar — pode me perguntar de novo?",
+  },
+  toolError: {
+    en: () => "I couldn't look that up right now — try again in a bit.",
+    pt: () => "Não consegui pesquisar isso agora — tente de novo daqui a pouco.",
+  },
+  costCapHit: {
+    en: () => "I've answered a few of those in a row — let's pause. Ask me again fresh.",
+    pt: () => "Já respondi algumas dessas seguidas — vamos pausar. Me pergunte de novo do zero.",
+  },
 };
 
 // Pick an orchestrator string for `lang`, falling back to the English copy (which
@@ -282,6 +296,13 @@ const MAX_DISPATCHES = 3;
 const MAX_REPAIRS = 2;
 const READBACK_CAP = 8192; // bytes
 const MARKER_TTL = 15 * 60; // seconds — same as the session default
+
+// NATIVE SERVER-SIDE TOOLS (the answer pass). The bundle is built by lib/nativeTools.js off
+// process.env; these are the orchestrator-side ceilings for the answer branch. Locked defaults
+// (card 6c09b8ab): 30s per-pass wall clock, 4 pause_turn resumes, 6 answers per conversation.
+// router.answer() reads the timeout/hop values from ctx.env itself; NATIVE_MAX_ANSWERS is the
+// per-conversation cost ceiling enforced here on the marker.
+const NATIVE_MAX_ANSWERS = Number(process.env.NATIVE_MAX_ANSWERS) || 6;
 
 // SELF-LEARNING: write a failure report, guarded. captureFailure() already promises never
 // to throw; this is the belt to its braces, because a bug in the thing that records bugs
@@ -528,10 +549,13 @@ app.post("/webhook", async (req, res) => {
         awaitFrom: session.awaitFrom || "owner",
         turns: session.turns || 0,
         dispatches: session.dispatches || 0,
+        // Re-read the answer count on continuation, or NATIVE_MAX_ANSWERS silently degrades from
+        // per-conversation to per-message (an undefined answers restarts the count each inbound).
+        answers: session.answers || 0,
       };
     } else {
       if (session) await sessions.clear(remoteJid);
-      marker = { awaitFrom: "owner", turns: 0, dispatches: 0 };
+      marker = { awaitFrom: "owner", turns: 0, dispatches: 0, answers: 0 };
     }
 
     // Persist / clear the marker ONLY while the orchestrator still owns the key. Edge case 6, BOTH
@@ -550,6 +574,7 @@ app.post("/webhook", async (req, res) => {
           lang: ctx.lang, // keep for backward-compat with any legacy reader; harmless
           turns: marker.turns,
           dispatches: marker.dispatches,
+          answers: marker.answers || 0, // per-conversation answer/cost ceiling (NATIVE_MAX_ANSWERS)
         },
         MARKER_TTL
       );
@@ -693,6 +718,48 @@ app.post("/webhook", async (req, res) => {
         marker.awaitFrom = reply.awaitFrom || marker.awaitFrom || "owner";
         await persistMarker();
         return; // wait for his next message
+      }
+
+      // ---- reply.next === "answer" -----------------------------------------------------------
+      // The tool-carrying answer pass: a SECOND model call (router.answer) with the native toolset
+      // attached, returning PROSE delivered inline via sendSay in the SAME WhatsApp reply. Because
+      // it is downstream of a successfully-parsed classification, it can never reach the degraded
+      // "didn't understand" menu.
+      if (reply.next === "answer") {
+        // Write-invariant sibling (server.js read-back guard): a read-back turn must not start a
+        // fresh answer pass — a new action needs a new message from him first.
+        if (thisTurnIsReadback) {
+          await fireCapture(ctx, { phase: "readback_answer", taskId: "orchestrator" });
+          await closeMarker();
+          return;
+        }
+        // Per-conversation answer/cost ceiling on the marker.
+        if (marker.answers >= NATIVE_MAX_ANSWERS) {
+          await send(number, orch(ctx.lang, "costCapHit"), ctx.lang);
+          await closeMarker();
+          await fireCapture(ctx, { phase: "answer_cap", taskId: "orchestrator", answerCap: NATIVE_MAX_ANSWERS });
+          return;
+        }
+        marker.answers = (marker.answers || 0) + 1;
+        const a = await answer(ctx, { labeledTranscript });
+        if (a.outcome === "ok" && a.text) {
+          await sendSay(a.text, a.lang); // language-pinned, same as a normal say
+          marker.awaitFrom = "owner";
+          await persistMarker(); // conversation stays open — wait for his next message
+          return;
+        }
+        // A model refusal stays SILENT — matching the classification refusal path (router.js:
+        // a refusal degrades to a silent close). Do NOT send the tool-error notice on a refusal.
+        if (a.outcome === "refusal") {
+          await closeMarker();
+          await fireCapture(ctx, { phase: "answer_refusal", taskId: "router" });
+          return;
+        }
+        const key = a.outcome === "timeout" ? "toolTimeout" : "toolError";
+        await send(number, orch(ctx.lang, key), ctx.lang);
+        await closeMarker();
+        await fireCapture(ctx, { phase: "answer_" + a.outcome, taskId: "router" });
+        return;
       }
 
       if (reply.next === "done") {

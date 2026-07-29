@@ -26,7 +26,7 @@ webhook  ->  filter (start on fromMe + matchedTagNew, or continue an active sess
 ### The turn loop (the model holds the conversation)
 
 There is **one** flow. A message summoned by the `@mary` tag (`SECRETARY_TAG_NEW`) runs the
-orchestrator's **turn loop**: the model **holds the conversation** and drives a three-state cycle,
+orchestrator's **turn loop**: the model **holds the conversation** and drives a four-state cycle,
 and the orchestrator holds a marker between messages.
 
 ```
@@ -34,8 +34,21 @@ message → route(ctx, turn) → { say, next, skills, info, lang, awaitFrom }
                                 │
       next = "listen"  ── ask / propose / stay silent, keep the marker open, wait for awaitFrom
       next = "execute" ── run skill(s); a skill returns a value → a READ-BACK turn
+      next = "answer"  ── answer a direct question inline with the native toolset (see below)
       next = "done"    ── close the conversation
 ```
+
+**The `answer` pass (native server-side tools).** `route()`'s classification call carries **no
+tools** and returns JSON — that contract is unchanged. When it classifies a turn as `next:"answer"`
+(a direct question no skill covers — a live-web fact, a URL already in the thread, real computation,
+general knowledge), the orchestrator makes a **second, tool-carrying model call**, `answer(ctx, turn)`
+(`router/router.js`), with `lib/nativeTools.js`'s bundle attached (`web_search` + `web_fetch`, plus
+`code_execution` when `NATIVE_CODE_EXEC` is on). That call is **supposed to return prose**, so it has
+no JSON to fail to produce and an `answer` turn can never reach the degraded "didn't understand" menu.
+The prose is delivered inline via the same `sendSay` path — two internal model calls, one WhatsApp
+reply. Server-side tools run an internal sampling loop that can pause (`stop_reason:"pause_turn"`); the
+answer pass resumes it up to `NATIVE_MAX_TOOL_HOPS`, each call bounded by `NATIVE_ANSWER_TIMEOUT_MS`,
+and the conversation is capped at `NATIVE_MAX_ANSWERS` answers on the marker.
 `execute` is **non-terminal**: a skill (`manifest.conversation:"orchestrator"`) returns a
 JSON-serialisable value which the orchestrator feeds back to the model as a **read-back** turn (the
 model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`,
@@ -463,6 +476,7 @@ still live in the others. Reach for them before writing your own:
 | `identity.js` | `NEW_TAGS`, `headerFor(lang)`, `isOwnMessage`, `matchedTagNew` | The trigger tags and the reply header. |
 | `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image (jpeg/png/gif/webp) → an image block, document (pdf) → a document block, everything else → `null` (defer). A new file type is one new branch here + its converter — no other rails change. `media_type` comes from the real mime, never trusted from a default. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
+| `nativeTools.js` | `buildNativeTools(env)` | The native server-side tool bundle for the **answer pass** (`router.answer`), built off env toggles: `web_search_20260209` + `web_fetch_20260209`, plus `code_execution_20260521` when `NATIVE_CODE_EXEC` is on; `[]` when `NATIVE_TOOLS` is off. Rails-only — no skill imports it; the orchestrator attaches it inside `router.answer`. |
 | `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
 | `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |
 

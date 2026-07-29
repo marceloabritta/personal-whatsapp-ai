@@ -33,6 +33,10 @@ problems (all prefixed with the language-aware header from `headerFor(lang)`):
 - **Too many skills fired in one conversation (the dispatch cap) → *"I've done a few things in a row…"*** (`dispatchCap`)
 - **A converted skill's payload failed validation twice → *"I couldn't get that right…"*** (`repairGiveUp`)
 - **A second converted skill was asked for in one batch and can't run there → *"…send me the other part on its own."*** (`dispatchSkipped`)
+- **The answer pass timed out (per-pass wall clock or the pause_turn hop cap) → *"That took too long to look up…"*** (`toolTimeout`)
+- **The answer pass hit a tool error or produced no usable prose → *"I couldn't look that up right now…"*** (`toolError`)
+- **The per-conversation answer ceiling was hit (`NATIVE_MAX_ANSWERS`) → *"I've answered a few of those in a row…"*** (`costCapHit`)
+- A **model refusal** on the answer pass stays **silent** (matching the classification refusal path) — no notice is sent.
 
 > **Flow diagram note:** the end-to-end flow diagram in `../../ARCHITECTURE.md` and `../../README.md`
 > is **pending** — those docs are owned by another card's in-flight work and were not touched here.
@@ -193,11 +197,20 @@ unlabelled `ME:`/`OTHER:` string) is **unchanged**, so the six unconverted skill
 see today's exact bytes. The labelled transcript is a plain webhook-handler local passed as the
 `route()` argument — **not** a `ctx` field, so the `ctx` surface is unchanged.
 
-**The three states, crossed with `say` (prose | null):**
+**The four states, crossed with `say` (prose | null):**
 - **`listen`** — reply (or stay silent) and keep the conversation open; the model declares
   `awaitFrom` (`owner`/`contact`/`any`) for who to listen to next.
 - **`execute`** — run `skills` now with `info` (the first skill's payload). Dispatch is the same
   dual-intent batch as today: deduped, order preserved, **only `skills[0]` receives `info`**.
+- **`answer`** — a direct question no skill covers. The orchestrator runs a **second, tool-carrying
+  model call**, `answer(ctx, { labeledTranscript })` (`router/router.js`), with `lib/nativeTools.js`'s
+  bundle attached (`web_search` + `web_fetch`, plus `code_execution` when `NATIVE_CODE_EXEC` is on),
+  and delivers the **prose** inline via `sendSay` in the same reply. The classification call itself
+  still carries **no tools** and returns JSON, so an `answer` turn can never reach the degraded menu.
+  The answer pass resumes a `pause_turn` up to `NATIVE_MAX_TOOL_HOPS` (each call bounded by
+  `NATIVE_ANSWER_TIMEOUT_MS`), the marker caps the conversation at `NATIVE_MAX_ANSWERS` answers, and
+  `answer()` returns `{text, lang, hops, outcome}` — `ok` sends the prose and stays open, `timeout`/
+  `tool_error` send a notice and close, and `refusal` closes **silently**. `answer()` never throws.
 - **`done`** — the conversation is over.
 
 **The tier is chosen by `conversation`:** an `"orchestrator"` primary is gated on **`ok`** (all

@@ -78,6 +78,8 @@ Set the summon tag with `SECRETARY_TAG_NEW` (default `@mary`).
 - **`feedback`** — tell the secretary it got something **wrong** and it files itself a bug report. Reply to the offending message with `@secretary you made a mistake here`; the complaint, the bad output and its own recent logs become a report for triage. The only way a *confidently wrong* answer — the kind nothing throws on — ever gets caught. Say "…and fix it to 5pm" and it files the defect **and** does the fix.
 - **`flight_search`** — ask for a flight in a sentence (`@secretary find me a flight from São Paulo to Lisbon on the 14th, back on the 22nd`). It asks for anything missing, **confirms before it searches**, then shows the **3 cheapest options a person would actually pick** — the multi-stop, split-ticket, self-transfer itineraries the provider floats to the top of a cheapest-first list are **thrown away first** (which is why it sometimes shows fewer than three, and says so). Ask `link for option 2` and it sends that option's booking link. It **never buys**: say "book it" and it hands you the link and tells you the purchase is yours to make.
 
+Beyond the skills, @mary can now **answer a direct question inline** — one no skill covers: a live-web fact ("what's the euro today?"), the contents of a URL already in the thread, real computation, or general knowledge. It **searches the web, reads the page, and (optionally) runs code** on Anthropic's side, then replies in prose in the **same** WhatsApp message — no separate command, no "let me check" line. This is not a skill: the router recognises the question and runs a tool-carrying answer pass; ceilings on time, tool hops and answers-per-conversation keep it bounded. Toggle it with the `NATIVE_TOOLS` env var (see `secretary/.env.example`).
+
 Adding a skill is a drop-in: create a folder under `secretary/3. Mary Skills/` with a `skill.js` that exports `{ manifest, run }` — a pure task (`manifest.conversation:"orchestrator"` + declared `inputs`). The orchestrator discovers it at boot into the skill map and the router starts offering it — no changes to the orchestrator or the router. Skills don't call each other; the model chains them itself. See `secretary/README.md`.
 
 ## Repository layout
@@ -152,6 +154,7 @@ Framing happens once, in the orchestrator's `send()` (`1. Orchestrator/lib/forma
 - More skills (reminders, lookups, etc.) — each a new folder under `3. Mary Skills/`.
 - Reply privately when `@secretary` is called in a group.
 - Calendar backlog: conflict/availability check on create, read/query events ("what's on my calendar tomorrow?"), and series edit/delete for recurring events (create is shipped).
+- Native tools: `code_execution` is shipped but **off by default** (`NATIVE_CODE_EXEC`) — enabling it in the answer bundle is a fast-follow pending the live end-to-end check.
 
 ## Contributing
 
