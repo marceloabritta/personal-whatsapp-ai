@@ -31,3 +31,11 @@ secretary/specs/_synced/
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# Impeccable — machine-local + ephemeral only. Shared artifacts (.impeccable/config.json,
+# design.json, critique/*.md) stay tracked so the design context lives with the repo.
+.impeccable/config.local.json
+.impeccable/live/
+.impeccable/cache/
+.impeccable/**/cache/
+.impeccable/screenshots/
