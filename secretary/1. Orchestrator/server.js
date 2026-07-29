@@ -32,6 +32,8 @@ import {
   buildTranscript,
   buildLabeledTranscript,
   contactName,
+  historyMediaFile,
+  mentionsFile,
 } from "./lib/whatsapp.js";
 import { createSessions } from "./lib/sessions.js";
 import { createSettings } from "./lib/settings.js";
@@ -318,7 +320,7 @@ app.post("/webhook", async (req, res) => {
 
     // The turn's inbound media LIST (attachment first, then quote) — computed ONCE, consumed by
     // both the gate-open below and the media-prep block before the @mary turn loop. [] when none.
-    const files = inboundMedia(data, quoted);
+    let files = inboundMedia(data, quoted);
     // The direct attachment's caption ("" for a quote / none). A captioned document has text==""
     // (extractText has no document branch), so its tag+order ride the caption, not `text`.
     const attachmentCaption = files.find((m) => m.source === "attachment")?.caption || "";
@@ -384,7 +386,8 @@ app.post("/webhook", async (req, res) => {
       hour: "2-digit",
       minute: "2-digit",
     });
-    const conv = combine(remoteJid, await evolution.fetchHistory(remoteJid));
+    const history = await evolution.fetchHistory(remoteJid);
+    const conv = combine(remoteJid, history);
     const transcript = buildTranscript(conv);
     const contact = contactName(conv);
     console.log("TRANSCRIPT>>>\n" + transcript + "\n<<<");
@@ -547,6 +550,17 @@ app.post("/webhook", async (req, res) => {
     // Prepared ONCE here and carried on ctx.media for the whole webhook; route() attaches it on
     // every turn that is not a read-back. ctx.media stays null on a text-only turn (byte-identical).
     ctx.media = null;
+    // History->media fallback (GATED): an @mary turn that carries no attachment/quote AND whose
+    // words refer to a file ("summarize the PDF above") may be pointing at a file sent earlier.
+    // Only then do we reach into history for the most-recent relayable file and relay it like an
+    // on-turn file. A calendar/time/chit-chat turn -> mentionsFile(order) is false -> nothing is
+    // pulled (no download, no vision). Best-effort (see the guard below): a failure to read an
+    // INFERRED file must never hijack a turn the owner didn't mean about a file.
+    let filesFromHistory = false;
+    if (!files.length && mentionsFile(order)) {
+      const h = historyMediaFile(history, Math.floor(Date.now() / 1000));
+      if (h) { files = [h]; filesFromHistory = true; }
+    }
     if (files.length) {
       if (files.length > MAX_FILES_PER_TURN) {
         // Edge 7: reject the whole turn's media rather than silently truncating.
@@ -593,15 +607,17 @@ app.post("/webhook", async (req, res) => {
       }
       // Consolidated notes: one per distinct reason, fixed order, each at most once (Edge 5 — name
       // what couldn't be read; never silently drop). Realistic turns hit exactly one.
-      for (const key of ["fileDownloadFailed", "fileTooLarge", "fileUnsupported"]) {
-        if (problems.has(key)) await send(number, orch(ctx.lang, key), ctx.lang);
+      if (!filesFromHistory) {
+        for (const key of ["fileDownloadFailed", "fileTooLarge", "fileUnsupported"]) {
+          if (problems.has(key)) await send(number, orch(ctx.lang, key), ctx.lang);
+        }
+        if (relayedBlocks.length === 0) {
+          // Edge 6: nothing readable -> notes already sent, stop without routing.
+          await closeMarker();
+          return;
+        }
       }
-      if (relayedBlocks.length === 0) {
-        // Edge 6: nothing readable -> notes already sent, stop without routing.
-        await closeMarker();
-        return;
-      }
-      ctx.media = { blocks: relayedBlocks, model: VISION_MODEL };
+      if (relayedBlocks.length) ctx.media = { blocks: relayedBlocks, model: VISION_MODEL };
     }
 
     // State that rides between turns of THIS webhook only.

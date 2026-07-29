@@ -497,6 +497,20 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-28 — Fix: Mary now reads a file *referenced* after the `@mary` tag (card beba8beb).**
+  Turn assembly sourced media only from the current message's attachment + its quoted reply
+  (`inboundMedia`), and `fetchHistory` discarded each row's media id — so a PDF/image sent on an
+  earlier message and then referred to in words ("the PDF above") reached the model as nothing
+  → "I can't read attachments". Added a **reference-gated** history→media path: `fetchHistory`
+  (`lib/evolution.js`) now carries `mediaId`/`mediaType`/`mimetype` (additive; text-only rows
+  unchanged, still dropped from the transcript by `combine`), and MEDIA-PREP (`server.js`) falls
+  back to the single most-recent relayable file in the last hour (`historyMediaFile`,
+  `lib/whatsapp.js`) **only when the turn's words refer to a file** (`mentionsFile`, en+pt
+  keyword heuristic) — an unrelated turn (calendar/time/chit-chat) pulls nothing. Best-effort:
+  an inferred file that can't be read never hijacks the turn. Scope: one file, recency-windowed,
+  reference-gated; NOT a document memory, multi-file, or model-based reference check. Rails
+  (additive to `whatsapp.js`; additive shape on `fetchHistory`); no manifest/router change, so no
+  router-selftest. Guard: `scripts/pretag-history-media-selftest.mjs` (offline).
 - **2026-07-28 — Fix: assistant switched languages mid-conversation (card 3ec5be77).** The
   reply-language rail `ctx.lang` was re-derived from the router's per-turn `lang` every turn and
   reset on each fresh `@mary` turn, so it drifted EN↔PT within one conversation instead of

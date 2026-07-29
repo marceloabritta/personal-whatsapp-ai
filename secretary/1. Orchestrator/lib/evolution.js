@@ -3,7 +3,7 @@
 //  Send text, fetch history and download decrypted media (base64).
 //  Shared by every skill.
 // ============================================================================
-import { extractText } from "./whatsapp.js";
+import { extractText, historyMediaOf } from "./whatsapp.js";
 
 export function createEvolution({ url, apikey, instance }) {
   const base = `${url}`;
@@ -68,12 +68,18 @@ export function createEvolution({ url, apikey, instance }) {
       findMessages({ key: { remoteJid } }),
       findMessages({ key: { remoteJidAlt: remoteJid } }),
     ]);
-    return pages.flat().map((r) => ({
-      t: Number(r.messageTimestamp) || 0,
-      fromMe: r.key?.fromMe,
-      text: extractText(r.message).trim(),
-      pushName: r.pushName,
-    }));
+    return pages.flat().map((r) => {
+      const media = historyMediaOf(r.message);
+      return {
+        t: Number(r.messageTimestamp) || 0,
+        fromMe: r.key?.fromMe,
+        text: extractText(r.message).trim(),
+        pushName: r.pushName,
+        mediaId: media ? r.key?.id : null,     // the re-downloadable id (undone discard, per ROOT_CAUSE)
+        mediaType: media?.mediaType || null,   // "document" | "image" | null
+        mimetype: media?.mimetype || null,
+      };
+    });
   }
 
   // Downloads a message's decrypted media (by id) and returns { base64, mimetype }.

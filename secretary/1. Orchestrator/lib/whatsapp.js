@@ -151,6 +151,54 @@ export function inboundMedia(data, quoted) {
   return list;
 }
 
+// Does the order text REFER to a file/document/image? Deterministic en+pt keyword heuristic that
+// GATES the history->media fallback: on a media-less @mary turn we only reach into history for a
+// file when the words actually point at one (a calendar/time/chit-chat turn pulls nothing). A MISS
+// falls SAFE -> text-only turn (today's behaviour; the model can ask "which file?"). Diacritics are
+// stripped so "formulario" matches "formulário"; keywords are stored without accents to match.
+// FOLLOW-UP if too narrow: swap for a model-based reference check.
+const FILE_WORDS = [
+  // English
+  "file","files","document","documents","doc","docs","pdf","pdfs","image","images","picture",
+  "pictures","pic","photo","photos","screenshot","screenshots","attachment","attachments",
+  "attached","spreadsheet","form","scan","scanned","sheet",
+  // Portuguese (accents stripped to match the normalized text below)
+  "arquivo","arquivos","documento","documentos","imagem","imagens","foto","fotos","print","prints",
+  "anexo","anexos","anexado","anexada","planilha","planilhas","formulario","ficha","comprovante",
+  "comprovantes","captura",
+];
+const FILE_RE = new RegExp(`\\b(?:${FILE_WORDS.join("|")})\\b`, "i");
+export function mentionsFile(text) {
+  if (!text) return false;
+  const norm = String(text).normalize("NFD").replace(/[̀-ͯ]/g, ""); // strip diacritics
+  return FILE_RE.test(norm);
+}
+
+// Reads the SAME node shapes inboundMedia detects. Documents (incl. the captioned wrapper) and
+// images only — audio/video/text -> null (not relayable). Used by fetchHistory to tag which
+// history rows carry a re-downloadable file, and by historyMediaFile to pick one.
+export function historyMediaOf(message) {
+  const doc =
+    message?.documentWithCaptionMessage?.message?.documentMessage || message?.documentMessage;
+  if (doc) return { mediaType: "document", mimetype: doc.mimetype || null };
+  if (message?.imageMessage) return { mediaType: "image", mimetype: message.imageMessage.mimetype || null };
+  return null;
+}
+
+// The history->media fallback: pick the SINGLE most-recent relayable file from history, bounded
+// by recency so a stale file is never resurrected onto a later turn. Returns an entry in
+// inboundMedia's shape with source:"history", or null. maxAgeSec default = 3600 (1h).
+export function historyMediaFile(history, nowSec, { maxAgeSec = 3600 } = {}) {
+  if (!Array.isArray(history)) return null;
+  const candidates = history
+    .filter((r) => r && r.mediaId && (r.mediaType === "document" || r.mediaType === "image"))
+    .filter((r) => !maxAgeSec || nowSec - (r.t || 0) <= maxAgeSec)
+    .sort((a, b) => (a.t || 0) - (b.t || 0));
+  const r = candidates[candidates.length - 1];
+  if (!r) return null;
+  return { source: "history", mediaType: r.mediaType, id: r.mediaId, caption: "", mimetype: r.mimetype || null };
+}
+
 // THE EXTENSION POINT. The single "is this type supported? -> native block, or defer" decision,
 // plus the two ship-now native handlers (image, document). media_type comes from `mimetype` (the
 // REAL webhook/download mime), NEVER a hard-coded default — so getMediaBase64's audio/ogg fallback

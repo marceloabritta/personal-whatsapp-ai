@@ -289,6 +289,16 @@ A `@mary` turn that carries files (a receipt, an invoice) relays them to the tur
   (`fileDownloadFailed` / `fileTooLarge` / `fileUnsupported`, fixed order, each at most once — never
   a silent drop). If **nothing** is readable, the notes are sent and the turn closes without routing.
   Otherwise `ctx.media = { blocks, model: VISION_MODEL }`.
+- **Third media source — reference-gated recent-history fallback (card beba8beb).** Besides the
+  attachment and the quote, MEDIA-PREP has a third source: when a turn carries **no** on-turn media
+  **and** its words refer to a file (`mentionsFile(order)`, an en+pt keyword heuristic), it sources
+  the **single most-recent relayable file from the last hour** (`historyMediaFile`, `lib/whatsapp.js`)
+  and relays it exactly like an on-turn file. An unrelated turn (calendar/time/chit-chat) pulls
+  nothing. This is **best-effort**: a history-sourced file that fails to download is silently dropped
+  (no problem-note, no early return) and the turn routes text-only, so an inferred file never hijacks
+  a turn the owner didn't mean about a file. To support it, the Evolution client's `fetchHistory` now
+  carries **per-row media** (`mediaId`/`mediaType`/`mimetype`; additive — text-only rows are unchanged
+  and still dropped from the transcript by `combine`).
 - **The turn call — `route()` (`router/router.js`).** When `ctx.media` is present **and the turn is
   not a read-back**, `route()` builds an **N-block** `content` array (**media before text**, the
   empty text block omitted) and pins the create call's model to `media.model`. A read-back carries
