@@ -3,9 +3,10 @@
 Two things, and they exist for each other: the backlog is where a card waits to be *routed*,
 and routing is only an interesting decision once there is more than one way down.
 
-  * **Expedited** — scope → plan (GATE) → build (GATE) → shipped. The fast lane, for work
-    that is small, contained and low-risk. Seeded as ordinary editable columns, exactly like
-    the others; if the human already has a `exped` key, this touches nothing.
+  * **Expedited** — the fast lane, for work that is small, contained and low-risk. Its exact
+    columns follow `DEFAULT_COLUMNS[EXPED]` (today: scope → plan GATE → build → ready to ship
+    GATE → shipped). Seeded as ordinary editable columns, exactly like the others; if the
+    human already has a `exped` key, this touches nothing.
 
   * **The backlog** — cards with `pipeline: "backlog"` and no column. Nothing to migrate:
     every existing card is already in a pipeline, and it stays exactly where it is. The

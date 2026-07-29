@@ -849,12 +849,13 @@ class Manager:
                     continue
                 col = pipelines.get(c.column)
                 m = board.managers.get(c.manager_id)
+                in_backlog = c.pipeline == BACKLOG or not col
                 rows.append(
                     {
                         "id": c.id,
                         "title": c.title,
-                        "pipeline": c.pipeline,
-                        "column": col.title if col else "?",
+                        "pipeline": "backlog" if in_backlog else c.pipeline,
+                        "column": "— (in the backlog, unrouted)" if in_backlog else col.title,
                         "at_gate": bool(col and col.gate),
                         "busy": c.busy,
                         "manager": m.name if m else "?",
@@ -865,37 +866,53 @@ class Manager:
 
         @tool(
             "create_card",
-            "Create a card. pipeline='plan' for a new feature (default), 'maint' for a bug "
-            "or malfunction — a maintenance card, which is coloured differently and stays "
-            "that colour all the way through build.",
-            {"title": str, "description": str, "pipeline": str},
+            "Create a card. It is ALWAYS born in the BACKLOG, unrouted — routing into a "
+            "pipeline is a separate, deliberate step (yours on the card's own chat, or the "
+            "human's). Optionally give it a type now: kind='feature' for something that does "
+            "not exist yet, kind='maintenance' for a bug or malfunction. Leave kind empty and "
+            "it lands untyped for classification later. This is the only place bug reports "
+            "and feature requests enter, and they all enter through the backlog.",
+            {"title": str, "description": str, "kind": str},
         )
         async def create_card(args):
             title = (args.get("title") or "").strip()
             if not title:
                 return ok("a title is required")
-            pipeline = (args.get("pipeline") or PLAN).strip().lower()
-            if pipeline not in ORIGIN_PIPELINES:
-                pipeline = PLAN
+            # Always into the backlog: `add_card` defaults `pipeline=BACKLOG`, and a `kind`
+            # it does not recognise (including "") becomes UNSET without leaving the backlog.
             c = await board.add_card(
-                title, (args.get("description") or "").strip(), manager_id, pipeline=pipeline
+                title,
+                (args.get("description") or "").strip(),
+                manager_id,
+                pipeline=BACKLOG,
+                kind=(args.get("kind") or "").strip().lower(),
             )
-            col = pipelines.get(c.column)
             return ok(
-                f"created {c.kind} card {c.id} — '{c.title}' in "
-                f"{PIPELINE_TITLES.get(c.pipeline, c.pipeline)} → '{col.title if col else '?'}'. "
-                f"Folder: {board.abs_dir(c)}"
+                f"created {c.kind} card {c.id} — '{c.title}' in the BACKLOG (unrouted). "
+                f"Route it when it is time to work it. Folder: {board.abs_dir(c)}"
             )
 
-        @tool("move_card", "Move any card to any column, in any pipeline", {"card_id": str, "column": str})
+        @tool(
+            "move_card",
+            "Move any card to any column, in any pipeline — or back to the BACKLOG (pass "
+            "column='backlog' to pull it out of its pipeline; it keeps its type and folder).",
+            {"card_id": str, "column": str},
+        )
         async def move_card(args):
             c = board.cards.get(args.get("card_id", ""))
             if not c:
                 return ok("no such card")
+            ref = (args.get("column", "") or "").strip()
+            # The backlog is not a pipeline and has no column, so it can never be `resolve`d.
+            # It is its own destination: pull the card out of whatever pipeline holds it.
+            if ref.lower() == BACKLOG:
+                back = await board.send_to_backlog(c.id)
+                if not back:
+                    return ok(f"'{c.title}' is already in the backlog")
+                return ok(f"'{c.title}' pulled back to the BACKLOG (unrouted)")
             # The board chat moves cards anywhere, so look in the card's own pipeline first
             # and then in every other one — with three pipelines, "the other one" is no
             # longer a well-defined place.
-            ref = args.get("column", "")
             col = next(
                 (
                     found
@@ -908,6 +925,18 @@ class Manager:
                 return ok("no such column")
             await board.move_card(c.id, col.id)
             return ok(f"'{c.title}' moved to {col.pipeline}/{col.title}")
+
+        @tool(
+            "send_to_backlog",
+            "Pull a card out of its pipeline and back into the BACKLOG, unrouted. It keeps "
+            "its type and its folder.",
+            {"card_id": str},
+        )
+        async def send_to_backlog(args):
+            c = await board.send_to_backlog(args.get("card_id", ""))
+            if not c:
+                return ok("no such card, or it is already in the backlog")
+            return ok(f"'{c.title}' is back in the BACKLOG (unrouted)")
 
         @tool("trash_card", "Archive a card (recoverable from the trash)", {"card_id": str})
         async def trash_card(args):
@@ -937,7 +966,7 @@ class Manager:
         return create_sdk_mcp_server(
             name="board",
             version="2.0.0",
-            tools=[list_cards, create_card, move_card, trash_card, list_columns, read_worker, write_worker],
+            tools=[list_cards, create_card, move_card, send_to_backlog, trash_card, list_columns, read_worker, write_worker],
         )
 
     # ---- tool bodies shared by both servers ---------------------------

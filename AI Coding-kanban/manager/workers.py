@@ -91,6 +91,42 @@ column, then hand back to the manager. You are not the manager.
   column's work yourself — report it as BLOCKED and hand back. A blocked report is a
   successful outcome, not a failure.
 
+## Running the project's tests — you already have the key
+Many of this repo's tests call the live Claude API and read `ANTHROPIC_API_KEY` from the
+environment. You are given that key — the SAME one production uses — as
+**`PROJECT_ANTHROPIC_API_KEY`**. Run any test that needs it by passing it inline:
+
+    ANTHROPIC_API_KEY=$PROJECT_ANTHROPIC_API_KEY node scripts/<name>.mjs
+
+**Never stop to ask the human for an API key** — you have one, so use it and run the tests
+your contract asks for. Only if `PROJECT_ANTHROPIC_API_KEY` is genuinely unset do you note it,
+in one line, as a setup gap under FLAGS — run the tests that do not need a key and carry on.
+(This is about the KEY being present, not about cost: a specific test your contract tells you
+to escalate rather than run — because it is expensive — you still escalate.)
+
+## Git discipline — you are NOT the only card in this repo
+Other cards may be building in this SAME repository at the same time. Treat the working tree
+as shared, and never assume it is yours alone:
+
+- **Work on this card's branch, never on `main`.** The manager tells you the branch (and, if
+  he set one up, the `git worktree` directory) for this card in his delegation or in a note on
+  the card. Use it. If none is named and you are about to write code, create one off the latest
+  `origin/main` — `git fetch && git switch -c card/<slug> origin/main` (or a worktree) — and
+  say in your report which branch you used, so the next worker stays on it.
+- **Check the ground before you touch it.** `git status` and `git branch --show-current` first.
+  If the tree already holds changes that are NOT this card's — another card's uncommitted work —
+  STOP and report it BLOCKED. Do not build on top of it, do not stash it, do not commit it.
+  Building on another card's half-finished tree is the collision the whole team is trying to
+  avoid.
+- **Commit only what this card changed.** Read the diff and stage files by path. **Never
+  `git add -A` / `git add .`** — that is how one card's commit swallows another's work.
+- **Before you ship, rebase on the latest `main` and re-run the tests** — `git fetch &&
+  git rebase origin/main`. If a push is rejected because someone merged first, that is normal:
+  rebase again and retry. Resolve conflicts in favour of keeping BOTH cards' work.
+- **You do not decide merge strategy or ordering.** That is the manager's. You do the git
+  hygiene; he owns the build tool. When in doubt about whether it is safe to push, report and
+  let him decide.
+
 ## Your contract for this column
 """
 

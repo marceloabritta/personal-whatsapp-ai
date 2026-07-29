@@ -65,11 +65,13 @@ DEFAULT_COLUMNS: dict[str, list[tuple[str, str, bool]]] = {
     #
     # The two gates are the whole reason it is allowed to be fast. Speed is bought by cutting
     # STEPS, never by cutting the human out: you approve the plan before any code is written,
-    # and you approve the build before anything is committed, pushed or deployed.
+    # and — mirroring the build pipeline — the finished build lands in Ready to Ship and waits
+    # for your review before anything is committed, pushed or deployed.
     EXPED: [
         ("Scope", "scope", False),
         ("Plan", "plan", True),  # GATE: the human approves the plan before a line is written
-        ("Build", "build", True),  # GATE: the human approves the build before it ships
+        ("Build", "build", False),  # the one-pass build — no gate; auto-advances when done
+        ("Ready to Ship", "ready-to-ship", True),  # GATE: the human reviews, then says ship
         ("Shipped", "shipped", False),
     ],
     BUILD: [

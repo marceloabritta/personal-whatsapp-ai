@@ -81,9 +81,15 @@ async def main() -> int:
 
     b = new_board()
     slugs = [c.slug for c in b.pipelines.columns[EXPED]]
-    check("expedited is scope → plan → build → shipped", slugs == ["scope", "plan", "build", "shipped"])
+    check(
+        "expedited is scope → plan → build → ready to ship → shipped",
+        slugs == ["scope", "plan", "build", "ready-to-ship", "shipped"],
+    )
     gated = [c.slug for c in b.pipelines.columns[EXPED] if c.gate]
-    check("...gated at plan (before a line is written) and build (before it ships)", gated == ["plan", "build"])
+    check(
+        "...gated at plan (before a line is written) and ready-to-ship (before it ships), not build",
+        gated == ["plan", "ready-to-ship"],
+    )
     check("every expedited column has a worker", all(os.path.isfile(b.workers.path(EXPED, s)) for s in slugs))
 
     build_w = b.workers.ensure(b.pipelines.by_slug(EXPED, "build")).instructions
@@ -183,8 +189,11 @@ async def main() -> int:
     notes = m0006.migrate(ws)
     after = json.load(open(cfg))
     check("it reports what it did", any("Expedited" in n for n in notes))
-    check("expedited is there", [x["slug"] for x in after[EXPED]] == ["scope", "plan", "build", "shipped"])
-    check("...with both gates", [x["slug"] for x in after[EXPED] if x["gate"]] == ["plan", "build"])
+    check(
+        "expedited is there",
+        [x["slug"] for x in after[EXPED]] == ["scope", "plan", "build", "ready-to-ship", "shipped"],
+    )
+    check("...with both gates", [x["slug"] for x in after[EXPED] if x["gate"]] == ["plan", "ready-to-ship"])
     check("...and a colour", after["colors"].get(EXPED))
     check("the other pipelines survived", len(after[PLAN]) == 6 and len(after[MAINT]) == 5)
     cards = json.load(open(ws.board_path))["cards"]

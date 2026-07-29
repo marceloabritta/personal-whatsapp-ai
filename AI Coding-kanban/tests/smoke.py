@@ -47,7 +47,7 @@ async def main() -> int:
     check("four pipelines exist", [p["id"] for p in pl.snapshot()] == [PLAN, MAINT, EXPED, BUILD])
     check("plan pipeline has columns", len(pl.columns[PLAN]) == 6)
     check("maintenance pipeline has columns", len(pl.columns[MAINT]) == 5)
-    check("expedited pipeline has columns", len(pl.columns[EXPED]) == 4)
+    check("expedited pipeline has columns", len(pl.columns[EXPED]) == 5)
     check("build pipeline has columns", len(pl.columns[BUILD]) == 5)
     check("a default manager exists", len(board.managers) == 1)
     check(

@@ -34,6 +34,7 @@ SUITES = [
     "backlog_test.py",
     "decouple_test.py",
     "boardchat_test.py",
+    "boardtools_test.py",
     "pause_test.py",
     "ship_test.py",
     "restart_test.py",
