@@ -48,26 +48,32 @@ You type "@secretary ..." in a chat
                           reply back on WhatsApp
 ```
 
-### The @mary turn loop
+### Two flows in parallel — summon her two ways
 
-The **model holds the conversation** instead of each skill driving its own dialogue. You summon the
-secretary with a single tag — **`@mary`** by default, user-definable via `SECRETARY_TAG_NEW` — and
-the orchestrator runs a turn loop:
+You can summon the secretary **two ways**, chosen by which tag you type. Both run side by side in one
+server, fully isolated — a tag change, or any bug, in one flow can never change what the other
+answers to:
 
 ```
-@mary <order>  ─→  the orchestrator runs a turn loop — the model decides each turn to
-                   LISTEN (ask/propose) · EXECUTE (run a skill) · DONE (close), and reads a
-                   skill's result back before closing.
+@mary <order>       ─→  the PRIMARY flow: the orchestrator runs a turn loop — the model decides
+                        each turn to  LISTEN (ask/propose) · EXECUTE (run a skill) · DONE (close),
+                        and reads a skill's result back before closing.
+@assistant <order>  ─→  the LEGACY fallback (also @assistente): the frozen router→dispatch flow —
+                        router classifies → skill runs (the diagram above). Kept side by side as a
+                        stable fallback, byte-for-byte its retired behaviour.
 ```
 
-`@mary` can also **read images and PDFs attached in the conversation** — a receipt, an invoice —
-whether on the first message or as a reply to one, and use them as evidence for what you asked;
-other file types get a polite "can't read that yet."
+In the **`@mary`** flow the **model holds the conversation** instead of each skill driving its own
+dialogue. `@mary` can also **read images and PDFs attached in the conversation** — a receipt, an
+invoice — whether on the first message or as a reply to one, and use them as evidence for what you
+asked; other file types get a polite "can't read that yet."
 
-The orchestrator discovers its skill tree — `secretary/3. Mary Skills/` — at boot, where each skill
-is a **pure task**: the orchestrator holds the conversation and each skill only validates its
-declared inputs, acts, and returns a value (calendar/tasks/flights use a READ-then-ACT contract).
-Set the summon tag with `SECRETARY_TAG_NEW` (default `@mary`).
+Each flow discovers its **own skill tree**: **`@mary`** loads `secretary/3. Mary Skills/`, where
+each skill is a **pure task** (the orchestrator holds the conversation and each skill only validates
+its declared inputs, acts, and returns a value — calendar/tasks/flights use a READ-then-ACT
+contract); **`@assistant`** loads the frozen `secretary/2. Skills/` tree, where each skill drives its
+own dialogue. Set the two summon tags with `SECRETARY_TAG_NEW` (default `@mary`) and `SECRETARY_TAG`
+(default `@assistente,@assistant`).
 
 ## Skills (today)
 
@@ -88,7 +94,7 @@ toolset, and adaptive reasoning together — Mary reasons, may search the web, t
 pass (the old separate "answer" pass is gone). This makes every turn richer but heavier; the ceilings on
 tool hops and turns keep it bounded.
 
-Adding a skill is a drop-in: create a folder under `secretary/3. Mary Skills/` with a `skill.js` that exports `{ manifest, run }` — a pure task (`manifest.conversation:"orchestrator"` + declared `inputs`). The orchestrator discovers it at boot into the skill map and the router starts offering it — no changes to the orchestrator or the router. Skills don't call each other; the model chains them itself. See `secretary/README.md`.
+Adding a skill is a drop-in: create a folder with a `skill.js` that exports `{ manifest, run }` under the tree for the flow you're extending — `secretary/3. Mary Skills/` for `@mary` (a converted pure task: `manifest.conversation:"orchestrator"` + declared `inputs`), or `secretary/2. Skills/` for the frozen `@assistant` flow (each skill drives its own dialogue). The orchestrator discovers it at boot into that flow's own map and the router starts offering it — no changes to the orchestrator or the router. In the frozen `@assistant` tree a skill can also export an optional `capabilities` object to be reused by other skills (e.g. `task_action` calls `calendar_action`'s create flow for a task assigned to someone else); the converted `@mary` tree drops that coupling — the model chains skills itself. See `secretary/README.md`.
 
 ## Repository layout
 
@@ -99,8 +105,9 @@ Adding a skill is a drop-in: create a folder under `secretary/3. Mary Skills/` w
 ├── LICENSE
 ├── .gitignore
 ├── secretary/             # the "secretary" (Node.js) — orchestrator + skills  ← run this
-│   ├── 1. Orchestrator/
-│   └── 3. Mary Skills/    #   the skills, each a pure task the orchestrator runs
+│   ├── 1. Orchestrator/   #     + legacy/  — the frozen @assistant router/dispatch
+│   ├── 2. Skills/         #   @assistant's tree (each skill drives its own dialogue)
+│   └── 3. Mary Skills/    #   @mary's tree — the same seven skills as converted pure tasks
 ├── Board Inbox/           # staging that turns pulled specs/plans into kanban backlog cards
 │   └── ledger.tsv         #   tracked — the exactly-once record (queue/ + delivered/ are runtime)
 └── evolution/             # the WhatsApp gateway (Docker)
@@ -119,7 +126,7 @@ Adding a skill is a drop-in: create a folder under `secretary/3. Mary Skills/` w
 ## Setup
 
 1. **Bring up the stack.** Copy `evolution/` to `/opt/evolution` on the server, create `.env` from `.env.example`, and generate the two secrets with `openssl rand -hex 16` (`AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`). Then `docker compose up -d`.
-2. **Deploy the secretary.** Put the **contents of `secretary/`** in `/opt/secretary` (so `/opt/secretary/package.json`, `/opt/secretary/1. Orchestrator/`, `/opt/secretary/3. Mary Skills/` exist). Create `/opt/secretary/.env` from `secretary/.env.example` and fill in your keys. The `secretary` service in the compose file runs `npm install && npm start`.
+2. **Deploy the secretary.** Put the **contents of `secretary/`** in `/opt/secretary` (so `/opt/secretary/package.json`, `/opt/secretary/1. Orchestrator/`, `/opt/secretary/2. Skills/`, `/opt/secretary/3. Mary Skills/` exist). Create `/opt/secretary/.env` from `secretary/.env.example` and fill in your keys. The `secretary` service in the compose file runs `npm install && npm start`.
 3. **Link WhatsApp.** In the Evolution manager (`http://YOUR_IP:8080`), create an instance named `secretaria` (must match `EVOLUTION_INSTANCE`) and scan the QR code with WhatsApp → Linked devices.
 4. **Point the webhook** at the secretary for `MESSAGES_UPSERT` events:
 

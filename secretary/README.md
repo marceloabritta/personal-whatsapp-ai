@@ -8,8 +8,9 @@ router that classifies intent and dispatches to the right skill.
 ```
 secretary/
 ├── 1. Orchestrator/         # the Node app that runs (webhook + router + skill loading)
-│   ├── server.js            #   receives the webhook, filters the trigger tag (SECRETARY_TAG_NEW), builds context,
-│   │                        #   DISCOVERS the skills, calls the router and dispatches
+│   ├── server.js            #   receives the webhook, filters the trigger tags (SECRETARY_TAG_NEW=@mary,
+│   │                        #   SECRETARY_TAG=@assistant), selects the flow, builds context, DISCOVERS the
+│   │                        #   skills, calls the router and dispatches (the @mary turn loop + runLegacyFlow)
 │   ├── package.json         #   process dependencies (includes the skills' deps)
 │   ├── .env.example
 │   ├── lib/                 #   shared utilities
@@ -30,9 +31,14 @@ secretary/
 │       │                    #     block), renderStateBlock. Both calls carry output_config (see router.js).
 │       └── router.js        #     the UNIFIED turn call route() ({say,keepListening,execute} + tools + adaptive
 │                            #     thinking + pause_turn loop) and extract() (the schema-locked per-task payload)
+│   └── legacy/              #   FROZEN pre-retirement @assistant flow (router/prompt/inputs +
+│                            #     assistant-settings) — dispatched only by runLegacyFlow, never by @mary
 ├── improvements/           # runtime failure-report spool (gitignored; pulled to Bugs and Malfunctions/)
 ├── specs/                  # runtime feature-spec spool (gitignored; pulled to New Features Plans/)
-└── 3. Mary Skills/          # one folder per skill; the orchestrator scans this at boot
+├── 2. Skills/               # @assistant's FROZEN tree (each skill drives its own dialogue); scanned at boot
+│                            #   into SKILLS/CATALOG/CAPS (7 folders: Calendar, Audio, Tasks, Feature Requests,
+│                            #   Feedback, Flight Search, Assistant Settings)
+└── 3. Mary Skills/          # @mary's tree — the same seven skills as converted pure tasks; scanned at boot
     ├── 1. Calendar Actions/
     │   ├── skill.js         #   export { manifest, run } — create/edit/cancel a Calendar event (READ-then-ACT)
     │   └── prompt.js        #   extraction rules + localized reply() strings
@@ -56,40 +62,51 @@ secretary/
         └── prompt.js        #   localized reply() strings
 ```
 
-## The skill tree
+## Two skill trees (one per flow)
 
-The skills live under `3. Mary Skills/`, discovered at boot (`loadSkills(dir)` scans it
-once). Each skill is a **PURE TASK** (`conversation:"orchestrator"`, declared `inputs`, a
-`run(ctx)` that validates → acts → sends one outcome → **returns** a JSON value the model
-reads back). No skill imports `lib/confirm.js` or opens a session of its own; the
-orchestrator holds the conversation. `calendar_action`, `task_action` and `flight_search`
-use a READ-then-ACT contract. Skills never call one another — the model chains them itself.
+There are **two** skill trees, discovered **per-flow** at boot (`loadSkills(dir)` runs once per
+tree):
 
-The tree loads into the orchestrator's skill maps (`NEW_SKILLS`/`NEW_CATALOG`).
+- **`3. Mary Skills/`** — the `@mary` tree (the PRIMARY, actively-developed flow): the **seven
+  skills as PURE TASKS** (`conversation:"orchestrator"`, declared `inputs`, a `run(ctx)` that
+  validates → acts → sends one outcome → **returns** a JSON value the model reads back). No
+  Mary-tree skill imports `lib/confirm.js`, opens a session, or exports `capabilities`.
+  `calendar_action`, `task_action` and `flight_search` use a READ-then-ACT contract; the model
+  chains skills itself.
+- **`2. Skills/`** — the FROZEN `@assistant` tree (the legacy fallback). Each skill drives its own
+  propose/confirm/clarify dialogue (`conversation:"skill"`) and may export `capabilities`; the
+  `startCreate` coupling (Tasks→Calendar) exists only in this tree.
+
+The two trees load into separate maps (`NEW_SKILLS`/`NEW_CATALOG` vs `SKILLS`/`CATALOG`/`CAPS`) and
+are byte-isolated copies, so a bug in one cannot reach the other. The legacy tree is restored
+frozen at its retirement state and runs side-by-side with `@mary`.
 
 ## How a skill is discovered
 
-At boot, the orchestrator scans the tree's `*/skill.js`. Each skill exports:
+At boot, the orchestrator scans each tree's `*/skill.js`. Each skill exports:
 
 ```js
 export const manifest = { id: "my_id", description: "what it does" };
 export async function run(ctx) { /* ... */ }
 ```
 
-The `manifest.id` goes into the catalog the router uses to classify; `run(ctx)` is
-called when the router picks that id. **Adding a new skill = create a folder in the tree
-with a `skill.js`. You don't edit `server.js` or the router.** (A skill also sets
-`manifest.conversation:"orchestrator"` and declares its `inputs`.)
+The `manifest.id` goes into that flow's catalog the router uses to classify; `run(ctx)` is
+called when the router picks that id. **Adding a new skill = create a folder in the right tree
+with a `skill.js`. You don't edit `server.js` or the router.** (A converted `@mary` skill also
+sets `manifest.conversation:"orchestrator"` and declares its `inputs`.)
 
-Skills don't compose one another directly — there is no cross-skill call mechanism. The
-orchestrator model chains skills itself: e.g. a to-do assigned to someone else becomes a
-calendar invite because the model dispatches `calendar_action`, not because `task_action`
-reaches into it.
+A skill **in the frozen `@assistant` tree** may also export an optional `capabilities` object — an
+internal API other skills can call via `ctx.callSkill(id, name, …)` (never seen by the router).
+This is how one skill composes another without importing its file: e.g. `task_action` turns a
+to-do assigned to someone else into a calendar invite by calling `calendar_action.startCreate`.
+Guard with `ctx.hasSkill(id, name)` for a friendly fallback when a capability isn't loaded. See
+"Composing skills" in `ORCHESTRATOR.md`. The converted `@mary` tree drops this — the orchestrator
+model chains skills itself.
 
 The `ctx` object handed to skills carries everything they need (no imports back to
 the orchestrator): `owner, anthropic, model, order, transcript, nowStr, contact,
 number, remoteJid, quoted, hasQuotedAudio, catalog, tag, fromMe, sessions, session,
-env, evolution, send, dmOwner, lang`. `ctx.quoted` is
+env, evolution, send, dmOwner, lang, hasSkill, callSkill`. `ctx.quoted` is
 `{ id, hasAudio, mediaType, text, calendarLink }`. `ctx.sessions` is the Redis-backed
 session store and `ctx.session` is the current chat's state, so a skill can drive a
 multi-step, stateful flow (confirmations, clarifications). `ctx.dmOwner(text)` is an
@@ -111,9 +128,10 @@ is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Secretary]:
 ## Stateful flow (starting vs. continuing)
 
 The secretary is **stateful**: it keeps per-chat conversation state in Redis (`lib/sessions.js`).
-A flow only **starts** on a message that is from the owner (`fromMe === true`) and begins with
-the trigger tag (`SECRETARY_TAG_NEW`, default `@mary`; a stored value set by the owner wins over
-the seed). Once a session is active, though, it can
+A flow only **starts** on a message that is from the owner (`fromMe === true`) and begins with a
+trigger tag — `SECRETARY_TAG_NEW` (default `@mary`, the primary flow) or `SECRETARY_TAG` (default
+`@assistente,@assistant`, the frozen legacy flow); a stored value set by the owner wins over the
+seed, per flow. The summon tag selects the flow. Once a session is active, though, it can
 **continue without the tag**: the secretary uses the LLM to ignore normal chatter and watch for the
 answer it's waiting on. That answer can also come from the **other person** in the chat (e.g.
 they type their email), so the old blanket rule "only acts if `fromMe` and the text starts with
@@ -122,7 +140,8 @@ the tag" no longer holds — a non-owner message can be a valid continuation of 
 ## Run / deploy
 
 The app is the contents of the `secretary/` folder (that's where `package.json` lives,
-and `server.js` looks for the skills at `../3. Mary Skills`). A single `node_modules`
+and `server.js` looks for the skills at `../3. Mary Skills` for `@mary` and `../2. Skills`
+for the frozen `@assistant` flow). A single `node_modules`
 at the `secretary/` root is shared by the orchestrator and the skills. Start it with
 `npm start` (which runs `node "1. Orchestrator/server.js"`). New `.env` variables:
 `ASSEMBLYAI_API_KEY` (and optionally `ASSEMBLYAI_LANGUAGE`), and `REDIS_URL` for the

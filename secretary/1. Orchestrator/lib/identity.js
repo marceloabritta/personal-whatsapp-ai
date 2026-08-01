@@ -23,6 +23,21 @@ function newSeed() {
     .filter(Boolean);
 }
 
+// ── LEGACY-FLOW TAGS (card: restore @assistant beside @mary) ────────────────
+// The accepted-tag list for the LEGACY (@assistant/@assistente) orchestrator flow, seeded from
+// SECRETARY_TAG (default "@assistente,@assistant"). It is a SEPARATE state from NEW_TAGS: setTags
+// mutates only TAGS, so a tag-change made through the LEGACY flow can NEVER alter what the NEW
+// (@mary) flow answers to, and vice versa. That structural separation is what makes the parallel
+// run safe. Additive: NEW_TAGS/setNewTags/matchedTagNew above are untouched.
+export const TAGS = seed();
+
+function seed() {
+  return (process.env.SECRETARY_TAG || "@assistente,@assistant")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 // Minimum viable tag: "@" + 2 chars. Below that a stray "@a" in a sentence would start
 // hijacking orders, and she can never be left unsummonable.
 const MIN_TAG_LEN = 3;
@@ -68,6 +83,18 @@ export function setNewTags(list) {
   if (!ok) return false;
   NEW_TAGS.length = 0;
   NEW_TAGS.push(...tags);
+  return true;
+}
+
+// The LEGACY-flow counterpart of setNewTags — mutates TAGS in place (same in-place contract, for
+// the same reason: readers that snapshot the binding still see the change). It NEVER touches
+// NEW_TAGS, so the NEW (@mary) flow is unaffected by a LEGACY-flow tag change. Refuses an invalid
+// list (returns false) rather than leaving the assistant unsummonable.
+export function setTags(list) {
+  const { ok, tags } = normalizeTags(list);
+  if (!ok) return false;
+  TAGS.length = 0;
+  TAGS.push(...tags);
   return true;
 }
 
@@ -156,4 +183,31 @@ export function matchedTagNew(text) {
       .sort((a, b) => b.length - a.length)
       .find((t) => low.startsWith(t) && endsTag(low.charAt(t.length))) || null
   );
+}
+
+// The LEGACY-flow counterpart of matchedTagNew — matches against TAGS only (same longest-first +
+// tag-must-end rules). server.js checks both matchers per message: a NEW_TAGS hit routes to the
+// @mary orchestrator loop, a TAGS hit to the legacy dispatch. The two lists are meant to be
+// disjoint (e.g. "@assistant" vs "@mary"); if a message somehow matched both, server.js resolves
+// it to the LEGACY flow, so @assistant is never starved by a NEW-flow tag collision.
+export function matchedTag(text) {
+  const low = (text || "").toLowerCase();
+  return (
+    [...TAGS]
+      .sort((a, b) => b.length - a.length)
+      .find((t) => low.startsWith(t) && endsTag(low.charAt(t.length))) || null
+  );
+}
+
+// NEW (card: restore @assistant beside @mary) — which flow owns THIS message. Pure; no I/O. A
+// tagged message: the tag decides (taggedNew). An untagged continuation: the flow that OWNS the
+// open session, identified by an EXPLICIT flow stamp — NOT by the absence of `.skill`. A
+// @mary-dispatched skill may legitimately own the session key with a `.skill` field at HEAD
+// (server.js marker guards), so inferring @mary from `!session.skill` would misroute an untagged
+// @mary continuation into the LEGACY flow — a strict-isolation break (SCOPE edge case 5). Legacy
+// sessions are positively stamped flow:"legacy" (the server.js legacySessions wrapper); anything
+// else — a @mary marker, a @mary skill session, or no session — is the @mary flow.
+export function useNewFlowFor(session, isTagged, taggedNew) {
+  if (isTagged) return taggedNew;
+  return session?.flow !== "legacy";
 }

@@ -8,7 +8,8 @@
 >
 > **What it does:**
 > - Receives every message from WhatsApp (via the Evolution API webhook).
-> - **Starts** a task only when *you* (the owner) write a trigger tag (`@mary`, by default).
+> - **Starts** a task only when *you* (the owner) write a trigger tag (`@mary` by default — the
+>   primary flow; or `@assistant`/`@assistente`, the frozen legacy fallback that runs side-by-side).
 > - Once a task is mid-conversation (e.g. a cancel awaiting your "yes"), it lets the
 >   follow-up through **without** the tag — and can even pick up the *other person's*
 >   reply — while ignoring normal chatter.
@@ -54,10 +55,12 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    (default `secretary`; prod overrides to `secretaria`), `CLAUDE_MODEL` (default
    `claude-sonnet-5`), `OWNER_NAME`, `ANTHROPIC_API_KEY`, `REDIS_URL` (default
    `redis://evolution_redis:6379`; set empty to force in-memory). The trigger tags and reply
-   header live in `lib/identity.js`: `NEW_TAGS` is parsed from `SECRETARY_TAG_NEW` (**comma-separated**,
-   lowercased, default `@mary`), and the header
-   is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI Assistant]:`, pt →
-   `[Assistente IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER` const anymore.
+   header live in `lib/identity.js`. There are **two** tag lists, one per flow: `NEW_TAGS` is parsed
+   from `SECRETARY_TAG_NEW` (**comma-separated**, lowercased, default `@mary`) — the primary `@mary`
+   flow — and `TAGS` from `SECRETARY_TAG` (default `@assistente,@assistant`) — the frozen legacy
+   `@assistant` flow. The header is produced per-language by `headerFor(lang)` (en → `[Marcelo's AI
+   Assistant]:`, pt → `[Assistente IA do Marcelo]:`, from `OWNER_NAME`) — there is no single `HEADER`
+   const anymore.
 2. **Clients:** `anthropic` (SDK), `evolution` (`createEvolution`), `sessions`
    (`createSessions` — Redis or in-memory fallback).
    **`anthropic` is WRAPPED, once, here:** `withThinkingDefault(new Anthropic({…}))` (`lib/llm.js`).
@@ -69,18 +72,24 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    turn). A call site that genuinely wants reasoning **passes its own `thinking`** and the wrapper
    leaves it alone. The wrapper is a `Proxy`, not a spread — the SDK client is a class instance and
    a spread would drop its prototype.
-3. **`loadSkills(dir = NEW_SKILLS_DIR)`** — scans `<dir>/*/skill.js` (`NEW_SKILLS_DIR` is
-   `3. Mary Skills/`), dynamically `import()`s each, and requires `manifest.id` + `run()`. Returns
-   `{ skills, catalog }`: `skills = { [id]: run }` and
+3. **`loadSkills(dir = NEW_SKILLS_DIR)`** — scans `<dir>/*/skill.js`, dynamically `import()`s each,
+   and requires `manifest.id` + `run()`. Returns `{ skills, catalog, caps }`: `skills = { [id]: run }`,
    `catalog = [{id, description, inputs, conversation}]` (the router's menu — `inputs` is the
    skill's declared input contract, `manifest.inputs`, or `null`; **`conversation` is
    `"orchestrator"` if the manifest declares it, else `"skill"`** — the safe default, see
-   "The conversation loop" below). Logs each `skill loaded: … -> id`. **Drop-in skills:** no edit
-   here to add one. Skills export no skill-to-skill API — each is a pure task, and the model chains
-   them across turns (see "Composing skills" below).
+   "The conversation loop" below), and `caps = { [id]: { [name]: fn } }` — each skill's **optional**
+   `capabilities` export, the internal skill-to-skill API (see "Composing skills" below). Logs each
+   `skill loaded: … -> id` (with its capabilities, if any). **Drop-in skills:** no edit here to add
+   one.
 
-   Boot calls it **once**: `loadSkills(NEW_SKILLS_DIR)` → `NEW_SKILLS`/`NEW_CATALOG`, which
-   `NEW_FLOW.catalog` points at and the turn loop dispatches against. Boot logs `mary skills: …`.
+   **Per-flow discovery.** `loadSkills` is **parametrized** and boot calls it **twice**:
+   `loadSkills(NEW_SKILLS_DIR = "3. Mary Skills/")` → `NEW_SKILLS`/`NEW_CATALOG` for `@mary` (logs
+   `mary skills: …`), and `loadSkills(SKILLS_DIR = "2. Skills/")` → `SKILLS`/`CATALOG`/`CAPS` for the
+   frozen `@assistant` tree (logs `available skills: …`). From the latter the orchestrator derives
+   `LEGACY_SKILLS` (the frozen `assistant_settings` swapped in) and `LEGACY_CATALOG`. `NEW_FLOW.catalog`
+   points at `NEW_CATALOG`; `LEGACY_FLOW.catalog` at `LEGACY_CATALOG`. `CAPS` is discovered only on
+   the `@assistant` tree — the converted `@mary` tree exports no capabilities and needs none (the
+   model chains skills itself).
 4. **Express:** `GET /` health check; `POST /webhook`; `listen(3000)`.
 
 ### The webhook pipeline — `POST /webhook` (per message)
@@ -97,11 +106,13 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
    legacy `[AI Brain]:` for its own older messages), so the secretary's own sends are never
    acted on.
 6. **`session = await sessions.get(remoteJid)`** — any open per-chat state.
-7. **The gate (start vs continue vs ignore):**
+7. **The gate (start vs continue vs ignore) — DUAL-TAG.** Both tag lists are checked, because the
+   summon tag selects the flow:
    - `gateText = text || attachmentCaption` (a captioned document has `text === ""`, so the tag
-     rides its caption); `tag = fromMe ? matchedTagNew(gateText) : null`; `isTagged = !!tag` → a
-     **fresh** command (owner only); `matchedTagNew` returns whichever tag in `NEW_TAGS` the message
-     starts with (or null).
+     rides its caption). `legacyTag = fromMe ? matchedTag(text) : null` (legacy reads `text`
+     only); `newTag = fromMe ? matchedTagNew(gateText) : null`. `taggedNew = !!newTag && !legacyTag`
+     (a both-match resolves to LEGACY, so `@assistant` is never starved). `tag = taggedNew ? newTag :
+     legacyTag`; `isTagged = !!tag` → a **fresh** command (owner only).
    - `isContinuation` = the orchestrator marker is **OPEN** (`session?.open`), the message is not
      tagged, and it is not one of the secretary's own messages — **from ANY sender** (card 327be40b).
      The who-lock (`awaitFrom`) is gone: the model decides each turn from the whole visible
@@ -109,6 +120,12 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
      inline. Gating on `open` keeps this to orchestrator-owned conversations (a skill-owned session
      sets no `open`).
    - If **neither** → `return` (ignored — incl. any message with no open session).
+   - **Flow selection:** `useNewFlow = useNewFlowFor(session, isTagged, taggedNew)` (`lib/identity.js`).
+     A tagged message obeys `taggedNew`; an **untagged continuation** is routed by an EXPLICIT session
+     flow stamp — `session?.flow !== "legacy"` → `@mary`, else legacy. See "Dual-tag parallel run"
+     below for why this replaced the pre-retirement `!session?.skill`. `flow = useNewFlow ? NEW_FLOW :
+     LEGACY_FLOW`; a legacy message returns through `runLegacyFlow(ctx, …)` before the `@mary` turn
+     loop.
 8. **Dedup** by `id` via the `seen` set (capped at 500).
 9. `order` = text minus the tag (fresh) or the whole text (continuation);
    `number` = `remoteJid` before `@`.
@@ -117,9 +134,14 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
     last `OTHER` pushName. Logged as `TRANSCRIPT>>>`.
 11. **Build `ctx`** (handed to router + skills): `owner, tag, tags, anthropic, model, order,
     transcript, nowStr, contact, remoteJid, number, fromMe, isTagged, quoted, hasQuotedAudio,
-    catalog, env, evolution, sessions, settings, session, lang, send, sendFailure, info, media,
-    _turn`.
-    `session` is set **only** on a continuation (else `null`).
+    catalog, env, evolution, sessions, settings, session, lang, send, sendFailure, dmOwner,
+    hasSkill, callSkill, info, media, _turn`.
+    `tags`/`catalog`/`settings`/`sessions` are the **active flow's** — `@mary` gets `NEW_TAGS`/
+    `NEW_CATALOG`/`newSettings`/the raw `sessions` store; legacy gets `TAGS`/`LEGACY_CATALOG`/
+    `settings`/`legacySessions` (the flow-stamp wrapper — see "Dual-tag parallel run").
+    `session` is set **only** on a continuation (else `null`). `ctx.hasSkill`/`ctx.callSkill` are the
+    capability-registry helpers (see "Composing skills" below), used by the frozen `@assistant` tree
+    only.
     **`ctx.info`** — the skill's **declared inputs**, already extracted by the router in the same
     call that classified the order (see step 12), and already checked by plain code. It is set on
     the dispatch loop and it is **scoped to `tasks[0]`: every other skill on the turn is handed
@@ -330,14 +352,52 @@ A `@mary` turn that carries files (a receipt, an invoice) relays them to the tur
   orchestrator's own informational notices (the `turnCap`/`dispatchCap` category), **not**
   `*Failed`/`*Error` failure replies.
 
-### Tag settings — the durable summon list
+### Dual-tag parallel run (@mary = primary, @assistant = frozen fallback)
 
-The accepted tag list (`NEW_TAGS`, default `@mary`) is durable: the owner can change it at runtime
-by asking (the `assistant_settings` skill), which mutates `NEW_TAGS` via `setNewTags` and persists it
-to a namespaced settings key (`createSettings({ ns: "new" })` → `secretary:settings:new:tags`). At
-**boot** the stored list is loaded over the `SECRETARY_TAG_NEW` seed: `await newSettings.ready` →
-`newSettings.loadTags()` → `setNewTags`, so a stored value wins and the boot log prints `new-tags:`
-with its source.
+Two flows live in this one process, chosen by the **summon tag** on each message. The branch is made
+**as early as possible** in the webhook handler, before any flow-specific logic:
+
+- **`@mary` (`SECRETARY_TAG_NEW`) → the NEW flow**: the turn loop above (the primary, actively-developed
+  flow — native tools, media relay, read-back).
+- **`@assistant`/`@assistente` (`SECRETARY_TAG`) → the LEGACY flow** (`runLegacyFlow`): the frozen
+  `route → dispatch`, run on **frozen copies** of the pre-retirement code under `1. Orchestrator/legacy/`
+  (`router.js`, `prompt.js`, `inputs.js`, `assistant-settings.js`, `assistant-settings-prompt.js`) and
+  the frozen `2. Skills/` tree. None of it is imported by the NEW flow. This is **byte-for-byte the
+  behaviour the flow had at retirement**, restored side-by-side.
+
+**How the branch is decided — `useNewFlowFor(session, isTagged, taggedNew)` (`lib/identity.js`).** A
+*tagged* message obeys the tag (`taggedNew`). An *untagged continuation* is routed by an **EXPLICIT
+session flow stamp**: `session?.flow !== "legacy"` → NEW, else LEGACY. Anything not stamped
+`flow:"legacy"` — a `@mary` marker, a `@mary` skill session, or no session — defaults to `@mary`.
+
+> **Why not the pre-retirement `useNewFlow = isTagged ? taggedNew : !session?.skill`?** That
+> discriminator inferred "@mary" from the **absence** of a `.skill` field. But at HEAD a
+> `@mary`-dispatched skill may **legitimately own the session key with a `.skill` field** (the marker
+> guards at `persistMarker`/`closeMarker` exist precisely because a skill *may* take the key). An
+> untagged `@mary` continuation carrying `.skill` — a bare "yes" to a skill-parked confirmation —
+> would then compute `!session.skill === false → LEGACY`, a direct strict-isolation break: a `@mary`
+> conversation misrouted into the legacy flow. `useNewFlowFor` closes that by routing on a **positive
+> legacy stamp** instead of the absence of a `@mary` marker, so no `@mary` continuation can ever
+> select `LEGACY_FLOW`.
+
+**The `legacySessions` flow-stamp (`server.js`).** The legacy flow's `ctx.sessions` is not the raw
+`sessions` store but a thin wrapper whose `.set` injects `flow: "legacy"` into every stored value
+(`.get`/`.clear` pass through). So every session a legacy skill opens is **self-identifying**, and its
+untagged continuation routes back to the legacy flow via the stamp above. The `@mary` flow keeps the
+raw `sessions` store (its markers and any `.skill` session carry **no** flow stamp). `NEW_FLOW.sessions
+=== sessions`, so the `@mary` `ctx.sessions` is byte-unchanged.
+
+**The isolation is structural.** Each flow's `assistant_settings` mutates a **separate** tag list
+(`@mary`→`NEW_TAGS`/`setNewTags`; legacy→`TAGS`/`setTags`) persisted to a **separate** settings key
+(`secretary:settings:new:tags` vs `secretary:settings:tags`). `ctx` is built **per flow** —
+`tags`/`catalog`/`settings`/`sessions` all point at the active flow's own state. So a tag change (or
+any bug) in one path is **incapable** of altering what the other answers to. The two flows share only
+the invariant rails (Evolution I/O, `sessions`, `format`, the wrapped Anthropic client, `logbuffer`,
+`selflearning`).
+
+**Boot** loads each tag list over its own seed independently: `settings.loadTags()` → `setTags`
+(legacy), `newSettings.loadTags()` → `setNewTags` (new). The boot log prints both (`tags:` and
+`new-tags:`) with each one's source (stored setting vs env seed).
 
 ### Self-learning — the orchestrator's failure capture
 `installLogBuffer()` (`lib/logbuffer.js`) runs **first**, above everything that logs: it wraps
@@ -461,13 +521,34 @@ await ctx.sessions.clear(remoteJid);
 `get / set / clear`. A fresh `@secretary` command clears any stale session first (starting over
 always wins). Skills that never call `ctx.sessions.set` behave statelessly, exactly as before.
 
-### Composing skills — the model chains them
-Skills never import or call each other; there is no in-code skill-to-skill registry. Each skill is a
-**pure task** that runs, sends one outcome message, and returns. Composition happens in the **turn
-loop**: the model can name more than one skill for a single `execute` batch, and a converted skill's
-**read-back** (its return value, shown back to the model on the next turn) lets the model decide a
-follow-up `execute`. So a job that needs two skills is chained by the model across turns — not by one
-skill reaching into another.
+### Composing skills — two mechanisms, one per flow
+The two flows compose skills differently:
+
+- **`@mary` — the model chains them.** Converted skills never import or call each other. Each is a
+  **pure task** that runs, sends one outcome message, and returns. Composition happens in the **turn
+  loop**: the model can name more than one skill for a single `execute` batch, and a converted skill's
+  **read-back** (its return value, shown back on the next turn) lets the model decide a follow-up
+  `execute`. A job that needs two skills is chained by the model across turns.
+
+- **`@assistant` — the capability registry.** The frozen `2. Skills/` tree composes in code:
+  `loadSkills()` collects each skill's optional `capabilities` export into `CAPS = { [id]: { [name]:
+  fn } }`, and the orchestrator injects two helpers into every `ctx`:
+  ```js
+  ctx.hasSkill = (id, name) => typeof CAPS[id]?.[name] === "function";
+  ctx.callSkill = async (id, name, ...args) => {          // auto-injects THIS ctx
+    const fn = CAPS[id]?.[name];
+    if (!fn) throw new Error(`capability ${id}.${name} unavailable`);
+    const depth = (ctx._skillDepth || 0) + 1;             // loop guard (MAX_SKILL_DEPTH = 4)
+    if (depth > MAX_SKILL_DEPTH) throw new Error(`skill-call depth exceeded at ${id}.${name}`);
+    return fn({ ...ctx, _skillDepth: depth }, ...args);
+  };
+  ```
+  The callee receives the caller's `ctx` (shared `owner`/`lang`/`sessions`/`send`), so a session it
+  opens is tagged with the **callee's** `skill` id and its continuations route back to the callee.
+  `capabilities` are **not** in the router catalog — they're internal, addressed by skill id. Example:
+  `task_action` turns a to-do assigned to another person into a calendar invite by calling
+  `calendar_action.startCreate`. These helpers are present on every `ctx` but inert on the `@mary`
+  path — no converted skill calls them (the `@mary` tree exports no capabilities).
 
 ### External touchpoints, timeouts, completion
 - **Evolution:** `fetchHistory` (context) and `sendText` (replies) per handled message.

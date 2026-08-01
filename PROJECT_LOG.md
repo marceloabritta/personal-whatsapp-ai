@@ -60,12 +60,15 @@ re-enable). The seven skill directories:
   confirmed list is **persisted** (Redis, no TTL) and **wins over `SECRETARY_TAG_NEW`**, which is now
   only the seed. See `secretary/3. Mary Skills/7. Assistant Settings/SKILL.md`.
 
-**One skill tree, summoned by `@mary`** (see §2 and `ARCHITECTURE.md`). The seven skills live under
-`secretary/3. Mary Skills/` and are **pure tasks**: the orchestrator model runs every conversation
-and each skill only validates its declared `inputs`, acts, and returns a value the orchestrator
-reads back (calendar/tasks/flights use a READ-then-ACT contract). The model chains skills itself —
-there is no cross-skill `startCreate`/`callSkill` coupling. The tree is discovered at boot from
-`3. Mary Skills/*/skill.js`. See each `3. Mary Skills/<N>/SKILL.md`.
+**Two skill trees, one per flow** (see §2 and `ARCHITECTURE.md`). The **primary `@mary` tree**
+(`secretary/3. Mary Skills/`) holds the seven skills as **pure tasks**: the orchestrator model runs
+every conversation and each skill only validates its declared `inputs`, acts, and returns a value the
+orchestrator reads back (calendar/tasks/flights use a READ-then-ACT contract); the model chains skills
+itself — no cross-skill `startCreate`/`callSkill` coupling. Beside it, the **frozen `@assistant` tree**
+(`secretary/2. Skills/`, restored 2026-08-01) holds the same seven skills as they were at retirement —
+each drives its own propose/confirm dialogue and may export `capabilities` for the in-code
+`ctx.callSkill` registry. Each tree is discovered at boot from its own `*/skill.js`. See each
+`<N>/SKILL.md`.
 
 ---
 
@@ -76,9 +79,11 @@ there is no cross-skill `startCreate`/`callSkill` coupling. The tree is discover
   (commit `3ce1e69` / `c01d817`) if ever needed.
 - **GitHub:** repo `personal-whatsapp-ai` is **PRIVATE**. This local folder is a working
   **git clone** tracking `origin/main` (`gh` provides auth).
-- **Production (the droplet): ✅ v2.0 is DEPLOYED and LIVE** (cut over 2026-07-10). Trigger
-  now **`@mary`** (`SECRETARY_TAG_NEW=@mary`; the legacy `@brain`/`@assistant` tags are retired and
-  silently ignored) and instance kept as **`secretaria`**
+- **Production (the droplet): ✅ v2.0 is DEPLOYED and LIVE** (cut over 2026-07-10). Primary trigger
+  **`@mary`** (`SECRETARY_TAG_NEW=@mary`); the **`@assistant`/`@assistente`** legacy flow is restored
+  side-by-side (`SECRETARY_TAG`, default `@assistente,@assistant`) as a frozen fallback (2026-08-01,
+  §10 — not yet deployed at time of writing; the older `@brain` tag stays retired). Instance kept as
+  **`secretaria`**
   (`EVOLUTION_INSTANCE=secretaria`) so WhatsApp stayed linked. Old
   v3.3 code backed up at `/opt/brain_v3.3_backup`; compose backup at
   `/opt/evolution/docker-compose.yml.v3.3.bak`.
@@ -87,16 +92,23 @@ there is no cross-skill `startCreate`/`callSkill` coupling. The tree is discover
   `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
   (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
 
-- **Single always-@mary flow (2026-07-28; overhauled 2026-07-31, card 327be40b).** `@mary` (env
+- **Two flows in parallel (@mary primary + @assistant frozen fallback) (2026-07-28; @mary
+  overhauled 2026-07-31 card 327be40b; @assistant restored 2026-08-01 card a45d87a5).** `@mary` (env
   `SECRETARY_TAG_NEW`, default `@mary`) summons the orchestrator turn loop. Each turn is now ONE unified
   `messages.create` carrying `output_config` (the three-decision envelope `{say, keepListening, execute}`)
   + the native toolset + adaptive thinking; an `execute` triggers a second, per-task, schema-locked
   `extract()` call (repair re-extracts on a validation failure), then dispatches. The conversation is
   stateful (a `state` object on the marker), the continuation gate is open to ANY sender while the marker
   is open (no `awaitFrom`), and a clean task-completion close sends a mandatory sign-off. The catalog is
-  FIVE routable tasks (audio + flight dormant). Skills live only under `secretary/3. Mary Skills/` (pure
-  tasks — the orchestrator holds every conversation; calendar/tasks are READ-then-ACT). There is no
-  @assistant flow, no OLD/NEW split, no separate answer pass.
+  FIVE routable tasks (audio + flight dormant). Its skills live under `secretary/3. Mary Skills/` (pure
+  tasks — the orchestrator holds every conversation; calendar/tasks are READ-then-ACT). Beside it,
+  `@assistant`/`@assistente` (env `SECRETARY_TAG`, default `@assistente,@assistant`) runs the
+  **restored frozen legacy flow** (`runLegacyFlow` + `secretary/1. Orchestrator/legacy/` +
+  `secretary/2. Skills/`) — route→dispatch, byte-for-byte its retirement behaviour, as a stable
+  fallback. The two flows are strictly isolated (separate router, tag list, settings key, skill tree,
+  session flow stamp) — a change or bug in one cannot alter the other. Flow selection: `useNewFlowFor`
+  routes untagged continuations by the `flow:"legacy"` session stamp, defaulting to `@mary`. (This
+  restored what the 2026-07-28 retirement removed — see §10.)
 
 **What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
 Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
@@ -197,9 +209,11 @@ ssh secretaria-droplet 'docker logs --tail 50 secretary'   # expect "Secretary v
 │   ├── improvements/      #   runtime failure-report spool (pulled to Bugs and Malfunctions/)
 │   ├── specs/             #   runtime feature-spec spool (pulled to New Features Plans/)
 │   ├── 1. Orchestrator/
-│   │   ├── server.js      #   webhook, start/continue gate, context, dispatch
+│   │   ├── server.js      #   webhook, start/continue gate, context, dispatch (@mary loop + runLegacyFlow)
 │   │   ├── lib/{whatsapp,evolution,sessions}.js  # sessions.js = Redis session store
+│   │   ├── legacy/        #   FROZEN @assistant flow (router/prompt/inputs + assistant-settings)
 │   │   └── router/{prompt,router}.js
+│   ├── 2. Skills/         # @assistant's FROZEN tree (each skill drives its own dialogue; may export capabilities)
 │   └── 3. Mary Skills/    # pure-task tree (manifest.conversation:"orchestrator" + declared inputs)
 │       ├── 1. Calendar Actions/{skill,prompt}.js   # create + edit + cancel/delete + list (READ-then-ACT)
 │       ├── 2. Audio transcriptions/{skill,prompt}.js
@@ -512,6 +526,38 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-08-01 — Restored the @assistant/@assistente flow, frozen at retirement, side-by-side with
+  @mary (card a45d87a5-restore-the-assistant-flow).** Reverses the 2026-07-28 retirement below
+  *additively*: brings the legacy flow back as a strictly-isolated fallback while keeping every
+  post-retirement @mary improvement (native-tools answer pass, media relay, lang pinning,
+  self-learning). **Mechanic:** `git checkout 5729e61^ --` restored the two deleted trees verbatim —
+  `secretary/1. Orchestrator/legacy/` (5 files: frozen router/prompt/inputs + propose/confirm
+  `assistant-settings`) and `secretary/2. Skills/` (21 files, 7 skills) — plus hand-reconciled
+  additive edits to `lib/identity.js` (re-added `TAGS`/`seed`/`setTags`/`matchedTag`; **new**
+  `useNewFlowFor`) and `server.js` (legacy imports, `SKILLS_DIR`, `loadSkills` `caps`, legacy
+  `settings`, the `legacySessions` flow-stamp wrapper, `MAX_SKILL_DEPTH`, legacy discovery +
+  `LEGACY_SKILLS`/`LEGACY_CATALOG`/`LEGACY_FLOW`, `ctx.callSkill`/`ctx.hasSkill`, `runLegacyFlow`, the
+  legacy boot tag-load). **The dual-tag gate reconcile is genuinely NON-additive** (the three edits:
+  the gate `legacyTag`/`newTag`/`taggedNew`, flow selection, the per-flow `order` ternary) —
+  authorized in PLAN.md on the strength of the A5 blast-radius proof. **The A5 correctness crux:** the
+  pre-retirement discriminator `useNewFlow = isTagged ? taggedNew : !session?.skill` was **not**
+  restored verbatim — at HEAD a @mary-dispatched skill may legitimately own the session key with a
+  `.skill` field, so `!session.skill` would misroute an untagged @mary continuation into the legacy
+  flow (a strict-isolation break). Instead: legacy sessions are positively stamped `flow:"legacy"` (the
+  `legacySessions` wrapper) and `useNewFlowFor(session, isTagged, taggedNew)` routes untagged
+  continuations by that stamp, defaulting to @mary — so no @mary conversation can ever select
+  `LEGACY_FLOW`. (Note: the untagged-continuation gate itself now opens on the orchestrator marker
+  (`session?.open`) with no `awaitFrom`, per the 2026-07-31 overhaul; the legacy flow rides on top of
+  that gate via the flow stamp.) The two flows stay strictly isolated: separate router, tag list
+  (`NEW_TAGS` vs `TAGS`), settings key (`secretary:settings:new:tags` vs `secretary:settings:tags`),
+  skill tree, and session store view. Re-added `SECRETARY_TAG=@assistente,@assistant` to
+  `secretary/.env.example`. **Tests:** replaced `scripts/retire-assistant-selftest.mjs` (its assertions
+  were this card's inverse) with `scripts/assistant-restore-selftest.mjs` (offline; Part A unit-tests
+  `useNewFlowFor` incl. the A5 case that can't be driven end-to-end; Part B drives the real server for
+  routing/isolation). Docs: ARCHITECTURE.md, README.md, secretary/README.md, ORCHESTRATOR.md (incl.
+  newly documenting `useNewFlowFor` + `legacySessions` + why `!session?.skill` was replaced), and
+  §1/§2 above. **A1–A5 scope assumptions and the non-additive-gate governance were gated to the human
+  at the Plan-Ready gate.**
 - **2026-08-01 — fix(orchestrator): server-side floor so a directly-tagged @mary order never exits
   silently (card b133fd86).** The unified per-turn call could return a deliberate-silence envelope
   (`say:null, execute:[]`) for a directly-tagged owner question, and `server.js`'s LISTEN/CLOSE

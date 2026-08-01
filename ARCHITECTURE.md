@@ -20,14 +20,48 @@ Only `8080` is published to the internet.
 ## Flow
 
 ```
-webhook  ->  filter (start on fromMe + matchedTagNew, or continue an active session)  ->  build context  ->  ROUTER  ->  SKILL(s)
+webhook  ->  filter (start on fromMe + a trigger tag, or continue an active session)  ->  select flow  ->  build context  ->  ROUTER  ->  SKILL(s)
 ```
+
+### Two flows in parallel, selected by summon tag (dual-tag run)
+
+The secretary runs **two** flows in one process, chosen by the trigger tag on each message, branched
+as early as possible in the webhook handler:
+
+```
+                                  ┌─ tag ∈ SECRETARY_TAG_NEW  (@mary)      ─→ PRIMARY flow: the orchestrator TURN LOOP (below)
+webhook → filter → build context ─┤
+                                  └─ tag ∈ SECRETARY_TAG      (@assistant) ─→ LEGACY flow: route → dispatch (frozen, linear)
+```
+
+- **`@mary` — the primary flow.** The model **holds the conversation** and drives the turn loop
+  (below); the actively-developed flow (native tools, media relay, read-back).
+- **`@assistant`/`@assistente` — the frozen legacy flow.** The linear `route → dispatch`, run on
+  **frozen copies** of the pre-retirement code under `secretary/1. Orchestrator/legacy/` (its own
+  router, prompt, input-contract and the self-driven propose/confirm `assistant_settings`) plus the
+  frozen `secretary/2. Skills/` tree. It is byte-for-byte the behaviour the flow had at retirement,
+  restored as a stable fallback beside `@mary`.
+
+**The branch — `useNewFlowFor(session, isTagged, taggedNew)` (`lib/identity.js`).** A tagged message
+obeys its tag; an **untagged continuation** is routed by an EXPLICIT session flow stamp — a legacy
+skill session is stamped `flow:"legacy"` (the `legacySessions` wrapper in `server.js`), everything
+else defaults to `@mary`. This positive stamp replaced the pre-retirement `!session?.skill`, which
+would misroute an untagged `@mary` continuation carrying a `.skill` field into the legacy flow. See
+`ORCHESTRATOR.md` → "Dual-tag parallel run".
+
+**The isolation is structural.** The two flows share only the invariant rails (message I/O,
+`sessions`, formatting, the wrapped Anthropic client, self-learning). They do **not** share the
+router, the input contract, `assistant_settings`, or the skill tree. Each flow's tag list is
+separate — `@mary`'s `NEW_TAGS`/`setNewTags` persisted at `secretary:settings:new:tags`, legacy's
+`TAGS`/`setTags` at `secretary:settings:tags` — so a change (or a bug) in one path **cannot** alter
+what the other answers to.
 
 ### The turn loop (the model holds the conversation)
 
-There is **one** flow. A message summoned by the `@mary` tag (`SECRETARY_TAG_NEW`) runs the
-orchestrator's **turn loop**: the model **holds the conversation** and, on each turn, makes ONE
-three-part decision, and the orchestrator holds a marker between messages.
+The `@mary` flow (summoned by the `@mary` tag, `SECRETARY_TAG_NEW`) runs the orchestrator's
+**turn loop**: the model **holds the conversation** and, on each turn, makes ONE three-part
+decision, and the orchestrator holds a marker between messages. (The frozen `@assistant`/`@assistente`
+flow runs beside it — see the dual-tag section above.)
 
 ```
 message → route(ctx, turn) → { say, keepListening, execute, lang, pendingNeed, degraded }
@@ -88,16 +122,20 @@ caps), builds `ctx.media = { blocks, model: VISION_MODEL }`, and `route()`'s tur
 present and the turn is not a read-back — otherwise the call is the byte-identical text-only
 string. `ctx.media` is the one additive `ctx` field and is `null` on every text-only turn.
 
-**Skills are pure tasks.** Skill discovery runs once at boot: `loadSkills(dir = NEW_SKILLS_DIR)`
-discovers `secretary/3. Mary Skills/` → `NEW_SKILLS`/`NEW_CATALOG` (the turn loop reads these).
-Every skill under that tree is a **pure task** (see "Adding a skill" and the per-skill `SKILL.md`s):
-the orchestrator model runs the whole dialogue, and each `run(ctx)` only validates its declared
-`inputs`, acts, and **returns** a value. `calendar_action` and `task_action` use a
-**READ-then-ACT** contract — a `find`/`list` READ returns id-bearing candidates the model
-reads back, and a later ACT targets one by id (which is why calendar/tasks need no in-skill session).
-The model **chains skills itself** across turns; a skill never invokes another. The trigger tag list
-(`NEW_TAGS`, mutated by `setNewTags`) is durable in `secretary:settings:new:tags`, which wins over
-the `SECRETARY_TAG_NEW` seed at boot.
+**`@mary` skills are pure tasks.** Skill discovery is **per-flow**: `loadSkills(dir)` is parametrized
+and `server.js` calls it twice at boot — `loadSkills(NEW_SKILLS_DIR)` → `NEW_SKILLS`/`NEW_CATALOG`
+for `@mary` (the turn loop reads these), and `loadSkills(SKILLS_DIR)` → `SKILLS`/`CATALOG`/`CAPS` for
+the frozen `@assistant` tree (`2. Skills/`). **`CAPS` is discovered only on the legacy tree** — the
+caps-based Tasks→Calendar `startCreate` delegation is legacy-only, and the `@mary` tree exports no
+capabilities. Every skill under `secretary/3. Mary Skills/` is a **pure task** (see "Adding a skill"
+and the per-skill `SKILL.md`s): the orchestrator model runs the whole dialogue, and each `run(ctx)`
+only validates its declared `inputs`, acts, and **returns** a value. `calendar_action`, `task_action`
+and `flight_search` use a **READ-then-ACT** contract — a `find`/`list`/`search` READ returns
+id-bearing candidates the model reads back, and a later ACT targets one by id (which is why
+calendar/tasks need no in-skill session). In the `@mary` flow the model **chains skills itself**
+across turns; a skill never invokes another (the legacy flow uses the capability registry instead —
+see "Chaining skills" below). The trigger tag list (`NEW_TAGS`, mutated by `setNewTags`) is durable
+in `secretary:settings:new:tags`, which wins over the `SECRETARY_TAG_NEW` seed at boot.
 
 ### 1. Evolution → secretary (incoming webhook)
 
@@ -249,8 +287,10 @@ DELETE https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{taskId}     (
 ```
 `due` is **date-only** (stored at UTC midnight). A to-do for **yourself** lands here; a
 to-do assigned to **someone else** has no private-list equivalent (Tasks emails no one),
-so a to-do for someone else is **not** a task op — the model **chains** a `calendar_action` create
-(step 5) instead: a 5-min invite that notifies them by email.
+so a to-do for someone else becomes a `calendar_action` create (step 5) instead: a 5-min invite
+that notifies them by email. In the `@mary` flow the **model chains** that create across turns; in
+the frozen `@assistant` flow `task_action` **delegates** to `calendar_action.startCreate` via the
+capability registry (see "Chaining skills" below).
 
 ### 5c. skill → Google People / Contacts (look up & save a guest email) — calendar_action
 
@@ -387,20 +427,25 @@ reply language, which follows `ctx.lang`), `FLIGHT_CURRENCY` (optional, default 
 `flight_search` — the currency asked of Kiwi. **There is no flight-provider API key**: the Kiwi
 endpoint is keyless), `OWNER_NAME`, `REDIS_URL` (session store **and** the durable settings
 store; defaults to `redis://evolution_redis:6379`). Injected by compose: `EVOLUTION_URL`,
-`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, and `SECRETARY_TAG_NEW` (the trigger tags —
+`EVOLUTION_APIKEY`, `EVOLUTION_INSTANCE`, `SECRETARY_TAG_NEW` (the `@mary`-flow trigger tags —
 **comma-separated**, default `@mary`; a message starting with one of these runs the orchestrator
-turn loop. Its own stored list wins over the seed at `secretary:settings:new:tags`).
+turn loop. Its own stored list wins over the seed at `secretary:settings:new:tags`), and
+`SECRETARY_TAG` (the **legacy `@assistant`-flow** trigger tags — comma-separated, default
+`@assistente,@assistant`; a message with one of these runs the frozen `runLegacyFlow`. Its own
+stored list wins over the seed at `secretary:settings:tags`, independently of `SECRETARY_TAG_NEW`).
 
-`SECRETARY_TAG_NEW` is the **SEED, not the last word**. The owner can change the tags by asking
-her (`assistant_settings`); the confirmed list is stored in Redis under
-`secretary:settings:new:tags` (**no TTL**, `lib/settings.js`) and **wins over the env var at boot**
-— `server.js` awaits the store's `ready` before reading it (an un-awaited read would race the
-Redis connect and silently fall back to the seed) and logs which source won. **A restart does
-not revert a changed tag**; the store outlives it. The recovery path — a tag the owner cannot
-type, or has forgotten — is to clear the key and restart, which falls back to the seed:
+Each of `SECRETARY_TAG_NEW`/`SECRETARY_TAG` is the **SEED, not the last word**. The owner can change
+either flow's tags by asking her (`assistant_settings`); the confirmed list is stored in Redis under
+that flow's own key (`secretary:settings:new:tags` for `@mary`, `secretary:settings:tags` for
+`@assistant` — both **no TTL**, `lib/settings.js`) and **wins over the env var at boot** —
+`server.js` awaits each store's `ready` before reading it (an un-awaited read would race the Redis
+connect and silently fall back to the seed) and logs which source won for each. **A restart does not
+revert a changed tag**; the store outlives it. The recovery path — a tag the owner cannot type, or
+has forgotten — is to clear that flow's key and restart, which falls back to the seed:
 
 ```bash
-docker exec evolution_redis redis-cli DEL secretary:settings:new:tags
+docker exec evolution_redis redis-cli DEL secretary:settings:new:tags   # @mary flow
+docker exec evolution_redis redis-cli DEL secretary:settings:tags       # @assistant flow
 ```
 
 **Evolution (`/opt/evolution/.env`)** — `AUTHENTICATION_API_KEY`, `POSTGRES_PASSWORD`,
@@ -408,11 +453,14 @@ docker exec evolution_redis redis-cli DEL secretary:settings:new:tags
 
 ## Adding a skill
 
-Skills live under one tree: `secretary/3. Mary Skills/`. Discovery is `server.js` running
-`loadSkills(NEW_SKILLS_DIR)` once at boot, so a skill folder is picked up simply by sitting in that
-tree. **No `server.js` or router edit is needed to add a skill; it is a drop-in.**
+There are **two skill trees**, one per flow (see "Two flows in parallel", above): `secretary/3. Mary
+Skills/` for `@mary` and `secretary/2. Skills/` for the frozen `@assistant` flow. Discovery is
+per-flow — `server.js` runs `loadSkills(dir)` on each at boot — so a skill folder is picked up by
+whichever flow's tree it sits in. **No `server.js` or router edit is needed to add a skill; it is a
+drop-in into the right tree.** New skills target the `@mary` tree — the `2. Skills/` tree is **frozen**
+at its retirement state (a stable fallback), so leave it alone.
 
-**A skill is a PURE TASK** — `secretary/3. Mary Skills/<Your Skill>/skill.js`:
+**A converted `@mary` skill is a PURE TASK** — `secretary/3. Mary Skills/<Your Skill>/skill.js`:
 ```js
 export const manifest = {
   id: "unique_id",
@@ -499,7 +547,7 @@ still live in the others. Reach for them before writing your own:
 | `inputs.js` | `describeInputs`, `checkPayload`, `describeProblems`, `buildExecuteSchema` | The **declared-inputs contract**. `describeInputs(catalog)` renders each skill's declaration as prompt text; `buildExecuteSchema(spec)` derives the extraction call's `output_config` schema **shape-only** from the declaration (never naming a skill); `checkPayload(inputs, info)` is the **plain-code, no-AI** gate — `{ shapeOk, ok, problems }`; `describeProblems` renders its failures for a repair re-extraction. It knows about *declarations*, never about skills. You almost never call these directly: declare `manifest.inputs` and read `ctx.info`. |
 | `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
-| `identity.js` | `NEW_TAGS`, `headerFor(lang)`, `isOwnMessage`, `matchedTagNew` | The trigger tags and the reply header. |
+| `identity.js` | `NEW_TAGS`/`matchedTagNew`/`setNewTags` (`@mary`), `TAGS`/`matchedTag`/`setTags` (legacy `@assistant`), `useNewFlowFor`, `headerFor(lang)`, `isOwnMessage` | The two flows' trigger tags + the reply header. `useNewFlowFor(session, isTagged, taggedNew)` is the flow discriminator (untagged continuations route by the `flow:"legacy"` session stamp, defaulting to `@mary`). |
 | `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript`, `HISTORY_WINDOW` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only; audio is omitted — it is handled by system-side transcription). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image → an image block, document (pdf) → a document block, everything else → `null` (defer). `HISTORY_WINDOW` (=30) is `combine`'s default window, named so the router preamble can interpolate the real N. `media_type` comes from the real mime, never trusted from a default. |
 | `transcribe.js` | `transcribeAudio(env, buffer, lang)` | **System-side audio transcription** (AssemblyAI), lifted out of the audio skill so the orchestrator never imports a skill. The model can't ingest audio, so `server.js` MEDIA PREP transcribes a quoted audio and folds the text into the turn prompt on `ctx.audioTranscript`. Reads `ASSEMBLYAI_API_KEY`/`ASSEMBLYAI_LANGUAGE`. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
@@ -507,20 +555,32 @@ still live in the others. Reach for them before writing your own:
 | `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
 | `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |
 
-Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`)
-arrives on **`ctx`** — see `server.js`. If you find yourself editing the orchestrator to add a
-skill, that's the signal `ctx` or this lib is missing something: fix it **once**, here, rather
-than reaching around it.
+Everything else a skill needs (`send`, `lang`, `sessions`, `anthropic`, `evolution`, `env`, and —
+for the frozen `@assistant` tree only — `hasSkill`/`callSkill`) arrives on **`ctx`** — see
+`server.js`. If you find yourself editing the orchestrator to add a skill, that's the signal `ctx` or
+this lib is missing something: fix it **once**, here, rather than reaching around it.
 
-### Chaining skills (the model does it)
+### Chaining skills — two mechanisms, one per flow
 
-Skills never import or invoke each other. When a request needs more than one skill — a to-do for
-someone else that must go out as a calendar invite, a search whose result feeds a later action —
-the **model chains them itself** across the turn loop: it dispatches one skill, reads back the
-value that skill returns, and dispatches the next. There is no skill-to-skill API, no capability
-registry, and no `capabilities` export. E.g. a "task for Ana" is routed by the model to
-`calendar_action` (not `task_action`), which opens the confirm-first create; Ana's email or your
-`yes` continues that same conversation on the next turn.
+The two flows compose skills differently:
+
+- **`@mary` — the model chains them.** Converted skills never import or invoke each other. When a
+  request needs more than one skill — a to-do for someone else that must go out as a calendar invite,
+  a search whose result feeds a later action — the **model chains them itself** across the turn loop:
+  it dispatches one skill, reads back the value that skill returns, and dispatches the next. There is
+  no skill-to-skill API in this tree. E.g. a "task for Ana" is routed by the model to
+  `calendar_action` (not `task_action`), which opens the confirm-first create; Ana's email or your
+  `yes` continues that same conversation on the next turn.
+
+- **`@assistant` — the capability registry.** In the frozen `2. Skills/` tree, a skill has **two
+  faces**: the *routable* face (`manifest` + `run`) the router dispatches to, and an optional
+  *internal* face — an exported `capabilities` object — a private **skill-to-skill API** the router
+  never sees. `loadSkills()` collects every legacy skill's `capabilities` into `CAPS`, and the
+  orchestrator injects `ctx.hasSkill(id, name)` / `await ctx.callSkill(id, name, ...args)` (THIS
+  `ctx` auto-injected, `MAX_SKILL_DEPTH` loop guard). Decoupled by id, not path. Today: `task_action`
+  calls `calendar_action.startCreate` for a to-do assigned to someone else. A session the callee
+  opens is tagged with the **callee's** skill id, so its continuations route back to the callee.
+  These helpers are inert on the `@mary` path (the converted tree exports no capabilities).
 
 ### Localization convention (applies to every skill)
 
