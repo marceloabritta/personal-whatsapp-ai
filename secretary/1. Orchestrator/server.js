@@ -47,7 +47,7 @@ import {
   matchedTagNew,
 } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
-import { route, extract } from "./router/router.js";
+import { route, extract, needsTaggedReplyFloor } from "./router/router.js";
 import { renderStateBlock } from "./router/prompt.js";
 import { transcribeAudio } from "./lib/transcribe.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
@@ -244,6 +244,12 @@ const ORCH_MSG = {
   repairGiveUp: {
     en: () => "I couldn't get that right after a couple of tries. Can you tell me again, more simply?",
     pt: () => "Não consegui acertar isso depois de algumas tentativas. Pode me dizer de novo, de forma mais simples?",
+  },
+  // A directly-tagged owner order that the unified turn resolved to silence (say:null, no
+  // execute) — the server-side floor substitutes this so the owner is never left in silence.
+  noReply: {
+    en: () => "Sorry — I didn't catch that. Could you say it again?",
+    pt: () => "Desculpa — não peguei isso. Pode repetir?",
   },
   // Inbound-media plumbing notices (the orchestrator's OWN, like turnCap/dispatchCap — sent via
   // the bare send(), NOT ctx.send; informational, so NOT *Failed/*Error keys). One per distinct
@@ -786,6 +792,10 @@ app.post("/webhook", async (req, res) => {
       // ---- LISTEN: execute empty & keepListening -> reply/ask and stay open ---------------------
       if (!execute.length && reply.keepListening) {
         if (reply.say) await sendSay(reply.say, reply.lang);
+        else if (needsTaggedReplyFloor({ isTagged, turnIndex, hasSay: !!reply.say, executeCount: execute.length })) {
+          console.log("FLOOR -> tagged silent no-op at LISTEN, sending noReply notice");
+          await send(number, orch(ctx.lang, "noReply"), ctx.lang);
+        }
         marker.state.pendingNeed = reply.pendingNeed || null; // what we await, if anything
         await persistMarker();
         return; // wait for his next message
@@ -805,6 +815,10 @@ app.post("/webhook", async (req, res) => {
           return;
         }
         if (reply.say) await sendSay(reply.say, reply.lang);
+        else if (needsTaggedReplyFloor({ isTagged, turnIndex, hasSay: !!reply.say, executeCount: execute.length })) {
+          console.log("FLOOR -> tagged silent no-op at CLOSE, sending noReply notice");
+          await send(number, orch(ctx.lang, "noReply"), ctx.lang);
+        }
         // MANDATORY SIGN-OFF (Unit 2, item 7): system-guaranteed on a CLEAN task-completion close —
         // after any model `say`, before the marker closes, so it cannot be skipped. Fires ONLY when
         // a task actually ran this conversation (state.didWork) and this is not a degraded close. A

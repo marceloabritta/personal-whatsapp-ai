@@ -512,6 +512,17 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-08-01 — fix(orchestrator): server-side floor so a directly-tagged @mary order never exits
+  silently (card b133fd86).** The unified per-turn call could return a deliberate-silence envelope
+  (`say:null, execute:[]`) for a directly-tagged owner question, and `server.js`'s LISTEN/CLOSE
+  branches honoured that silence by sending nothing (reproduced live: `@mary … quanto custa o denza
+  b5 no brasil?` → total silence). New pure, additive predicate `router.js:needsTaggedReplyFloor(
+  {isTagged, turnIndex, hasSay, executeCount})` gates the two silent exits — on a `turnIndex 0`,
+  `isTagged`, no-`say`, no-`execute` turn the server now sends a deterministic bilingual `noReply`
+  notice instead of nothing. Cure of the silent exit; the stochastic model misjudgment that produces
+  the silent envelope is unchanged (follow-up). Additive rails only — no `manifest.description` /
+  `router/prompt.js` change, so no live router check. Offline regression:
+  `scripts/tagged-reply-floor-selftest.mjs`.
 - **2026-07-31 — Overhaul: unified per-turn call + two-phase execute + stateful conversations
   (card 327be40b).** A RAILS re-architecture of the @mary turn loop. **(1) One unified turn call.**
   `route()` is now a SINGLE `messages.create` carrying `output_config: jsonFormat(TURN_DECISION_SCHEMA)`

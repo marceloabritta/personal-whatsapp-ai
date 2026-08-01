@@ -213,6 +213,15 @@ system prompt (only the user message differs). The model reads a **labelled** tr
 - **`execute = []` & `keepListening = false`** — close. A clean task-completion close (`state.didWork`,
   not degraded) sends the mandatory `finishedSignOff` after any `say`, then closes.
 
+**The tagged-reply floor (invariant).** A message the owner **directly tagged `@mary`** always yields
+SOME reply — it must never exit silently. Both `say:null` exits above (LISTEN and CLOSE) consult the
+pure predicate `router.js:needsTaggedReplyFloor({isTagged, turnIndex, hasSay, executeCount})`: on a
+`turnIndex 0`, tagged, no-`say`, no-`execute` turn (the deliberate-silence envelope MISFIRING on a
+direct order) the server sends the deterministic `noReply` notice instead of nothing. Scoped to
+`turnIndex 0` + `isTagged`, so a group-chat/continuation silence (`isTagged=false`) and a post-dispatch
+read-back turn (`turnIndex ≥ 1`) stay silent, unchanged. The degraded turn-0 "I didn't understand" menu
+still returns earlier, so it is never doubled by the floor.
+
 **Extraction (`extract`) + the tier.** For an `execute`, `extract(ctx, {labeledTranscript, primary,
 spec, stateBlock, problems?})` produces the payload with its own `output_config` (no tools). An
 `"orchestrator"` primary is gated on **`ok`** — a failure re-runs `extract()` with `problems` threaded

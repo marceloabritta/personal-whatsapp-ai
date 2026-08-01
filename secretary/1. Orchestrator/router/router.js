@@ -73,6 +73,17 @@ function degradeEnvelope() {
   return { say: null, keepListening: false, execute: [], lang: "en", pendingNeed: null, degraded: true };
 }
 
+// A directly-tagged owner order must never exit the turn loop silently. The unified per-turn
+// call may legally return a deliberate-silence envelope (say:null, execute:[]) — correct for
+// chatter that is not addressed to Mary, but a MISFIRE when the opening message was directly
+// tagged and this is the FIRST decision (turnIndex 0, before any dispatch). Returns true = the
+// caller MUST send a deterministic notice instead of nothing. Scoped to turnIndex 0 so it never
+// interferes with a continuation/group-chat silence (isTagged=false there) or a post-dispatch
+// read-back turn (turnIndex >= 1).
+export function needsTaggedReplyFloor({ isTagged, turnIndex, hasSay, executeCount }) {
+  return !!isTagged && turnIndex === 0 && !hasSay && executeCount === 0;
+}
+
 // Build the create `content`: with media, prepend the file blocks (drop an empty text block, which
 // the Messages API can 400 on); without, the byte-identical user string.
 function withMediaContent(user, mediaBlocks) {
