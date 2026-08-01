@@ -46,8 +46,12 @@ webhook → filter → build context ─┤
 obeys its tag; an **untagged continuation** is routed by an EXPLICIT session flow stamp — a legacy
 skill session is stamped `flow:"legacy"` (the `legacySessions` wrapper in `server.js`), everything
 else defaults to `@mary`. This positive stamp replaced the pre-retirement `!session?.skill`, which
-would misroute an untagged `@mary` continuation carrying a `.skill` field into the legacy flow. See
-`ORCHESTRATOR.md` → "Dual-tag parallel run".
+would misroute an untagged `@mary` continuation carrying a `.skill` field into the legacy flow. The
+same `legacySessions` wrapper also stamps **`open: true`**, so a legacy confirm session satisfies the
+shared `session.open` continuation gate below (which the `@mary` overhaul re-based off the old
+`awaitFrom` who-lock) and can be continued by a bare untagged "yes"; the `flow:"legacy"` stamp still
+decides which flow owns that continuation, so it stays A5-safe. See `ORCHESTRATOR.md` → "Dual-tag
+parallel run".
 
 **The isolation is structural.** The two flows share only the invariant rails (message I/O,
 `sessions`, formatting, the wrapped Anthropic client, self-learning). They do **not** share the

@@ -546,9 +546,16 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   flow (a strict-isolation break). Instead: legacy sessions are positively stamped `flow:"legacy"` (the
   `legacySessions` wrapper) and `useNewFlowFor(session, isTagged, taggedNew)` routes untagged
   continuations by that stamp, defaulting to @mary — so no @mary conversation can ever select
-  `LEGACY_FLOW`. (Note: the untagged-continuation gate itself now opens on the orchestrator marker
-  (`session?.open`) with no `awaitFrom`, per the 2026-07-31 overhaul; the legacy flow rides on top of
-  that gate via the flow stamp.) The two flows stay strictly isolated: separate router, tag list
+  `LEGACY_FLOW`. **Open-gate reconciliation (ship-time, on the rebase onto the 2026-07-31 overhaul):**
+  the overhaul re-based the untagged-continuation gate off the old `awaitFrom` who-lock and onto
+  `session?.open` (set by `persistMarker`). A frozen legacy confirm session carries no `open`, so it
+  could be OPENED but never CONTINUED — an untagged legacy "yes" was dropped at the gate. Fix: the
+  `legacySessions` wrapper now stamps **`open: true`** alongside `flow:"legacy"` on every legacy
+  session, so both flows continue under the one `session.open` gate while the `flow:"legacy"` stamp
+  still decides which flow owns the continuation (A5-safe — `open` only lets a legacy session reach
+  the gate, never changes which flow wins). The selftest's `kindOf` classifier + `@mary` turn fixtures
+  were reconciled to the overhaul's unified per-turn call shape (`output_config` with
+  `keepListening`/`execute`/…) at the same time. The two flows stay strictly isolated: separate router, tag list
   (`NEW_TAGS` vs `TAGS`), settings key (`secretary:settings:new:tags` vs `secretary:settings:tags`),
   skill tree, and session store view. Re-added `SECRETARY_TAG=@assistente,@assistant` to
   `secretary/.env.example`. **Tests:** replaced `scripts/retire-assistant-selftest.mjs` (its assertions

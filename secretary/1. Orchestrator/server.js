@@ -136,15 +136,25 @@ const REDIS_URL =
     ? "redis://evolution_redis:6379"
     : process.env.REDIS_URL;
 const sessions = createSessions({ url: REDIS_URL });
-// LEGACY (@assistant) FLOW-STAMP WRAPPER over the SAME session store. Its `.set` injects
-// flow:"legacy" into every stored value, so a legacy skill session is self-identifying: an
-// untagged continuation is then routed by that explicit stamp (useNewFlowFor), NOT by the absence
-// of a `.skill` field — which at HEAD a @mary-dispatched skill may legitimately own (SCOPE edge
-// case 5). The @mary flow keeps the RAW `sessions` store (no flow stamp). `.get`/`.clear` pass
-// through unchanged; `sessions.set`'s default-ttl applies when `ttl` is undefined (sessions.js:75).
+// LEGACY (@assistant) FLOW-STAMP WRAPPER over the SAME session store. Its `.set` injects TWO
+// fields into every stored value:
+//   - flow:"legacy" — so a legacy skill session is self-identifying: an untagged continuation is
+//     routed by that explicit stamp (useNewFlowFor), NOT by the absence of a `.skill` field —
+//     which at HEAD a @mary-dispatched skill may legitimately own (SCOPE edge case 5).
+//   - open:true — so it SATISFIES the untagged-continuation gate (server.js: `if (session?.open …)`).
+//     The @mary overhaul re-based that gate on `session.open` (set by persistMarker) and dropped the
+//     old awaitFrom who-lock; a legacy confirm session carries no `open` of its own, so without this
+//     stamp an untagged legacy follow-up ("yes") would be dropped at the gate — the legacy flow could
+//     OPEN a confirm but never CONTINUE it. Every legacy `sessions.set` is a confirm/clarify/engaged
+//     window the skill opens BECAUSE it expects a follow-up, so stamping open on all of them is
+//     correct (a legacy skill never writes a non-continuation session on the main key). This is
+//     A5-safe: an open+flow:"legacy" session still routes to LEGACY (flow stamp wins); @mary sessions
+//     use the RAW `sessions` store (no wrapper), so their `open` is still set only by persistMarker.
+// `.get`/`.clear` pass through unchanged; `sessions.set`'s default-ttl applies when `ttl` is
+// undefined (sessions.js:75).
 const legacySessions = {
   get: (jid) => sessions.get(jid),
-  set: (jid, value, ttl) => sessions.set(jid, { ...value, flow: "legacy" }, ttl),
+  set: (jid, value, ttl) => sessions.set(jid, { ...value, flow: "legacy", open: true }, ttl),
   clear: (jid) => sessions.clear(jid),
 };
 // Durable settings on the SAME Redis (no TTL, own key space). Today: the tag list the owner
@@ -525,13 +535,15 @@ app.post("/webhook", async (req, res) => {
     const tag = taggedNew ? newTag : legacyTag;
     const isTagged = !!tag;
 
-    // CONTINUE: while the orchestrator holds an OPEN marker for this chat (session.open — set only
-    // by persistMarker), the NEXT untagged message continues the conversation, from ANY sender. The
-    // who-lock (awaitFrom) is gone: the model decides each turn from the whole visible conversation
-    // whether a message is for it (ASK/PROPOSE, execute) or is chatter to stay silent on. So a guest
-    // the owner is scheduling with can answer inline, and the owner's own follow-up continues too —
-    // both are just the next message on an open marker. Gating on `open` keeps this to
-    // orchestrator-owned conversations (a skill-owned session sets no `open`, so it is untouched).
+    // CONTINUE: while an OPEN session exists for this chat (session.open), the NEXT untagged message
+    // continues the conversation, from ANY sender. `open` is set by the @mary marker (persistMarker)
+    // and, for the restored legacy flow, by the legacySessions wrapper on every legacy confirm/clarify
+    // session — so BOTH flows continue under this one gate, and the flow that owns the session is
+    // picked below by useNewFlowFor (the flow:"legacy" stamp). The who-lock (awaitFrom) is gone: the
+    // model decides each turn from the whole visible conversation whether a message is for it
+    // (ASK/PROPOSE, execute) or is chatter to stay silent on. So a guest the owner is scheduling with
+    // can answer inline, and the owner's own follow-up continues too — both are just the next message
+    // on an open session. A @mary skill session on the RAW store sets no `open`, so it is untouched.
     let isContinuation = false;
     if (session?.open && !isTagged && !isOwnMsg) isContinuation = true;
 
@@ -756,7 +768,8 @@ app.post("/webhook", async (req, res) => {
       await sessions.set(
         remoteJid,
         {
-          open: true, // the continuation gate keys on this (only the orchestrator marker sets it)
+          open: true, // the continuation gate keys on this (the @mary marker sets it here; a legacy
+          //             session gets it from the legacySessions wrapper — both continue under the gate)
           openingLang: pinnedLang, // the immutable opening language (the pin)
           lang: ctx.lang, // keep for backward-compat with any legacy reader; harmless
           turns: marker.turns,

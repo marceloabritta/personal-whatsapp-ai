@@ -113,12 +113,16 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
      only); `newTag = fromMe ? matchedTagNew(gateText) : null`. `taggedNew = !!newTag && !legacyTag`
      (a both-match resolves to LEGACY, so `@assistant` is never starved). `tag = taggedNew ? newTag :
      legacyTag`; `isTagged = !!tag` → a **fresh** command (owner only).
-   - `isContinuation` = the orchestrator marker is **OPEN** (`session?.open`), the message is not
+   - `isContinuation` = the session is **OPEN** (`session?.open`), the message is not
      tagged, and it is not one of the secretary's own messages — **from ANY sender** (card 327be40b).
      The who-lock (`awaitFrom`) is gone: the model decides each turn from the whole visible
      conversation whether a message is for it, so a guest the owner is scheduling with can answer
-     inline. Gating on `open` keeps this to orchestrator-owned conversations (a skill-owned session
-     sets no `open`).
+     inline. **Both flows continue under this one `open` gate:** the `@mary` marker sets `open` (via
+     `persistMarker`), and every legacy confirm/clarify session sets `open` too (via the
+     `legacySessions` wrapper — see "Dual-tag parallel run"), so a legacy `@assistant` confirmation
+     can be continued by a bare untagged "yes". Which flow then owns the continuation is decided by
+     `useNewFlowFor` (the `flow:"legacy"` stamp). A `@mary` skill session on the **raw** `sessions`
+     store sets no `open`, so it is untouched by this gate.
    - If **neither** → `return` (ignored — incl. any message with no open session).
    - **Flow selection:** `useNewFlow = useNewFlowFor(session, isTagged, taggedNew)` (`lib/identity.js`).
      A tagged message obeys `taggedNew`; an **untagged continuation** is routed by an EXPLICIT session
@@ -381,11 +385,22 @@ session flow stamp**: `session?.flow !== "legacy"` → NEW, else LEGACY. Anythin
 > select `LEGACY_FLOW`.
 
 **The `legacySessions` flow-stamp (`server.js`).** The legacy flow's `ctx.sessions` is not the raw
-`sessions` store but a thin wrapper whose `.set` injects `flow: "legacy"` into every stored value
-(`.get`/`.clear` pass through). So every session a legacy skill opens is **self-identifying**, and its
-untagged continuation routes back to the legacy flow via the stamp above. The `@mary` flow keeps the
-raw `sessions` store (its markers and any `.skill` session carry **no** flow stamp). `NEW_FLOW.sessions
-=== sessions`, so the `@mary` `ctx.sessions` is byte-unchanged.
+`sessions` store but a thin wrapper whose `.set` injects **two** fields into every stored value
+(`.get`/`.clear` pass through):
+- `flow: "legacy"` — so every session a legacy skill opens is **self-identifying**, and its untagged
+  continuation routes back to the legacy flow via `useNewFlowFor`.
+- `open: true` — so the legacy session **satisfies the `session?.open` continuation gate** above. The
+  `@mary` overhaul re-based that gate on `open` (set by `persistMarker`) and dropped the old
+  `awaitFrom` who-lock; a frozen legacy confirm session carries no `open` of its own, so without this
+  stamp an untagged legacy follow-up would be **dropped at the gate** — the legacy flow could open a
+  confirm but never continue it. Every legacy `sessions.set` is a confirm/clarify/engaged window the
+  skill opens *because* it expects a follow-up, so stamping `open` on all of them is correct, and it is
+  A5-safe: a legacy session is still `flow:"legacy"`, so `useNewFlowFor` keeps its continuation in the
+  legacy flow — the `open` stamp only lets it reach the gate, never changes which flow wins.
+
+The `@mary` flow keeps the raw `sessions` store (its markers and any `.skill` session carry **no** flow
+stamp; `open` on a `@mary` marker is set only by `persistMarker`). `NEW_FLOW.sessions === sessions`, so
+the `@mary` `ctx.sessions` is byte-unchanged.
 
 **The isolation is structural.** Each flow's `assistant_settings` mutates a **separate** tag list
 (`@mary`→`NEW_TAGS`/`setNewTags`; legacy→`TAGS`/`setTags`) persisted to a **separate** settings key

@@ -144,21 +144,31 @@ let unrecognised = []; // a call kindOf could NOT place -> harness fault
 let CLOCK = 1768307000;
 
 // Identify WHICH call the fake is answering, from the WHOLE request body.
+//
+// TWO turn-call shapes share the "Available tasks:" system prompt and BOTH classify as "turn":
+//   - the NEW (@mary) unified per-turn call — carries output_config: jsonFormat(TURN_DECISION_SCHEMA),
+//     whose schema properties are { say, keepListening, execute, lang, pendingNeed } (the @mary
+//     overhaul, card 327be40b). `keepListening` is its signature key.
+//   - the FROZEN legacy router — carries NO output_config (the format is demanded in the prompt),
+//     so it falls to the no-schema branch and is placed by "Available tasks:".
+// The fake tells the two apart by the SHAPE of the pinned reply it returns, not by the kind.
 function kindOf(body) {
   const schema = body?.output_config?.format?.schema;
-  if (!schema) {
-    const sys = String(body?.system || "");
-    if (/Available tasks:/.test(sys)) return "turn";
-    if (/senior engineer triaging a failure/i.test(sys)) return "selflearn_analyze";
-    throw new Error(
-      `kindOf: a no-output_config call that is neither the turn call nor the ` +
-        `self-learning analyze — system="${sys.slice(0, 70)}…"`
-    );
+  const sys = String(body?.system || "");
+  if (schema) {
+    const keys = Object.keys(schema.properties || {});
+    if (keys.includes("tags") && keys.includes("reasoning")) return "legacy_propose";
+    if (keys.includes("decision")) return "legacy_classify";
+    // The @mary unified per-turn call: output_config locked to the three-decision envelope.
+    if (keys.includes("keepListening")) return "turn";
+    throw new Error(`kindOf: an unexpected output_config call — properties=${JSON.stringify(keys)}`);
   }
-  const keys = Object.keys(schema.properties || {});
-  if (keys.includes("tags") && keys.includes("reasoning")) return "legacy_propose";
-  if (keys.includes("decision")) return "legacy_classify";
-  throw new Error(`kindOf: an unexpected output_config call — properties=${JSON.stringify(keys)}`);
+  if (/Available tasks:/.test(sys)) return "turn"; // the frozen LEGACY router (no output_config)
+  if (/senior engineer triaging a failure/i.test(sys)) return "selflearn_analyze";
+  throw new Error(
+    `kindOf: a no-output_config call that is neither the legacy router nor the ` +
+      `self-learning analyze — system="${sys.slice(0, 70)}…"`
+  );
 }
 
 const JID_OWNER = "5511994224000@s.whatsapp.net";
@@ -353,12 +363,14 @@ async function say(text, { fromMe = true, pushName = "Marcelo" } = {}) {
 }
 
 // ---- fixtures ---------------------------------------------------------------
-// @mary flow: a single pinned three-state TURN reply. `listen` sends the model's `say` and
-// holds the @mary marker — it dispatches no skill (skills:[]), so the @mary controls need no
+// @mary flow: a single pinned per-turn TURN reply, in main's three-decision envelope shape
+// ({ say, keepListening, execute, lang, pendingNeed } — TURN_DECISION_SCHEMA). `listen` sends the
+// model's `say` and HOLDS the @mary marker open (keepListening:true, execute:[]) so an untagged
+// follow-up continues it (B5) — it dispatches no skill (execute:[]), so the @mary controls need no
 // converted skill and no flow stamp (raw sessions store).
 const turnReply = (o) => ({ kind: "turn", json: JSON.stringify({ lang: "en", ...o }) });
-const listen = (say, awaitFrom = "owner") =>
-  turnReply({ say, next: "listen", awaitFrom, skills: [], info: null });
+const listen = (say) =>
+  turnReply({ say, keepListening: true, execute: [], pendingNeed: null });
 
 // LEGACY flow fixtures — consumed only once the flow exists. The frozen router shares the
 // "Available tasks:" system prompt (kind "turn") but returns the OLD { tasks, lang } shape;
@@ -417,7 +429,7 @@ check("B4  …and ZERO @mary turn calls — the legacy session was NOT hijacked 
 // ---- B6 (A5)  @mary still matches after the legacy setTags of B1/B4 ----------
 // If the legacy setTags had leaked into NEW_TAGS, @mary would stop matching and this goes red.
 console.log("--- B6 (A5)  @mary still works after the legacy tag change (arrays isolated) ---");
-scripted = [listen("Sure — what's the meeting?", "owner")];
+scripted = [listen("Sure — what's the meeting?")];
 const b6 = await say("@mary marque uma reunião amanhã 15h");
 console.log(`   -> sends: ${b6.out.length}, turn: ${b6.turn}`);
 check("B6  @mary still ROUTES after a legacy tag write — a turn call fired (NEW_TAGS intact)",
@@ -426,7 +438,7 @@ check("B6  @mary still REPLIED (≥1 send)", b6.out.length >= 1);
 
 // ---- B3  @mary routes and replies (acceptance floor; opens a @mary marker) ---
 console.log("--- B3  @mary routes + replies (opens a marker) ---");
-scripted = [listen("On it — tell me what you need.", "owner")];
+scripted = [listen("On it — tell me what you need.")];
 const b3 = await say("@mary agenda uma call na sexta");
 console.log(`   -> sends: ${b3.out.length}, turn: ${b3.turn}`);
 check("B3  @mary ROUTES — the surviving turn loop fired exactly one turn", b3.turn === 1);
@@ -436,7 +448,7 @@ check("B3  …and it is the model's reply, not an 'I didn't understand' degrade"
 
 // ---- B5 (A5)  untagged @mary follow-up stays in @mary, never legacy ----------
 console.log("--- B5 (A5)  untagged follow-up continues in @mary (zero legacy) ---");
-scripted = [listen("Got it — Friday it is.", "owner")];
+scripted = [listen("Got it — Friday it is.")];
 const b5 = await say("sim, pode ser sexta às 15h");
 console.log(`   -> sends: ${b5.out.length}, turn: ${b5.turn}, propose: ${b5.propose}, classify: ${b5.classify}`);
 check("B5  untagged @mary continuation fired a turn call (continued in @mary)", b5.turn >= 1);
