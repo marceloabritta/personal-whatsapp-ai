@@ -188,12 +188,31 @@ function schemaForField(f) {
     }
     return { type: f.nullable ? ["array", "null"] : "array", items };
   }
-  const base = SCALAR_BASE[f.type] || "string";
-  const out = { type: f.nullable ? [base, "null"] : base };
-  if (f.type === "enum" && Array.isArray(f.enum)) {
-    out.enum = f.nullable ? [...f.enum, null] : [...f.enum];
+  if (f.type === "object") {
+    // A STRUCTURED object declares its subfields in `of` as a {key: fieldspec} map — the SAME
+    // convention an array-of-objects element uses above — and each is rendered by recursing. The
+    // structured-output validator REJECTS a typed object without an explicit
+    // additionalProperties:false, so a bare {type:["object","null"]} 400s; a structured object
+    // with properties + additionalProperties:false is accepted. required lists every subfield
+    // (a null-but-present nullable subfield is fine; an absent one is not). (Card e405206c.)
+    const sub = f.of || {};
+    const properties = {};
+    for (const [k, v] of Object.entries(sub)) properties[k] = schemaForField(v);
+    return {
+      type: f.nullable ? ["object", "null"] : "object",
+      additionalProperties: false,
+      required: Object.keys(sub),
+      properties,
+    };
   }
-  return out;
+  const base = SCALAR_BASE[f.type] || "string";
+  if (f.type === "enum" && Array.isArray(f.enum)) {
+    // A NULLABLE enum must carry null through its VALUES with NO `type` keyword at all: the
+    // structured-output validator rejects a `type` (union OR single scalar) beside an enum whose
+    // values include null. A non-nullable enum keeps its single scalar type. (Card e405206c.)
+    return f.nullable ? { enum: [...f.enum, null] } : { type: base, enum: [...f.enum] };
+  }
+  return { type: f.nullable ? [base, "null"] : base };
 }
 
 // buildExecuteSchema(spec) — the SHAPE-ONLY generator that derives a skill's extraction JSON

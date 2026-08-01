@@ -523,6 +523,25 @@ Reverse-chronological. Append a dated entry whenever the project meaningfully ch
   the silent envelope is unchanged (follow-up). Additive rails only — no `manifest.description` /
   `router/prompt.js` change, so no live router check. Offline regression:
   `scripts/tagged-reply-floor-selftest.mjs`.
+- **2026-08-01 — Fix: calendar extraction schema 400 — nullable enum + structured object (card
+  e405206c, full fix).** The `calendar_action` extraction schema was rejected by the
+  `output_config` structured-output validator with HTTP 400 on **two** independent shapes, so every
+  calendar turn gave up with a content-free apology (no event). Both were single-source generator
+  faults in `schemaForField` (`lib/inputs.js`). **(1) Nullable enum.** It emitted a nullable enum as
+  `{type:[base,"null"], enum:[...,null]}`; the validator rejects a `type` keyword (union OR single
+  scalar) beside an enum whose values include `null`. Fix: a nullable enum now renders as
+  `{ enum:[...,null] }` with **no** `type`; a non-nullable enum keeps `{ type:base, enum:[...] }`.
+  **(2) Structured object.** A `type:"object"` field (calendar `recurrence`) emitted a bare
+  `{type:["object","null"]}`; strict structured-output rejects a typed object without an explicit
+  `additionalProperties:false`. Fix: a new object branch in `schemaForField` emits
+  `{ type, additionalProperties:false, required:[…], properties:{…} }`, declaring subfields via the
+  same `of` {key: fieldspec} convention arrays already use — and `recurrence`'s subfields
+  (`freq` enum discriminator; nullable `interval`/`byday`/`count`/`until`) are now declared in `of`
+  (its prose desc kept). The RRULE handler (`toRRule`) reads the identical `{freq,interval,byday,count,until}`
+  runtime object, so no handler change was needed. Cures the whole nullable-enum and structured-object
+  classes at their single source; scalar/array paths unchanged. Regression:
+  `scripts/nullable-enum-schema-selftest.mjs` (offline assertions a,b,c1–c3,e1–e5 + key-gated
+  whole-schema live guard d).
 - **2026-07-31 — Overhaul: unified per-turn call + two-phase execute + stateful conversations
   (card 327be40b).** A RAILS re-architecture of the @mary turn loop. **(1) One unified turn call.**
   `route()` is now a SINGLE `messages.create` carrying `output_config: jsonFormat(TURN_DECISION_SCHEMA)`

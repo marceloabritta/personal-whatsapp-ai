@@ -100,6 +100,17 @@ export const manifest = {
       recurrence: {
         type: "object",
         nullable: true,
+        // Subfields declared via the object `of` convention (a {key: fieldspec} map, exactly like
+        // an array-of-objects element) so the generator emits a proper structured object. `freq`
+        // is the mandatory non-nullable discriminator; the rest are nullable (null = unset). The
+        // prose desc is kept — it still guides the model on when each applies (count XOR until, etc.).
+        of: {
+          freq: { type: "enum", enum: ["daily", "weekly", "monthly"] },
+          interval: { type: "number", nullable: true },
+          byday: { type: "array", nullable: true, of: { type: "string" } },
+          count: { type: "number", nullable: true },
+          until: { type: "iso", nullable: true },
+        },
         desc: 'the repeat rule for a RECURRING create, else null (one-off — the default). Object {freq: "daily"|"weekly"|"monthly", interval: number|null, byday: ["MO".."SU"]|null (weekly only), count: number|null, until: ISO-8601 -03:00|null}. count XOR until, never both.',
       },
       location: {
