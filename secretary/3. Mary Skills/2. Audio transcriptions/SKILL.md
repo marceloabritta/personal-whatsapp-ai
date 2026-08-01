@@ -1,5 +1,13 @@
 # Skill: `transcribe_audio`
 
+> **⚠ DORMANT (card 327be40b — `manifest.routable:false`).** This skill is NO LONGER routed. Audio is
+> now handled by **system-side transcription**: the orchestrator transcribes a quoted audio via
+> `lib/transcribe.js` and folds the text into the turn prompt as `ctx.audioTranscript`, and the model
+> handles it as ordinary prose (transcribe it back, summarize it, act on it) — no dispatched skill,
+> because the model cannot ingest audio. `loadSkills()` skips this manifest, so the code below is
+> retained but unwired. **To re-enable:** flip `manifest.routable` back to true (and drop the
+> system-side path). The description below is historical.
+
 > **@mary tree — CONVERTED (pure task).** This is the `secretary/3. Mary Skills/` copy.
 > `manifest.conversation:"orchestrator"` and `inputs:null` — the input is a quoted AUDIO, which
 > cannot be declared as text, so it is dispatched via the orchestrator's **`inputs:null` gate**

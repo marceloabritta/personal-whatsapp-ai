@@ -1,5 +1,11 @@
 # Skill: `feature_request`
 
+> **Overhauled by card 327be40b (unified two-phase turn call).** The orchestrator turn is now one
+> unified `route()` returning `{say, keepListening, execute}`; when it runs this task a SECOND
+> `extract()` call produces the declared inputs (schema derived shape-only from `manifest.inputs`).
+> "Ask first" is `keepListening=true` + `pendingNeed`; the who-lock `awaitFrom` is gone (the gate is
+> open to any sender). Any `next`/`awaitFrom` phrasing below is historical.
+
 > **@mary tree — CONVERTED (pure task).** This is the `secretary/3. Mary Skills/` copy. The
 > **orchestrator** runs the open-ended clarifying interview over `listen` turns and hands the
 > finished **brief** in `ctx.info`; this skill holds no session and asks no questions.

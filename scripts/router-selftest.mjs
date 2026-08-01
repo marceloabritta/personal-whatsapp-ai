@@ -24,6 +24,9 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(2);
 }
 
+// Build the catalog EXACTLY as production's loadSkills() does — including SKIPPING a
+// `routable:false` manifest (transcribe_audio, flight_search are dormant after card 327be40b).
+// A catalog that still carried them would test a prompt production never sends.
 const SKILLS_DIR = path.resolve("secretary/3. Mary Skills");
 const catalog = [];
 for (const e of await readdir(SKILLS_DIR, { withFileTypes: true })) {
@@ -31,14 +34,15 @@ for (const e of await readdir(SKILLS_DIR, { withFileTypes: true })) {
   const mod = await import(
     pathToFileURL(path.join(SKILLS_DIR, e.name, "skill.js")).href
   );
-  if (mod.manifest?.id) {
-    // `inputs` too — the router prompt now carries each skill's DECLARED INPUTS and its
-    // extraction rulebook. A catalog without them would build a prompt production never sends,
-    // and this test would be checking the wrong thing (card 9af6967a).
+  if (mod.manifest?.id && mod.manifest.routable !== false) {
+    // `inputs` + `conversation` too — the router prompt carries each skill's DECLARED INPUTS,
+    // its extraction rulebook, and its conversation mode. This mirrors loadSkills() so the prompt
+    // this test builds is byte-identical to production's.
     catalog.push({
       id: mod.manifest.id,
       description: mod.manifest.description || "",
       inputs: mod.manifest.inputs || null,
+      conversation: mod.manifest.conversation === "orchestrator" ? "orchestrator" : "skill",
     });
   }
 }
@@ -60,7 +64,10 @@ const FLIGHT_TRANSCRIPT = `Marcelo: @secretary find me a flight from São Paulo 
 Want the link for one? Say "link for option 2".
 `;
 
-// exact: the tasks must match, in order. contains: the task must be present.
+// Assertions are on the three-decision envelope's `execute` list (route() no longer returns
+// `tasks`). exact: execute must match, in order. contains: the tasks must be present (feedback
+// first). empty: execute must be [] — the model answered NATIVELY (no dispatched skill), which is
+// now how a flight question / a general lookup is handled (flight_search is dormant).
 // Per-case `transcript` overrides the shared calendar one (default below).
 const CASES = [
   { order: "you made a mistake here", exact: ["feedback"] },
@@ -71,19 +78,16 @@ const CASES = [
   { order: "you got the timezone wrong on that event", exact: ["feedback"] },
   // Both: file the defect AND do the fix. feedback must come first.
   { order: "you got the time wrong, move it to 5pm", contains: ["feedback", "calendar_action"] },
-  // Unchanged behaviour — the new skill must not steal ordinary orders.
+  // Unchanged behaviour — a task must not steal ordinary orders.
   { order: "schedule lunch with Ana tomorrow at noon", exact: ["calendar_action"] },
   { order: "I have a feature idea: let me snooze a task", exact: ["feature_request"] },
   { order: "add buy milk to my tasks", exact: ["task_action"] },
-  // flight_search (added with the skill — a new manifest.description changes the
-  // classification problem for EVERY skill, so this file is the only place that proves it).
-  { order: "find me a flight from São Paulo to Lisbon on the 14th", exact: ["flight_search"] },
-  { order: "me acha um voo de Sao Paulo pra Lisboa dia 14", exact: ["flight_search"] },
-  // THE mandated utterance. The router never sees the tag (server.js:271 slices it off), so
-  // the case is the bare string. A misroute to `other` makes server.js:420-428 reply "I didn't
-  // understand" AND file a FALSE self-learning bug ticket — the nastiest risk on the card.
-  { order: "link for option 2", transcript: FLIGHT_TRANSCRIPT, exact: ["flight_search"] },
-  // Regression: the new manifest must NOT steal a to-do that happens to mention a flight.
+  // FLIGHT is now answered NATIVELY (flight_search dormant) — the model runs a web search and
+  // replies in prose, dispatching NO skill. So execute must be EMPTY, never a flight task.
+  { order: "find me a flight from São Paulo to Lisbon on the 14th", empty: true },
+  { order: "me acha um voo de Sao Paulo pra Lisboa dia 14", empty: true },
+  { order: "link for option 2", transcript: FLIGHT_TRANSCRIPT, empty: true },
+  // Regression: a to-do that happens to mention a flight is still a task, not a native answer.
   { order: "add buy flight tickets to my tasks", exact: ["task_action"] },
 ];
 
@@ -98,23 +102,27 @@ for (const c of CASES) {
     hasQuotedAudio: false,
     quoted: null,
     catalog,
+    tags: ["@mary"],
+    env: process.env,
   };
-  let tasks = [];
+  let execute = [];
   try {
-    ({ tasks } = await route(ctx));
+    ({ execute = [] } = await route(ctx));
   } catch (e) {
     console.error(`  ERROR  "${c.order}" -> ${e?.message || e}`);
     failures++;
     continue;
   }
-  const ok = c.exact
-    ? JSON.stringify(tasks) === JSON.stringify(c.exact)
-    : c.contains.every((t) => tasks.includes(t)) &&
-      tasks.indexOf("feedback") === 0; // feedback first — file before you fix
+  const ok = c.empty
+    ? Array.isArray(execute) && execute.length === 0
+    : c.exact
+    ? JSON.stringify(execute) === JSON.stringify(c.exact)
+    : c.contains.every((t) => execute.includes(t)) &&
+      execute.indexOf("feedback") === 0; // feedback first — file before you fix
   if (!ok) failures++;
   console.log(
-    `${ok ? "  ok  " : "  FAIL"}  "${c.order}"\n          -> ${JSON.stringify(tasks)}` +
-      (ok ? "" : `   expected ${JSON.stringify(c.exact || c.contains)}`)
+    `${ok ? "  ok  " : "  FAIL"}  "${c.order}"\n          -> ${JSON.stringify(execute)}` +
+      (ok ? "" : `   expected ${c.empty ? "[] (native answer)" : JSON.stringify(c.exact || c.contains)}`)
   );
 }
 

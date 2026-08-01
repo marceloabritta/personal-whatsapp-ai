@@ -65,6 +65,34 @@ export const manifest = {
         test: (i) => !!i.note && String(i.note).trim() !== "",
       },
     ],
+    // The skill's own extraction RULEBOOK, carried VERBATIM into the turn/extraction call (opaque to
+    // the orchestrator, like every other skill's). It tells the model HOW to restate a complaint into
+    // the four declared fields. Authored to the per-task template (card 327be40b): scope, context,
+    // the certainty rule, defaults, and the field spec.
+    rulebook: () =>
+      `WHEN to pick "feedback": the owner is telling YOU, the secretary, that you did something WRONG — a
+mistake, a false positive, a confidently wrong answer, a thing filed under the wrong date, bad
+behaviour. Past tense, blaming the secretary ("you made a mistake", "that's wrong", "you got the
+time wrong", "você errou"). This is a BUG REPORT about the secretary's OWN past output — it gets
+FILED for investigation, it is NOT a fresh order. It is NOT feature_request (asking to BUILD
+something new) and NOT calendar_action/task_action (a fresh calendar/task order).
+
+CONTEXT: the gold case is a REPLY to the offending message — then the secretary's wrong output is
+quoted verbatim and the report is high-signal. There is nothing to confirm or write to the outside
+world here; filing is safe, so dispatch it directly (do not propose first).
+
+CERTAINTY: only file once you actually understand WHAT he says went wrong — the "note" must not be
+blank. If the complaint is genuinely too vague to restate and nothing is quoted, ASK your one
+clarifying question first (keepListening=true, pendingNeed naming what you need) BEFORE you execute.
+Do not invent a symptom he did not describe.
+
+EXTRACT these fields:
+- note = his complaint restated plainly in English — WHAT he says went wrong. NEVER blank.
+- what_went_wrong = the symptom the secretary actually produced, restated for an engineer; null if
+  unclear.
+- expected = what he says should have happened instead; null if he didn't say.
+- suspected_skill = the skill id most likely responsible (calendar_action, task_action,
+  feature_request, assistant_settings), or null if you can't tell.`,
   },
   description:
     "the owner is telling you that YOU, the secretary, did something WRONG — a mistake, a " +

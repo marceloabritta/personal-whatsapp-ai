@@ -1,5 +1,11 @@
 # Skill: `flight_search`
 
+> **⚠ DORMANT (card 327be40b — `manifest.routable:false`).** This skill is NO LONGER routed. Flight
+> questions are now answered **natively**: the unified turn call runs a live web search inline and
+> replies in prose, dispatching no skill. `loadSkills()` skips this manifest, so the Kiwi code below is
+> retained but unwired. **To re-enable:** flip `manifest.routable` back to true. The description below
+> is historical.
+
 > **@mary tree — CONVERTED (pure task).** This is the `secretary/3. Mary Skills/` copy. The
 > **orchestrator** runs the slot-chase and the confirm-before-search dialogue and hands a validated
 > payload in `ctx.info`; there is **no** in-skill session and **no** LLM pass. But the **options

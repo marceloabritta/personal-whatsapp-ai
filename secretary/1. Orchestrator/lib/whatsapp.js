@@ -243,6 +243,11 @@ export function findCalendarLink(text) {
 // ---------------------------------------------------------------------------
 const buffers = new Map(); // remoteJid -> [{ t, fromMe, text, pushName }]
 
+// How many recent messages the transcript window carries (combine's default). Named so the
+// router preamble can interpolate the real N — the model is told how far back it can see. The
+// value is unchanged (30); this is only lifting the literal to a shared const.
+export const HISTORY_WINDOW = 30;
+
 export function remember(remoteJid, e) {
   if (!e.text) return;
   const arr = buffers.get(remoteJid) || [];
@@ -253,7 +258,7 @@ export function remember(remoteJid, e) {
 
 // Merges history (Evolution) + buffer (memory), dedups by time+text, sorts and
 // returns the last `limit` messages.
-export function combine(remoteJid, hist, limit = 30) {
+export function combine(remoteJid, hist, limit = HISTORY_WINDOW) {
   const buf = buffers.get(remoteJid) || [];
   const all = [...hist, ...buf].filter((m) => m.text);
   const map = new Map();

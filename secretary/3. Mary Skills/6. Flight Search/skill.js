@@ -31,6 +31,10 @@ import { renderOptions, reply } from "./prompt.js";
 // option_number of an option already shown.
 export const manifest = {
   id: "flight_search",
+  // NOT ROUTABLE (card 327be40b): flight questions are answered NATIVELY now — the model runs a live
+  // web search inline on the unified turn call and replies in prose (no dispatched skill). This skill
+  // is left DORMANT on disk (loadSkills skips a routable:false manifest); flip this flag to re-enable it.
+  routable: false,
   // CONVERTED (pure task): the model runs the dialogue and confirms before a search; run() acts.
   conversation: "orchestrator",
   description:

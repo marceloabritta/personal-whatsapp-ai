@@ -118,11 +118,11 @@ console.log("\n=== A. legit chit-chat close is NOT degraded (parseable done) ===
 
 const aReply = {
   stop_reason: "end_turn",
-  content: [{ type: "text", text: '{"next":"done","say":null,"skills":[],"lang":"pt"}' }],
+  content: [{ type: "text", text: '{"keepListening":false,"say":null,"execute":[],"lang":"pt"}' }],
 };
 const A = await drive("A", aReply);
-check('A.1  parseable done -> reply.next === "done"', A.next === "done");
-check("A.2  parseable done -> reply.skills is empty", Array.isArray(A.skills) && A.skills.length === 0);
+check("A.1  parseable close -> reply.keepListening === false", A.keepListening === false);
+check("A.2  parseable close -> reply.execute is empty", Array.isArray(A.execute) && A.execute.length === 0);
 check('A.3  language preserved from the parse -> reply.lang === "pt"', A.lang === "pt");
 check("A.4  a LEGIT close is NOT flagged -> !reply.degraded (the silent-close guard)", !A.degraded);
 
@@ -137,8 +137,8 @@ const bReply = {
   content: [{ type: "text", text: "sorry, I can't help with that" }],
 };
 const B = await drive("B", bReply);
-check('B.1  unparseable -> still degrades to reply.next === "done" (no loop)', B.next === "done");
-check("B.2  unparseable -> reply.skills is empty", Array.isArray(B.skills) && B.skills.length === 0);
+check("B.1  unparseable -> degrades to a CLOSE (keepListening:false, no loop)", B.keepListening === false);
+check("B.2  unparseable -> reply.execute is empty", Array.isArray(B.execute) && B.execute.length === 0);
 check("B.3  unparseable IS the schema-drift alarm -> reply.degraded === true", B.degraded === true);
 
 // ============================================================================
@@ -149,29 +149,29 @@ console.log("\n=== C. model refusal IS degraded (stop_reason:refusal) ===\n");
 
 const cReply = { stop_reason: "refusal", content: [] };
 const C = await drive("C", cReply);
-check('C.1  refusal -> degrades to reply.next === "done"', C.next === "done");
+check("C.1  refusal -> degrades to a CLOSE (keepListening:false)", C.keepListening === false);
 check("C.2  refusal IS the schema-drift alarm -> reply.degraded === true", C.degraded === true);
 
 // ============================================================================
 //  D. An execute naming only an unknown skill is NOT degraded. (green before & after.)
-//  A PARSED reply: {next:"execute", skills:["nope_skill"]} -> "nope_skill" is not in
-//  the valid set, so router.js:177 forces skills -> ["other"]. next stays "execute".
-//  This proves a genuine degrade can NEVER arrive at the execute-empty capture site,
-//  so removing that capture (Edit 2b) is safe.
+//  A PARSED reply: {execute:["nope_skill"]} -> "nope_skill" is not a valid catalog id, so
+//  route() FILTERS it out and returns execute:[] (a parsed reply, degraded:false). server.js
+//  then closes cleanly with no menu/capture. This proves a genuine degrade can never arrive at
+//  the execute-empty close as an alarm.
 // ============================================================================
-console.log("\n=== D. execute-with-only-unknown-skill degrades to [\"other\"], NOT degraded ===\n");
+console.log("\n=== D. execute-with-only-unknown-skill filters to [], NOT degraded ===\n");
 
 const dReply = {
   stop_reason: "end_turn",
-  content: [{ type: "text", text: '{"next":"execute","skills":["nope_skill"],"lang":"pt"}' }],
+  content: [{ type: "text", text: '{"keepListening":true,"execute":["nope_skill"],"lang":"pt"}' }],
 };
 const D = await drive("D", dReply);
-check('D.1  execute preserved -> reply.next === "execute"', D.next === "execute");
+check("D.1  a parsed execute reply is NOT degraded -> !reply.degraded", !D.degraded);
 check(
-  'D.2  empty-skilled execute forced to ["other"] (router.js:177 sink)',
-  Array.isArray(D.skills) && D.skills.length === 1 && D.skills[0] === "other"
+  "D.2  an unknown skill is filtered out -> reply.execute is empty",
+  Array.isArray(D.execute) && D.execute.length === 0
 );
-check("D.3  an execute->other is a PARSED reply, NOT degraded -> !reply.degraded", !D.degraded);
+check("D.3  the reply parsed cleanly -> keepListening carried through (true)", D.keepListening === true);
 
 // ============================================================================
 //  E. server.js wiring guard (source scan — same idiom as selflearning-selftest §9).

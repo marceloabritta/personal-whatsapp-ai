@@ -47,7 +47,9 @@ import {
   matchedTagNew,
 } from "./lib/identity.js";
 import { frame } from "./lib/format.js";
-import { route, answer } from "./router/router.js";
+import { route, extract } from "./router/router.js";
+import { renderStateBlock } from "./router/prompt.js";
+import { transcribeAudio } from "./lib/transcribe.js";
 import { installLogBuffer } from "./lib/logbuffer.js";
 import { captureFailure } from "./lib/selflearning.js";
 import { MAINTAINED_LANGS, resolveTurnLang, shouldForceTranslateSay, translationNeeded } from "./lib/lang.js";
@@ -135,6 +137,14 @@ async function loadSkills(dir = NEW_SKILLS_DIR) {
       const id = mod.manifest?.id;
       if (!id || typeof mod.run !== "function") {
         console.error(`skill '${e.name}' ignored: missing manifest.id or run()`);
+        continue;
+      }
+      // CATALOG TRIM (items 4 + 5): a skill flagged `routable:false` (transcribe_audio, flight_search)
+      // is present on disk but NOT wired into the router catalog or the dispatch map — it is dormant.
+      // A future re-add is a one-line manifest flip. Audio is handled by system-side transcription;
+      // flight questions are answered natively via the turn call's toolset.
+      if (mod.manifest.routable === false) {
+        console.log(`skill "${e.name}" present but not routable -> ${id}`);
         continue;
       }
       skills[id] = mod.run;
@@ -262,19 +272,20 @@ const ORCH_MSG = {
     pt: () =>
       "Fiz a primeira coisa que você pediu, mas só consigo cuidar de uma dessas por vez — me mande a outra parte separadamente que eu resolvo.",
   },
-  // Answer pass (native server-side tools) notices — the orchestrator's OWN, like turnCap/
-  // dispatchCap. Informational (not a skill's *Failed/*Error), so sent via bare send().
-  toolTimeout: {
-    en: () => "That took too long to look up — try asking me again.",
-    pt: () => "Isso demorou demais para pesquisar — pode me perguntar de novo?",
+  // System-side audio transcription notice (item 4). Informational (the model can't ingest audio,
+  // so the system transcribes it; when that fails there is nothing to fold into the turn). Sent via
+  // bare send(), like the file-plumbing notices above.
+  audioFailed: {
+    en: () => "I couldn't transcribe that audio — try sending it again, or type it out.",
+    pt: () => "Não consegui transcrever esse áudio — tente enviar de novo, ou escreva o texto.",
   },
-  toolError: {
-    en: () => "I couldn't look that up right now — try again in a bit.",
-    pt: () => "Não consegui pesquisar isso agora — tente de novo daqui a pouco.",
-  },
-  costCapHit: {
-    en: () => "I've answered a few of those in a row — let's pause. Ask me again fresh.",
-    pt: () => "Já respondi algumas dessas seguidas — vamos pausar. Me pergunte de novo do zero.",
+  // The MANDATORY sign-off (item 7). System-guaranteed on a CLEAN task-completion close — after the
+  // model's own `say`, before the marker closes — so it cannot be skipped. Interpolates the real
+  // trigger tag this conversation used (ctx.tag). NOT sent on error/cap closes, nor on a chatter-
+  // ignore turn (which keepListening:true structurally never reaches a close).
+  finishedSignOff: {
+    en: (tag) => `I have finished this task. Call me ${tag} again if you need further assistance`,
+    pt: (tag) => `Terminei esta tarefa. Me chame com ${tag} de novo se precisar de mais ajuda`,
   },
 };
 
@@ -297,12 +308,54 @@ const MAX_REPAIRS = 2;
 const READBACK_CAP = 8192; // bytes
 const MARKER_TTL = 15 * 60; // seconds — same as the session default
 
-// NATIVE SERVER-SIDE TOOLS (the answer pass). The bundle is built by lib/nativeTools.js off
-// process.env; these are the orchestrator-side ceilings for the answer branch. Locked defaults
-// (card 6c09b8ab): 30s per-pass wall clock, 4 pause_turn resumes, 6 answers per conversation.
-// router.answer() reads the timeout/hop values from ctx.env itself; NATIVE_MAX_ANSWERS is the
-// per-conversation cost ceiling enforced here on the marker.
-const NATIVE_MAX_ANSWERS = Number(process.env.NATIVE_MAX_ANSWERS) || 6;
+// NATIVE SERVER-SIDE TOOLS now ride the UNIFIED turn call (router.route), not a separate answer
+// pass. The bundle is still built by lib/nativeTools.js off process.env, and route() reads its own
+// per-create timeout / pause_turn-hop cap from ctx.env (NATIVE_ANSWER_TIMEOUT_MS / NATIVE_MAX_TOOL_HOPS).
+// There is no per-conversation answer budget any more — MARKER_TTL + MAX_TURNS bound the turn loop.
+
+// CONVERSATION STATE (Unit 2). One `state` object rides the marker (goal + decision log + last
+// extraction payload + pending need + didWork), feeding every turn call via renderStateBlock. Caps:
+// the log keeps the most-recent STATE_LOG_CAP entries; each text field is truncated to STATE_TEXT_CAP.
+const STATE_LOG_CAP = 12;
+const STATE_TEXT_CAP = 240;
+
+// A fresh conversation state, opened on a tagged order. `goal` is the opening order (the intent).
+function freshState(order) {
+  return {
+    goal: (order || "").slice(0, STATE_TEXT_CAP) || null,
+    pendingNeed: null, // model-declared on a keepListening turn
+    payload: null, // last successful extraction for the primary
+    didWork: false, // a task ran this conversation (the sign-off gate)
+    log: [], // decision log, recent-K, newest last
+  };
+}
+
+// Append one PRODUCTIVE turn to the decision log (deliberate-silence turns are NOT logged). An
+// execute entry also carries `fn` (the primary id); its `outcome` is filled once the read-back is
+// prepared (setLastOutcome). Bounded by STATE_LOG_CAP.
+function logTurn(state, { i, keepListening, execute, say }) {
+  if (!state) return;
+  const e = {
+    i,
+    keepListening: !!keepListening,
+    execute: Array.isArray(execute) ? execute : [],
+    say: say ? String(say).slice(0, STATE_TEXT_CAP) : null,
+  };
+  if (e.execute.length) e.fn = e.execute[0];
+  state.log.push(e);
+  while (state.log.length > STATE_LOG_CAP) state.log.shift();
+}
+
+// Attach a dispatch's serialized outcome to the most recent execute log entry.
+function setLastOutcome(state, outcome) {
+  if (!state || !Array.isArray(state.log)) return;
+  for (let i = state.log.length - 1; i >= 0; i--) {
+    if (state.log[i].execute && state.log[i].execute.length) {
+      state.log[i].outcome = String(outcome).slice(0, STATE_TEXT_CAP);
+      return;
+    }
+  }
+}
 
 // SELF-LEARNING: write a failure report, guarded. captureFailure() already promises never
 // to throw; this is the belt to its braces, because a bug in the thing that records bugs
@@ -367,19 +420,15 @@ app.post("/webhook", async (req, res) => {
     const tag = fromMe ? matchedTagNew(gateText) : null;
     const isTagged = !!tag;
 
-    // CONTINUE: while a session is active, the owning skill inspects EVERY message
-    // from the party it waits on (session.awaitFrom) and decides — with the LLM —
-    // whether the message supplies the awaited info. No reply/tag required; normal
-    // chatter is ignored by the skill. awaitFrom: owner (fromMe) | contact (!fromMe)
-    // | any. (The contact case lets the person the owner is scheduling with answer.)
-    const awaitFrom = session?.awaitFrom || "owner";
+    // CONTINUE: while the orchestrator holds an OPEN marker for this chat (session.open — set only
+    // by persistMarker), the NEXT untagged message continues the conversation, from ANY sender. The
+    // who-lock (awaitFrom) is gone: the model decides each turn from the whole visible conversation
+    // whether a message is for it (ASK/PROPOSE, execute) or is chatter to stay silent on. So a guest
+    // the owner is scheduling with can answer inline, and the owner's own follow-up continues too —
+    // both are just the next message on an open marker. Gating on `open` keeps this to
+    // orchestrator-owned conversations (a skill-owned session sets no `open`, so it is untouched).
     let isContinuation = false;
-    if (session && !isTagged && !isOwnMsg) {
-      if (fromMe && (awaitFrom === "owner" || awaitFrom === "any"))
-        isContinuation = true;
-      else if (!fromMe && (awaitFrom === "contact" || awaitFrom === "any"))
-        isContinuation = true;
-    }
+    if (session?.open && !isTagged && !isOwnMsg) isContinuation = true;
 
     // Ignore everything else (incl. non-owner messages with no session for them).
     if (!isTagged && !isContinuation) return;
@@ -546,16 +595,14 @@ app.post("/webhook", async (req, res) => {
     let marker;
     if (isContinuation) {
       marker = {
-        awaitFrom: session.awaitFrom || "owner",
         turns: session.turns || 0,
         dispatches: session.dispatches || 0,
-        // Re-read the answer count on continuation, or NATIVE_MAX_ANSWERS silently degrades from
-        // per-conversation to per-message (an undefined answers restarts the count each inbound).
-        answers: session.answers || 0,
+        // Rehydrate the conversation state (old markers without one fall back to a fresh state).
+        state: session.state || freshState(order),
       };
     } else {
       if (session) await sessions.clear(remoteJid);
-      marker = { awaitFrom: "owner", turns: 0, dispatches: 0, answers: 0 };
+      marker = { turns: 0, dispatches: 0, state: freshState(order) };
     }
 
     // Persist / clear the marker ONLY while the orchestrator still owns the key. Edge case 6, BOTH
@@ -568,13 +615,12 @@ app.post("/webhook", async (req, res) => {
       await sessions.set(
         remoteJid,
         {
-          open: true,
-          awaitFrom: marker.awaitFrom,
-          openingLang: pinnedLang, // NEW — the immutable opening language (the pin)
+          open: true, // the continuation gate keys on this (only the orchestrator marker sets it)
+          openingLang: pinnedLang, // the immutable opening language (the pin)
           lang: ctx.lang, // keep for backward-compat with any legacy reader; harmless
           turns: marker.turns,
           dispatches: marker.dispatches,
-          answers: marker.answers || 0, // per-conversation answer/cost ceiling (NATIVE_MAX_ANSWERS)
+          state: marker.state, // the conversation state (goal + log + payload + pendingNeed + didWork)
         },
         MARKER_TTL
       );
@@ -660,25 +706,41 @@ app.post("/webhook", async (req, res) => {
       if (relayedBlocks.length) ctx.media = { blocks: relayedBlocks, model: VISION_MODEL };
     }
 
+    // ---- AUDIO PREP: system-side transcription (item 4, Blocker 1) ----------------------------
+    // The model cannot ingest audio, so an audio the owner is asking about is transcribed HERE and
+    // folded into the turn prompt as inline text on ctx.audioTranscript (rendered by the prompt
+    // builders under an "AUDIO" label — NOT a media block; audio never reaches mediaBlockFor). The
+    // classic path is a QUOTED audio (a reply to the audio) — ctx.hasQuotedAudio / quoted.id. On a
+    // failure or an empty transcript we send a plain notice and carry on text-only (the model can
+    // then nudge him). ctx.audioTranscript is a NEW, additive field on ctx (a rails change).
+    ctx.audioTranscript = null;
+    if (quoted?.hasAudio && quoted.id) {
+      try {
+        const dl = await evolution.getMediaBase64(quoted.id);
+        const clean = dl?.base64
+          ? (await transcribeAudio(ctx.env, Buffer.from(dl.base64, "base64"), ctx.lang)).text?.trim()
+          : "";
+        if (clean) ctx.audioTranscript = clean;
+        else await send(number, orch(ctx.lang, "audioFailed"), ctx.lang);
+      } catch (e) {
+        console.error("audio transcription failed:", e?.message || e);
+        await send(number, orch(ctx.lang, "audioFailed"), ctx.lang);
+      }
+    }
+
     // State that rides between turns of THIS webhook only.
-    let pendingReadback = null; // { result, said } after a successful CONVERTED dispatch
-    let pendingRepair = null; // describeProblems(...) after a failed `ok` validation
-    let repairs = 0; // consecutive `ok`-validation failures on the converted primary
+    let pendingReadback = null; // { result, said } after a successful dispatch that returned a value
+    let repairs = 0; // consecutive extraction-validation failures on the orchestrator primary
 
     for (let turnIndex = 0; ; turnIndex++) {
-      // Build the turn argument. A genuine READ-BACK and a REPAIR are DIFFERENT turns and get
-      // DIFFERENT prompts:
-      //   - read-back (turn.readback): the skill already acted; the model may NOT execute again
-      //     (the write invariant). buildReadbackUser says so.
-      //   - repair (turn.repair): the model's last payload failed validation; it MUST re-emit a
-      //     CORRECTED execute. buildRepairUser INVITES that — the code already permits it
-      //     (thisTurnIsReadback is false on a repair), so the prompt must not fight it.
-      const turnArg = { labeledTranscript };
+      // Build the turn argument. A READ-BACK (turn.readback) is a distinct turn — the task already
+      // acted; the model may NOT execute again (the write invariant; buildReadbackUser says so). A
+      // repair is NO LONGER a decision turn: it re-runs extract() below, so route() never receives a
+      // repair arg. Every turn carries the rendered conversation state (renderStateBlock).
+      const turnArg = { labeledTranscript, stateBlock: renderStateBlock(marker.state) };
       const thisTurnIsReadback = !!pendingReadback;
       if (pendingReadback) turnArg.readback = pendingReadback;
-      else if (pendingRepair) turnArg.repair = pendingRepair;
       pendingReadback = null;
-      pendingRepair = null;
 
       let reply;
       try {
@@ -700,11 +762,16 @@ app.post("/webhook", async (req, res) => {
 
       ctx.lang = resolveTurnLang(pinnedLang, reply.lang);
       if (!pinnedLang) pinnedLang = ctx.lang; // first turn of a new conversation: pin it now
-      console.log("TURN ->", JSON.stringify({ next: reply.next, skills: reply.skills, hasSay: !!reply.say }));
+      console.log(
+        "TURN ->",
+        JSON.stringify({ keepListening: reply.keepListening, execute: reply.execute, hasSay: !!reply.say })
+      );
 
-      // Productivity: a deliberate-silence turn ({say:null, next:"listen"}) is FREE — it does not
-      // consume MAX_TURNS. Anything else (a reply, an execute, a done, a read-back) counts.
-      const productive = !(reply.next === "listen" && !reply.say);
+      const execute = reply.execute || [];
+
+      // Productivity: a deliberate-silence turn (say:null, keepListening:true, execute:[]) is FREE —
+      // it does not consume MAX_TURNS. Anything else (a reply, an execute, a close, a read-back) counts.
+      const productive = !(reply.keepListening && !reply.say && execute.length === 0);
       if (productive) marker.turns++;
       if (marker.turns > MAX_TURNS) {
         await send(number, orch(ctx.lang, "turnCap"), ctx.lang);
@@ -713,62 +780,23 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      if (reply.next === "listen") {
+      // Log the productive turn into the conversation state (Unit 2). Silence turns are NOT logged.
+      if (productive) logTurn(marker.state, { i: turnIndex, keepListening: reply.keepListening, execute, say: reply.say });
+
+      // ---- LISTEN: execute empty & keepListening -> reply/ask and stay open ---------------------
+      if (!execute.length && reply.keepListening) {
         if (reply.say) await sendSay(reply.say, reply.lang);
-        marker.awaitFrom = reply.awaitFrom || marker.awaitFrom || "owner";
+        marker.state.pendingNeed = reply.pendingNeed || null; // what we await, if anything
         await persistMarker();
         return; // wait for his next message
       }
 
-      // ---- reply.next === "answer" -----------------------------------------------------------
-      // The tool-carrying answer pass: a SECOND model call (router.answer) with the native toolset
-      // attached, returning PROSE delivered inline via sendSay in the SAME WhatsApp reply. Because
-      // it is downstream of a successfully-parsed classification, it can never reach the degraded
-      // "didn't understand" menu.
-      if (reply.next === "answer") {
-        // Write-invariant sibling (server.js read-back guard): a read-back turn must not start a
-        // fresh answer pass — a new action needs a new message from him first.
-        if (thisTurnIsReadback) {
-          await fireCapture(ctx, { phase: "readback_answer", taskId: "orchestrator" });
-          await closeMarker();
-          return;
-        }
-        // Per-conversation answer/cost ceiling on the marker.
-        if (marker.answers >= NATIVE_MAX_ANSWERS) {
-          await send(number, orch(ctx.lang, "costCapHit"), ctx.lang);
-          await closeMarker();
-          await fireCapture(ctx, { phase: "answer_cap", taskId: "orchestrator", answerCap: NATIVE_MAX_ANSWERS });
-          return;
-        }
-        marker.answers = (marker.answers || 0) + 1;
-        const a = await answer(ctx, { labeledTranscript });
-        if (a.outcome === "ok" && a.text) {
-          await sendSay(a.text, a.lang); // language-pinned, same as a normal say
-          marker.awaitFrom = "owner";
-          await persistMarker(); // conversation stays open — wait for his next message
-          return;
-        }
-        // A model refusal stays SILENT — matching the classification refusal path (router.js:
-        // a refusal degrades to a silent close). Do NOT send the tool-error notice on a refusal.
-        if (a.outcome === "refusal") {
-          await closeMarker();
-          await fireCapture(ctx, { phase: "answer_refusal", taskId: "router" });
-          return;
-        }
-        const key = a.outcome === "timeout" ? "toolTimeout" : "toolError";
-        await send(number, orch(ctx.lang, key), ctx.lang);
-        await closeMarker();
-        await fireCapture(ctx, { phase: "answer_" + a.outcome, taskId: "router" });
-        return;
-      }
-
-      if (reply.next === "done") {
+      // ---- CLOSE: execute empty & !keepListening -> close ---------------------------------------
+      if (!execute.length) {
         // A DEGRADED close (the router refused or produced an unparseable reply — router.js sets
         // reply.degraded) is the real schema-drift alarm: keep the "I didn't understand" menu AND
-        // the unrouted capture. A LEGITIMATE empty close has the SAME shape (say:null, skills:[])
-        // but is the model deliberately closing chit-chat / a no-op / an out-of-scope line
-        // (thanks, "deixa pra la", an emoji) — NOT a malfunction. Close it silently, capture
-        // nothing. (card 77cd6542)  reply.degraded implies say:null & skills:[].
+        // the unrouted capture. A LEGITIMATE empty close has the SAME shape but is the model
+        // deliberately closing chit-chat / a no-op / an out-of-scope line — NOT a malfunction.
         if (reply.degraded && turnIndex === 0 && !thisTurnIsReadback) {
           const names = NEW_CATALOG.map((c) => c.id).join(", ");
           await send(number, orch(ctx.lang, "notUnderstood", names), ctx.lang);
@@ -777,11 +805,18 @@ app.post("/webhook", async (req, res) => {
           return;
         }
         if (reply.say) await sendSay(reply.say, reply.lang);
+        // MANDATORY SIGN-OFF (Unit 2, item 7): system-guaranteed on a CLEAN task-completion close —
+        // after any model `say`, before the marker closes, so it cannot be skipped. Fires ONLY when
+        // a task actually ran this conversation (state.didWork) and this is not a degraded close. A
+        // chatter-ignore turn is keepListening:true and structurally never reaches this close.
+        if (marker.state.didWork && !reply.degraded) {
+          await send(number, orch(ctx.lang, "finishedSignOff", ctx.tag), ctx.lang);
+        }
         await closeMarker();
         return;
       }
 
-      // ---- reply.next === "execute" ----------------------------------------------------------
+      // ---- EXECUTE: execute non-empty --------------------------------------------------------
       // THE WRITE INVARIANT: a read-back turn may not execute. Refuse, treat as done, file a report.
       if (thisTurnIsReadback) {
         await fireCapture(ctx, { phase: "readback_execute", taskId: "orchestrator" });
@@ -798,38 +833,44 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Dispatch the batch — deduped, order preserved (exactly as today's dual-intent dispatch).
-      const batch = [...new Set(reply.skills)];
+      const batch = [...new Set(execute)];
       const dispatchable = batch.filter((s) => NEW_SKILLS[s]);
       if (!dispatchable.length) {
-        // The model chose `execute` but named no dispatchable skill (only "other"/unknown ids —
-        // router.js forces an empty-skilled execute to ["other"]). A PARSED reply always: the
-        // degrade fallback returns next:"done", never "execute", so a genuine router malfunction
-        // can NEVER reach here. This is the model deciding nothing here is for it — close cleanly,
-        // no menu, no unrouted capture. The schema-drift alarm still fires on the degraded `done`
-        // path above. (card 77cd6542)
+        // The model chose `execute` but named no dispatchable skill (unknown/dormant ids — route()
+        // already filters execute to valid catalog ids). This is the model deciding nothing here is
+        // for it — close cleanly, no menu, no unrouted capture. The schema-drift alarm still fires
+        // on the degraded close path above.
         await closeMarker();
         return;
       }
 
       const primary = dispatchable[0];
       const primaryEntry = NEW_CATALOG.find((c) => c.id === primary);
-      const info = reply.info;
 
-      // WHICH tier gates the dispatch is read off the declaration, not guessed:
-      //  - "orchestrator" -> gate on `ok` (all three tiers). A failure is the REPAIR loop, NOT a
-      //    dispatch: the write budget is untouched, describeProblems goes back to the model.
-      //  - "skill"        -> gate on `shapeOk` (today's gate). Shape-valid is handed over,
-      //    incomplete or not; shape-invalid is withheld and the skill re-extracts for itself.
+      // ---- TWO-PHASE: PRODUCE the payload (extract), then VALIDATE it (checkPayload). On an
+      // orchestrator-tier `ok` failure, RE-RUN extract() with the problems threaded in — targeted
+      // payload self-correction now reaches the call that produces the payload — bounded by
+      // MAX_REPAIRS, then repairGiveUp as today. (This is the Rev-3.1 fix: repair re-EXTRACTS, it
+      // does NOT re-route.) A genuinely-missing detail is caught UPSTREAM: route()'s certainty rule
+      // keeps the task out of execute and asks for it, so this loop only fixes fixable mis-parses.
+      let info = null;
       let infoFor = null;
-      if (primaryEntry?.conversation === "orchestrator") {
-        if (primaryEntry.inputs == null) {
-          // A converted skill with NO declared inputs (e.g. transcribe_audio) has nothing to
-          // validate or hand over — dispatch it directly and let it run its own check. Without
-          // this, checkPayload(null,…).ok===false would trap it in the repair loop forever.
-          infoFor = null;
-        } else {
-          const g = checkPayload(primaryEntry.inputs, info);
-          if (!g.ok) {
+      if (primaryEntry?.inputs != null) {
+        let problems = null; // null first pass; describeProblems(...) on a repair re-extraction
+        for (;;) {
+          info = await extract(ctx, {
+            labeledTranscript,
+            primary,
+            spec: primaryEntry.inputs,
+            stateBlock: renderStateBlock(marker.state),
+            problems, // <-- the describeProblems feedback reaches extract()
+          });
+          if (primaryEntry.conversation === "orchestrator") {
+            const g = checkPayload(primaryEntry.inputs, info);
+            if (g.ok) {
+              infoFor = primary;
+              break;
+            }
             repairs++;
             if (repairs >= MAX_REPAIRS) {
               await send(number, orch(ctx.lang, "repairGiveUp"), ctx.lang);
@@ -837,17 +878,20 @@ app.post("/webhook", async (req, res) => {
               await fireCapture(ctx, { phase: "repair_giveup", taskId: primary, repairProblems: g.problems });
               return;
             }
-            pendingRepair = describeProblems(g.problems);
-            console.log("ORCHESTRATOR repair:", g.problems.join("; "));
-            continue; // re-turn — NOT a dispatch (turns already counted; dispatches untouched)
+            problems = describeProblems(g.problems); // thread the SAME feedback into the next extract()
+            console.log("ORCHESTRATOR extraction repair:", g.problems.join("; "));
+            continue; // re-EXTRACT (NOT re-route) — the fix
           }
-          infoFor = primary;
+          // "skill"-tier gate (today's behaviour, no repair loop): shape-valid is handed over as-is.
+          const g = checkPayload(primaryEntry.inputs, info);
+          infoFor = g.shapeOk ? primary : null;
+          if (!g.shapeOk && info) console.log("ROUTER payload withheld:", g.problems.join("; "));
+          break;
         }
-      } else {
-        const g = checkPayload(primaryEntry?.inputs, info);
-        infoFor = g.shapeOk ? primary : null;
-        if (!g.shapeOk && info) console.log("ROUTER payload withheld:", g.problems.join("; "));
       }
+      // primaryEntry.inputs == null -> info stays null, infoFor null (dead after the catalog trim —
+      // no remaining routable skill declares inputs:null — but kept as a harmless guard).
+      if (infoFor && info) marker.state.payload = info; // remember the last successful extraction
 
       let skippedConverted = false;
       let result = undefined;
@@ -878,6 +922,7 @@ app.post("/webhook", async (req, res) => {
       }
       marker.dispatches++; // one batch = one dispatch
       repairs = 0; // a dispatch happened — reset the consecutive-repair counter
+      marker.state.didWork = true; // a task ran this conversation — arms the sign-off gate
 
       // Flag (a) signal (B2), on THIS dispatch turn — the only turn guaranteed to fire when the
       // primary is unconverted (no read-back). Then close cleanly (the primary may have opened its
@@ -902,6 +947,7 @@ app.post("/webhook", async (req, res) => {
       }
       if (serialized && serialized.length > READBACK_CAP)
         serialized = serialized.slice(0, READBACK_CAP) + " …[truncated]";
+      setLastOutcome(marker.state, serialized); // attach the outcome to this turn's execute log entry
       pendingReadback = { result: serialized, said: ctx._turn.said };
       // loop back — the next iteration is a read-back turn
     }

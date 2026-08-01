@@ -1,5 +1,12 @@
 # Skill: `assistant_settings`
 
+> **Overhauled by card 327be40b (unified two-phase turn call).** The orchestrator turn is now one
+> unified `route()` returning `{say, keepListening, execute}`; when it runs this task a SECOND
+> `extract()` call produces the declared inputs (the complete new tag list; schema derived shape-only
+> from `manifest.inputs`), and a validation failure (e.g. an invalid tag) RE-EXTRACTS with the problems
+> threaded in, bounded by `MAX_REPAIRS`→`repairGiveUp`. "Propose before applying" is `keepListening=true`
+> + a `say` proposal; the who-lock `awaitFrom` is gone. Any `next`/`awaitFrom` phrasing below is historical.
+
 > **@mary tree — the converted PILOT, copied VERBATIM.** This is the `secretary/3. Mary Skills/`
 > copy of the pure-task reference. No code change was needed (it was already
 > `conversation:"orchestrator"` with declared `inputs`); it exists as a physical copy so the @mary

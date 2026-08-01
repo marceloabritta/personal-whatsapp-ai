@@ -18,6 +18,11 @@ import { frame } from "../../1. Orchestrator/lib/format.js";
 // router's merged call to pre-extract and nothing may be handed to it.
 export const manifest = {
   id: "transcribe_audio",
+  // NOT ROUTABLE (card 327be40b): audio is handled by SYSTEM-SIDE transcription now — the
+  // orchestrator transcribes an inbound audio to text (lib/transcribe.js + ctx.audioTranscript) and
+  // folds it into the turn prompt, because the model cannot ingest audio natively. This skill is
+  // left DORMANT on disk (loadSkills skips a routable:false manifest); flip this flag to re-enable it.
+  routable: false,
   // CONVERTED (pure task): the orchestrator runs the dialogue. There is nothing to propose or
   // confirm here — transcribing a quoted audio is not a write to the outside world — so run()
   // just acts and RETURNS a JSON result the model reads back. inputs stays null: the input is a

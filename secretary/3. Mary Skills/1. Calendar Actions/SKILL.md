@@ -1,5 +1,15 @@
 # Skill: `calendar_action`
 
+> **Overhauled by card 327be40b (unified two-phase turn call).** The orchestrator no longer emits a
+> `next`/`awaitFrom`/inline-`info` envelope. Each turn is one unified `route()` returning
+> `{say, keepListening, execute}`; when it decides to run this task a SECOND `extract()` call produces
+> this skill's declared inputs (schema derived shape-only from `manifest.inputs`), and a validation
+> failure RE-EXTRACTS with the problems threaded in (no separate repair-decision turn). "Ask for a
+> missing detail" is now `keepListening=true` + `pendingNeed` at the decision layer, and the who-lock
+> `awaitFrom` is **gone** — the continuation gate is open to any sender, so a guest's inline email
+> reply is honoured without a per-sender lock. Any `awaitFrom`/`next:"listen"` phrasing below (and in
+> the extraction rulebook) is historical; read it as `pendingNeed` / keep-listening.
+
 > **@mary tree — CONVERTED (pure task).** This is the `secretary/3. Mary Skills/` copy. The
 > **orchestrator** runs the whole dialogue; this skill never proposes, confirms, classifies, or
 > opens a session, and it exports **no** `capabilities` (the old-tree `startCreate` coupling is

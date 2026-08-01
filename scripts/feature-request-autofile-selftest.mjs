@@ -5,17 +5,17 @@
 //
 //  The card: when the owner asks Mary for something no skill can do, she must write it up
 //  as a feature request in the SAME turn and just announce it — no "should I file this?"
-//  proposal, no `next:"listen"` wait. That behaviour is PROMPT-DRIVEN (the feature_request
+//  proposal, no keepListening-wait. That behaviour is PROMPT-DRIVEN (the feature_request
 //  skill's own rulebook + description), and prompts regress silently. The failure this
-//  guards against is Mary returning `next:"listen"` with a "want me to write this up?" say
-//  (or routing to `other`) instead of dispatching feature_request in the same turn.
+//  guards against is Mary keeping the conversation open with a "want me to write this up?" say
+//  (or routing to nothing) instead of dispatching feature_request in the same turn.
 //
 //  A deterministic assertion is impossible — this is model judgement — so the test DRIVES
 //  the real flow: it builds the REAL catalog from "3. Mary Skills/" and calls the REAL
 //  route() (the same construction as scripts/router-selftest.mjs). It costs a few cents.
 //
-//  For each capability-gap order (no matching skill), it asserts on route()'s return:
-//        next === "execute"  &&  skills[0] === "feature_request"
+//  For each capability-gap order (no matching skill), it asserts on route()'s return
+//  (the three-decision envelope):  execute[0] === "feature_request"
 //
 //  Run:  ANTHROPIC_API_KEY=sk-ant-… node scripts/feature-request-autofile-selftest.mjs
 // ============================================================================
@@ -89,12 +89,12 @@ for (const c of CASES) {
     failures++;
     continue;
   }
-  const { next, skills = [], say } = res;
-  const ok = next === "execute" && skills[0] === "feature_request";
+  const { execute = [], say } = res;
+  const ok = execute[0] === "feature_request";
   if (!ok) failures++;
   console.log(
-    `${ok ? "  ok  " : "  FAIL"}  "${c.order}"\n          -> next=${JSON.stringify(next)} skills=${JSON.stringify(skills)}` +
-      (ok ? "" : `\n          expected next="execute" skills[0]="feature_request"` +
+    `${ok ? "  ok  " : "  FAIL"}  "${c.order}"\n          -> execute=${JSON.stringify(execute)}` +
+      (ok ? "" : `\n          expected execute[0]="feature_request"` +
         (say ? `\n          say=${JSON.stringify(say)}` : ""))
   );
 }

@@ -88,30 +88,32 @@ let unscripted = [];   // a recognised call with no fixture -> informational
 let unrecognised = []; // a call kindOf could NOT place -> harness fault
 let CLOCK = 1768307000;
 
-// Identify WHICH call the fake is answering, from the WHOLE request body.
-//  - "turn"             : the merged/turn call — NO output_config, skill catalog
-//                         ("Available tasks:") in the system prompt. The LEGACY router shares
-//                         that system prompt, so its route call is a "turn" to the fake too;
-//                         it is told apart by the SHAPE of the pinned reply, not the kind.
-//  - "selflearn_analyze": lib/selflearning.js analyze() — a prose call fired by every capture.
-//  - "legacy_propose"/"legacy_classify": the frozen legacy assistant_settings output_config
-//                         calls (propose: tags+reasoning; classifyConfirmation: decision).
-//                         These only exist at HEAD; after the card ships they are never fired.
+// Identify WHICH call the fake is answering, from the WHOLE request body. After the Mary overhaul
+// (card 327be40b) BOTH the decision call and the extraction call carry output_config, so the kind
+// is read off the SCHEMA's property set. Three output_config kinds are kept DISTINCT:
+//  - "turn"             : the unified DECISION call — TURN_DECISION_SCHEMA (has `keepListening`).
+//  - "extract"          : the per-task EXTRACTION call — schema derived shape-only from the skill's
+//                         declaration (buildExecuteSchema); no `keepListening`, no `reasoning`.
+//  - "legacy_propose"/"legacy_classify": the FROZEN legacy assistant_settings output_config calls
+//                         (propose: tags+reasoning; classifyConfirmation: decision) — recognised by
+//                         their OWN property sets so the derived extraction schema is never mistaken
+//                         for them. These only fire at HEAD; after retirement they are never fired.
+//  - "selflearn_analyze": lib/selflearning.js analyze() — a prose call (no output_config).
 function kindOf(body) {
   const schema = body?.output_config?.format?.schema;
   if (!schema) {
     const sys = String(body?.system || "");
-    if (/Available tasks:/.test(sys)) return "turn";
     if (/senior engineer triaging a failure/i.test(sys)) return "selflearn_analyze";
     throw new Error(
-      `kindOf: a no-output_config call that is neither the turn call nor the ` +
-        `self-learning analyze — system="${sys.slice(0, 70)}…"`
+      `kindOf: a no-output_config call that is not the self-learning analyze — ` +
+        `system="${sys.slice(0, 70)}…"`
     );
   }
   const keys = Object.keys(schema.properties || {});
+  if (keys.includes("keepListening")) return "turn"; // the unified decision envelope
   if (keys.includes("tags") && keys.includes("reasoning")) return "legacy_propose";
   if (keys.includes("decision")) return "legacy_classify";
-  throw new Error(`kindOf: an unexpected output_config call — properties=${JSON.stringify(keys)}`);
+  return "extract"; // a per-task derived extraction schema (NOT the legacy propose/classify shape)
 }
 
 const JID_OWNER = "5511994224000@s.whatsapp.net";
@@ -304,17 +306,18 @@ async function say(text, { fromMe = true, pushName = "Marcelo" } = {}) {
 }
 
 // ---- fixtures ---------------------------------------------------------------
-// NEW (@mary) flow: a single pinned three-state TURN reply. `listen` sends the model's `say`
-// and holds the marker — it dispatches no skill (skills:[]), so §3 needs no converted skill.
-const turnReply = (o) => ({ kind: "turn", json: JSON.stringify({ lang: "en", ...o }) });
-const listen = (say, awaitFrom = "owner") =>
-  turnReply({ say, next: "listen", awaitFrom, skills: [], info: null });
+// NEW (@mary) flow: a single pinned three-decision TURN reply. `listen` sends the model's `say`
+// and holds the marker — it dispatches no task (execute:[]), so §3 needs no converted skill.
+const turnReply = (o) => ({
+  kind: "turn",
+  json: JSON.stringify({ lang: "en", say: null, keepListening: true, execute: [], pendingNeed: null, ...o }),
+});
+const listen = (say) => turnReply({ say, keepListening: true, execute: [] });
 
-// LEGACY (@assistant/@assistente) flow fixtures — consumed ONLY at HEAD. The OLD router shares
-// the "Available tasks:" system prompt (kind "turn") but returns the OLD { tasks, lang } shape;
-// the frozen assistant_settings then makes its propose (tags+reasoning) output_config call and
-// sends a proposal. After the card ships, the retired tags fire no LLM call at all, so these
-// fixtures are simply never consumed.
+// LEGACY (@assistant/@assistente) flow fixtures — consumed ONLY at HEAD. After retirement the
+// retired tags fire no LLM call at all, so these are never consumed; they are kept so the harness
+// still models the pre-retirement split. The legacy propose output_config call carries tags+reasoning
+// (kind "legacy_propose"), a DIFFERENT property set from the new derived extraction schema.
 const legacyRoute = (tasks, info = null) =>
   ({ kind: "turn", json: JSON.stringify({ tasks, lang: "en", info }) });
 const legacyPropose = (tags, reasoning = "Collapsing to the short form.") =>
@@ -352,7 +355,7 @@ check("§2.1  @assistente produced ZERO outbound sends (the retired tag matches 
 // (it produces a turn call and a send), §1/§2's absence of sends is proven real — the server
 // was alive and reachable the whole time, not merely slow.
 console.log("\n=== §3  @mary still routes and replies (surviving flow) ===\n");
-scripted = [listen("On it — tell me what you need.", "owner")];
+scripted = [listen("On it — tell me what you need.")];
 const s3 = await say("@mary marque uma reunião amanhã 15h");
 console.log(`   owner    : @mary marque uma reunião amanhã 15h`);
 console.log(`   assistant: ${s3.out.map((m) => JSON.stringify(m.slice(0, 60))).join(" | ") || "(nothing)"}`);

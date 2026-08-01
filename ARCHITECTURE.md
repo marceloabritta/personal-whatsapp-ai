@@ -26,35 +26,55 @@ webhook  ->  filter (start on fromMe + matchedTagNew, or continue an active sess
 ### The turn loop (the model holds the conversation)
 
 There is **one** flow. A message summoned by the `@mary` tag (`SECRETARY_TAG_NEW`) runs the
-orchestrator's **turn loop**: the model **holds the conversation** and drives a four-state cycle,
-and the orchestrator holds a marker between messages.
+orchestrator's **turn loop**: the model **holds the conversation** and, on each turn, makes ONE
+three-part decision, and the orchestrator holds a marker between messages.
 
 ```
-message → route(ctx, turn) → { say, next, skills, info, lang, awaitFrom }
+message → route(ctx, turn) → { say, keepListening, execute, lang, pendingNeed, degraded }
                                 │
-      next = "listen"  ── ask / propose / stay silent, keep the marker open, wait for awaitFrom
-      next = "execute" ── run skill(s); a skill returns a value → a READ-BACK turn
-      next = "answer"  ── answer a direct question inline with the native toolset (see below)
-      next = "done"    ── close the conversation
+   execute = []  & keepListening=true  ── ask / propose / stay silent, keep the marker open
+   execute = [ids]                     ── run task(s); a task returns a value → a READ-BACK turn
+   execute = []  & keepListening=false ── close the conversation (clean close → sign-off)
 ```
 
-**The `answer` pass (native server-side tools).** `route()`'s classification call carries **no
-tools** and returns JSON — that contract is unchanged. When it classifies a turn as `next:"answer"`
-(a direct question no skill covers — a live-web fact, a URL already in the thread, real computation,
-general knowledge), the orchestrator makes a **second, tool-carrying model call**, `answer(ctx, turn)`
-(`router/router.js`), with `lib/nativeTools.js`'s bundle attached (`web_search` + `web_fetch`, plus
-`code_execution` when `NATIVE_CODE_EXEC` is on). That call is **supposed to return prose**, so it has
-no JSON to fail to produce and an `answer` turn can never reach the degraded "didn't understand" menu.
-The prose is delivered inline via the same `sendSay` path — two internal model calls, one WhatsApp
-reply. Server-side tools run an internal sampling loop that can pause (`stop_reason:"pause_turn"`); the
-answer pass resumes it up to `NATIVE_MAX_TOOL_HOPS`, each call bounded by `NATIVE_ANSWER_TIMEOUT_MS`,
-and the conversation is capped at `NATIVE_MAX_ANSWERS` answers on the marker.
-`execute` is **non-terminal**: a skill (`manifest.conversation:"orchestrator"`) returns a
+**The unified turn call (card 327be40b).** `route()` is ONE `messages.create` that carries, together:
+`output_config: jsonFormat(TURN_DECISION_SCHEMA)` (the reply is schema-locked to the three-decision
+envelope), the native toolset (`buildNativeTools`, `lib/nativeTools.js` — `web_search` + `web_fetch`,
+plus `code_execution` when `NATIVE_CODE_EXEC` is on; `[]` when `NATIVE_TOOLS` is off), and **adaptive
+thinking**. So Mary reasons, may search the web / read a URL / compute **inline** this turn, and then
+fills `say` — answering a direct question (a live-web fact, general knowledge no skill covers) is
+simply `say=prose`, `keepListening=true`; there is **no separate `answer` pass** any more (it was
+folded in and deleted). Server-side tools run an internal sampling loop that can pause
+(`stop_reason:"pause_turn"`); `route()` resumes it up to `NATIVE_MAX_TOOL_HOPS`, each call bounded by
+`NATIVE_ANSWER_TIMEOUT_MS`. `parseJsonReply` (via `readReply`) is retained as the degrade-to-menu
+fallback: a refusal / unparseable / still-paused turn returns `{keepListening:false, execute:[],
+degraded:true}`, and only that flag fires the "I didn't understand" menu. (`output_config` composes
+with the toolset, adaptive thinking, and the media/vision path — verified live; `max_tokens` is 8192
+so adaptive thinking cannot truncate the JSON.)
+
+**Two-phase execute.** Because `output_config` forbids the polymorphic `info`, payload extraction is a
+SECOND call: `extract(ctx, turn)` carries `output_config` whose schema is derived **shape-only** from
+the chosen task's `manifest.inputs` by `buildExecuteSchema` (`lib/inputs.js`) — the orchestrator still
+never imports a skill's schema. `checkPayload` gates the payload; on a validation failure the loop
+**RE-RUNS `extract()`** with the `describeProblems` feedback threaded in (repair = re-extraction, NOT a
+re-decision), bounded by `MAX_REPAIRS`→`repairGiveUp`. A genuinely-missing detail is caught UPSTREAM —
+`route()`'s certainty rule keeps the task out of `execute` and asks for it (`keepListening=true` +
+`pendingNeed`) — so repair only fixes fixable mis-parses.
+
+`execute` is **non-terminal**: a task (`manifest.conversation:"orchestrator"`) returns a
 JSON-serialisable value which the orchestrator feeds back to the model as a **read-back** turn (the
-model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`,
-`MAX_DISPATCHES`, `MAX_REPAIRS`, enforces the **write invariant** (a read-back may not execute),
-makes deliberate silence free, and runs a **repair loop** (a payload that fails validation is
-re-prompted with `buildRepairUser`, which invites a corrected execute — NOT a dispatch).
+model reads its own result and usually closes). The loop is bounded by `MAX_TURNS`, `MAX_DISPATCHES`,
+`MAX_REPAIRS`, enforces the **write invariant** (a read-back may not execute), and makes deliberate
+silence free.
+
+**Stateful conversation + open gate + sign-off (card 327be40b).** The marker carries a `state` object
+(goal + decision log + last extraction payload + `pendingNeed` + `didWork`), rendered into every turn
+by `renderStateBlock`. The continuation gate is keyed on `session.open` and opens to **any sender**
+(the who-lock `awaitFrom` is gone — a guest the owner is scheduling with can answer inline). A **clean
+task-completion close** (execute empty, `keepListening=false`, not degraded, `state.didWork` true)
+sends a mandatory bilingual **sign-off** (`ORCH_MSG.finishedSignOff`) after any `say`, then closes; a
+chatter-ignore turn is `keepListening=true` and never reaches a close, and cap/error closes carry their
+own notice instead.
 
 **Inbound media (card cf60f344).** A turn that carries files (a receipt, an invoice) relays them to
 `route()` as Anthropic **multimodal content**, interpreted on the turn they arrive.
@@ -72,8 +92,8 @@ string. `ctx.media` is the one additive `ctx` field and is `null` on every text-
 discovers `secretary/3. Mary Skills/` → `NEW_SKILLS`/`NEW_CATALOG` (the turn loop reads these).
 Every skill under that tree is a **pure task** (see "Adding a skill" and the per-skill `SKILL.md`s):
 the orchestrator model runs the whole dialogue, and each `run(ctx)` only validates its declared
-`inputs`, acts, and **returns** a value. `calendar_action`, `task_action` and `flight_search` use a
-**READ-then-ACT** contract — a `find`/`list`/`search` READ returns id-bearing candidates the model
+`inputs`, acts, and **returns** a value. `calendar_action` and `task_action` use a
+**READ-then-ACT** contract — a `find`/`list` READ returns id-bearing candidates the model
 reads back, and a later ACT targets one by id (which is why calendar/tasks need no in-skill session).
 The model **chains skills itself** across turns; a skill never invokes another. The trigger tag list
 (`NEW_TAGS`, mutated by `setNewTags`) is durable in `secretary:settings:new:tags`, which wins over
@@ -140,35 +160,41 @@ Sent **twice** — once as `{ "where": { "key": { "remoteJid": "…" } } }` and 
 > which is what makes the merge correct. Those 50 are raw rows, though, including non-text
 > protocol noise, so a busy chat's usable transcript can be far thinner than 30 messages.
 
-### 3. secretary → Claude (router — it CLASSIFIES **and** EXTRACTS, in ONE call)
+### 3. secretary → Claude (the unified turn call — DECIDE, then EXTRACT in a second call)
 
 ```
 POST https://api.anthropic.com/v1/messages   (via @anthropic-ai/sdk)
 ```
-Sent: the router system prompt — the live skill catalog, **each skill's declared inputs
-(`manifest.inputs`) and its own extraction rulebook** — plus a user message with the order, the
-transcript, the current date/time, the contact and any quoted message. It returns:
+Sent: the router system prompt — the orientation preamble (native-app persona + "use your tools
+inline"), the live skill catalog, **each skill's declared inputs (`manifest.inputs`) and its own
+extraction rulebook**, the rendered conversation `state` — plus a user message with the order, the
+transcript, the current date/time, the contact, any quoted message, and (when present) a system-side
+**audio transcript** folded in as inline text. The call carries `output_config:
+jsonFormat(TURN_DECISION_SCHEMA)` + the native toolset + adaptive thinking, and returns the
+three-decision envelope:
 ```json
-{ "tasks": ["calendar_action"], "lang": "pt", "info": { "action": "create", "...": "..." } }
+{ "say": "…" , "keepListening": true, "execute": ["calendar_action"], "lang": "pt", "pendingNeed": null }
 ```
-`lang` is the detected conversation language (ISO code; default `"en"`) — it rides in
-`ctx.lang` so the whole system replies in that language (see the localization note under
-"Adding a skill"). `info` is the **first** task's declared inputs, already extracted.
+`lang` is the detected conversation language (ISO code; default `"en"`) — it rides in `ctx.lang` so the
+whole system replies in that language. There is **no inline `info`**: when `execute` names a task, a
+SECOND call `extract()` produces that task's payload.
 
-**This call sends NO `output_config`. The reply format is demanded in the prompt, and that is
-deliberate.** A schema-enforced merged call would mean the orchestrator importing each skill's
-JSON Schema to build it — **the router would then know what a calendar is.** It must not: it
-renders each skill's declaration as opaque text and validates the reply *against that
-declaration* (`lib/inputs.js`), never against a schema it had to understand. The price we pay
-knowingly: nothing but a prompt instruction now enforces the reply's shape. An unparseable reply
-falls back to `["other"]` → "I didn't understand" **+ a self-learning report**, which is the
-alarm. `router.js`'s balanced-brace scanner is therefore **load-bearing**, not a nicety.
+**Why `output_config` is now safe here.** The old merged call sent NO `output_config` to avoid
+importing each skill's JSON Schema — *the router would then know what a calendar is.* The two-phase
+design keeps that invariant a different way: the turn call's schema is the generic `TURN_DECISION_SCHEMA`
+(it names no skill), and the extraction call's schema is derived **shape-only** from the declaration by
+`buildExecuteSchema` (`lib/inputs.js`) — so the orchestrator still never imports a skill's own schema.
+`parseJsonReply` (via `readReply`) is retained as the degrade fallback; an unparseable/refused/still-paused
+turn returns `{keepListening:false, execute:[], degraded:true}` → "I didn't understand" **+ a self-learning
+report**, which is the alarm.
 
-Then **plain code — no AI** — checks the payload (`checkPayload`): is it an object, are the
-declared fields present and well-typed? If yes it reaches the skill as **`ctx.info`** and the
-skill acts without a second round-trip. If not, the skill falls back to its own extraction call
-(step 4) — so the worst case is *correct but slow*, never *fast and wrong*. Only the content of
-that one conversation leaves for Anthropic, and only at that moment.
+**Extraction (`extract`) + repair.** For an `execute`, `extract()` sends the SAME system prompt with a
+per-task extraction user message and `output_config: jsonFormat(buildExecuteSchema(spec))` (no tools).
+Then **plain code — no AI** — checks the payload (`checkPayload`): is it an object, are the declared
+fields present and well-typed? An orchestrator-tier task that FAILS validation is re-extracted with the
+`describeProblems` feedback threaded into `extract()` (bounded by `MAX_REPAIRS`→`repairGiveUp`); a valid
+payload reaches the skill as **`ctx.info`**. Only the content of that one conversation leaves for
+Anthropic, and only at that moment.
 
 ### 4. secretary → Claude (skill: calendar_action) — now the FALLBACK, not the norm
 
@@ -456,7 +482,7 @@ test run if a reply named `*Error`/`*Failed`/`noAction` is sent with plain `send
 `server.js`) that sends a framed, localized message to the owner's **own** number
 (`OWNER_JID`/`OWNER_NUMBER`) rather than to the current chat — a **no-op when that env var is
 unset**. It exists because the orchestrator only ever knows the *current* chat's number, which in
-an `awaitFrom:"contact"` booking is the guest's; a side note to the owner needs its own send path.
+a booking driven from the guest's chat is the guest's number; a side note to the owner needs its own send path.
 Today only `calendar_action` uses it (the Contacts "email saved" note). It is an **outcome** note,
 so it rides `ctx.dmOwner`/`ctx.send`, never `ctx.sendFailure`. Guard the call with a `typeof`
 check so a skill stays safe in a deployment where the field is absent.
@@ -470,13 +496,14 @@ still live in the others. Reach for them before writing your own:
 | Module | Exports | Use it for |
 | --- | --- | --- |
 | `llm.js` | `jsonFormat`, `readReply`, `readText`, `parseJsonReply`, `withThinkingDefault` | Any Claude call that must return JSON. `jsonFormat(SCHEMA)` → `output_config`; `readReply(msg, "<skill>")` → the parsed object, or `null` on a refusal/truncated reply (it logs `stop_reason` + size). Never hand-parse a model reply. `withThinkingDefault(client)` wraps the SDK client so every call defaults to `thinking: {type:"disabled"}` — **`server.js` already applies it to the one shared client, so a skill inherits it and never calls this itself.** (Extended thinking is on by default and we discard every thinking block; we were paying latency for output nobody reads. A call site that genuinely wants reasoning passes its own `thinking`, and the wrapper leaves it alone.) |
-| `inputs.js` | `describeInputs`, `checkPayload` | The **declared-inputs contract** that lets the router extract a skill's inputs in the same call that classifies the order. `describeInputs(catalog)` renders each skill's declaration as prompt text; `checkPayload(inputs, info)` is the **plain-code, no-AI** gate — `{ shapeOk, ok, problems }`. It knows about *declarations*, never about skills. You almost never call this directly: declare `manifest.inputs` and read `ctx.info`. |
+| `inputs.js` | `describeInputs`, `checkPayload`, `describeProblems`, `buildExecuteSchema` | The **declared-inputs contract**. `describeInputs(catalog)` renders each skill's declaration as prompt text; `buildExecuteSchema(spec)` derives the extraction call's `output_config` schema **shape-only** from the declaration (never naming a skill); `checkPayload(inputs, info)` is the **plain-code, no-AI** gate — `{ shapeOk, ok, problems }`; `describeProblems` renders its failures for a repair re-extraction. It knows about *declarations*, never about skills. You almost never call these directly: declare `manifest.inputs` and read `ctx.info`. |
 | `confirm.js` | `classifyConfirmation`, `CONFIRM_SCHEMA`, `buildConfirmSystem/User` | **Confirm-first writes.** `await classifyConfirmation(ctx, { action: "cancel the 15:00 meeting", who: "<skill>" })` → `confirm \| decline \| unrelated`. Any doubt or API error returns `unrelated` (the safe no-op), so an unclear message can never fire an irreversible write. The *session* stays yours — this only reads the latest message. |
 | `google.js` | `googleAuth(env)` | The OAuth2 client from `GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN`. Build your own service on top: `google.tasks({ version: "v1", auth: googleAuth(env) })`. Adding a Google API means adding its **scope** to the refresh token (re-consent), not new auth code. |
 | `identity.js` | `NEW_TAGS`, `headerFor(lang)`, `isOwnMessage`, `matchedTagNew` | The trigger tags and the reply header. |
-| `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image (jpeg/png/gif/webp) → an image block, document (pdf) → a document block, everything else → `null` (defer). A new file type is one new branch here + its converter — no other rails change. `media_type` comes from the real mime, never trusted from a default. |
+| `whatsapp.js` | `extractText`, `getQuoted`, `inboundMedia`, `mediaBlockFor`, `remember`, `combine`, `buildTranscript`, `buildLabeledTranscript`, `HISTORY_WINDOW` | Message-shape utilities. **`inboundMedia(data, quoted)`** → the `@mary` turn's inbound media LIST (detection only; audio is omitted — it is handled by system-side transcription). **`mediaBlockFor({mediaType,mimetype,base64})`** is the media **extension point**: image → an image block, document (pdf) → a document block, everything else → `null` (defer). `HISTORY_WINDOW` (=30) is `combine`'s default window, named so the router preamble can interpolate the real N. `media_type` comes from the real mime, never trusted from a default. |
+| `transcribe.js` | `transcribeAudio(env, buffer, lang)` | **System-side audio transcription** (AssemblyAI), lifted out of the audio skill so the orchestrator never imports a skill. The model can't ingest audio, so `server.js` MEDIA PREP transcribes a quoted audio and folds the text into the turn prompt on `ctx.audioTranscript`. Reads `ASSEMBLYAI_API_KEY`/`ASSEMBLYAI_LANGUAGE`. |
 | `format.js` | `frame` | Bold-header/italic-body framing — normally applied for you in `send()`; import it only if you bypass `ctx.send` (as `feature_request` does for a media caption). |
-| `nativeTools.js` | `buildNativeTools(env)` | The native server-side tool bundle for the **answer pass** (`router.answer`), built off env toggles: `web_search_20260209` + `web_fetch_20260209`, plus `code_execution_20260521` when `NATIVE_CODE_EXEC` is on; `[]` when `NATIVE_TOOLS` is off. Rails-only — no skill imports it; the orchestrator attaches it inside `router.answer`. |
+| `nativeTools.js` | `buildNativeTools(env)` | The native server-side tool bundle attached to the **unified turn call** (`route()`), built off env toggles: `web_search_20260209` + `web_fetch_20260209`, plus `code_execution_20260521` when `NATIVE_CODE_EXEC` is on; `[]` when `NATIVE_TOOLS` is off. Rails-only — no skill imports it; the orchestrator attaches it inside `route()` (the separate answer pass is gone). |
 | `logbuffer.js` | `installLogBuffer`, `getRecentLogs`, `redact` | The secretary's own recent logs, in memory. Installed once by `server.js`; you almost never call this directly. |
 | `selflearning.js` | `captureFailure`, `appendToReport`, `looksLikeFailure` | **Failure capture** — writes a Markdown report to `secretary/improvements/`. Wired into the orchestrator's catch blocks for you; a skill only calls it directly to report a failure the code *can't see* (as `feedback` does). See "Self-learning" below. |
 

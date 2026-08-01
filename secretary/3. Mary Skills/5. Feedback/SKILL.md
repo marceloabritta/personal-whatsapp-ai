@@ -1,5 +1,13 @@
 # Skill: `feedback`
 
+> **Overhauled by card 327be40b (unified two-phase turn call + new rulebook).** The orchestrator turn
+> is now one unified `route()` returning `{say, keepListening, execute}`; when it runs this task a
+> SECOND `extract()` call restates the complaint into the declared inputs (schema derived shape-only
+> from `manifest.inputs`). This card also ADDED a `rulebook` to `manifest.inputs` (the per-task
+> extraction section — scope, the certainty rule, the field spec) that this skill previously lacked.
+> "Ask the one clarifying question" is `keepListening=true` + `pendingNeed`; the who-lock `awaitFrom`
+> is gone. Any `next`/`awaitFrom` phrasing below is historical.
+
 > **@mary tree — CONVERTED (pure task).** This is the `secretary/3. Mary Skills/` copy. The
 > **orchestrator** restates the owner's complaint into the declared `inputs` (`note` — required —
 > plus `what_went_wrong`, `expected`, `suspected_skill`) and asks the one clarifying question on a

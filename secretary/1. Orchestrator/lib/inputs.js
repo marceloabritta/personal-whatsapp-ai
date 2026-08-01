@@ -10,11 +10,13 @@
 //
 //  ⚠ IT KNOWS ABOUT *DECLARATIONS*, NEVER ABOUT SKILLS.
 //  It never names a field of any skill. It renders whatever a skill declared as opaque text,
-//  and validates whatever came back AGAINST that declaration. That is what lets the merged
-//  call ask for a skill's inputs without the orchestrator importing that skill's schema —
-//  and the reply format is demanded in the PROMPT, not via output_config, for exactly the
-//  same reason: an output_config would need the schema, and the orchestrator would then have
-//  to know what each skill is. It must not. (scripts/turn-latency-selftest.mjs T2.6 lints it.)
+//  and validates whatever came back AGAINST that declaration. That is what lets the two-phase
+//  call ask for a skill's inputs without the orchestrator importing that skill's schema.
+//  The EXTRACTION call now DOES carry output_config — but its schema is derived SHAPE-ONLY from
+//  the declaration by buildExecuteSchema (below): it maps the declared types/enums/nullability
+//  to a JSON Schema without ever naming a skill or importing a skill's own schema. The invariant
+//  the old "no output_config" rule protected — the orchestrator never knows what a calendar IS —
+//  is preserved by that shape-only derivation.
 //
 //  THE DECLARATION (data + skill-owned plain-code predicates):
 //    {
@@ -148,6 +150,68 @@ ${text}
     .join("\n");
 
   return { tasks: list, rulebooks: books };
+}
+
+// ---- the extraction-schema half (shape-only) ---------------------------------
+// Map a declared scalar TYPE to its JSON-Schema base type. iso/email/enum are all strings at the
+// wire level (their extra constraints are enforced by checkPayload, not the schema).
+const SCALAR_BASE = {
+  string: "string",
+  iso: "string",
+  email: "string",
+  enum: "string",
+  number: "number",
+  bool: "boolean",
+  object: "object",
+};
+
+// One declared field -> its JSON-Schema fragment. `nullable` becomes a `[..., "null"]` type
+// union; an enum keeps its values (with `null` appended when nullable, so null stays legal); an
+// array's items come from `of` — a scalar `of` maps to that scalar, an object `of` to an object
+// schema whose subfields are required. Recurses for nested/object element specs. Shape ONLY —
+// it never reads a field's `desc`, `requiredWhen` or `consistency`; those stay in checkPayload.
+function schemaForField(f) {
+  if (f.type === "array") {
+    let items;
+    if (f.of && typeof f.of.type === "string") {
+      items = schemaForField(f.of); // a SCALAR element spec
+    } else {
+      const sub = f.of || {};
+      const properties = {};
+      for (const [k, v] of Object.entries(sub)) properties[k] = schemaForField(v);
+      items = {
+        type: "object",
+        additionalProperties: false,
+        required: Object.keys(sub),
+        properties,
+      };
+    }
+    return { type: f.nullable ? ["array", "null"] : "array", items };
+  }
+  const base = SCALAR_BASE[f.type] || "string";
+  const out = { type: f.nullable ? [base, "null"] : base };
+  if (f.type === "enum" && Array.isArray(f.enum)) {
+    out.enum = f.nullable ? [...f.enum, null] : [...f.enum];
+  }
+  return out;
+}
+
+// buildExecuteSchema(spec) — the SHAPE-ONLY generator that derives a skill's extraction JSON
+// Schema from its manifest.inputs declaration. `required` lists EVERY declared field (checkPayload
+// treats an ABSENT declared field as invalid, so the schema demands them all — a null-but-present
+// value is fine, an omitted one is not). additionalProperties:false so the model cannot leak a
+// field. NO per-skill knowledge enters here: it reads only the declaration's generic shape
+// (type/enum/nullable/of), never a skill's own schema (inputs.js:11 invariant preserved).
+export function buildExecuteSchema(spec) {
+  const fields = (spec && spec.fields) || {};
+  const properties = {};
+  for (const [name, f] of Object.entries(fields)) properties[name] = schemaForField(f);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(fields),
+    properties,
+  };
 }
 
 // ---- the plain-code half -----------------------------------------------------

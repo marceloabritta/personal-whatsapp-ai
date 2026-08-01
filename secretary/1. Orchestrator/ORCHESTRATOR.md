@@ -31,12 +31,12 @@ problems (all prefixed with the language-aware header from `headerFor(lang)`):
 - A continuation's skill threw → *"I failed to continue that. Error in the log."*
 - **A conversation loops without closing (the turn cap) → *"I'm going in circles…"*** (`turnCap`)
 - **Too many skills fired in one conversation (the dispatch cap) → *"I've done a few things in a row…"*** (`dispatchCap`)
-- **A converted skill's payload failed validation twice → *"I couldn't get that right…"*** (`repairGiveUp`)
-- **A second converted skill was asked for in one batch and can't run there → *"…send me the other part on its own."*** (`dispatchSkipped`)
-- **The answer pass timed out (per-pass wall clock or the pause_turn hop cap) → *"That took too long to look up…"*** (`toolTimeout`)
-- **The answer pass hit a tool error or produced no usable prose → *"I couldn't look that up right now…"*** (`toolError`)
-- **The per-conversation answer ceiling was hit (`NATIVE_MAX_ANSWERS`) → *"I've answered a few of those in a row…"*** (`costCapHit`)
-- A **model refusal** on the answer pass stays **silent** (matching the classification refusal path) — no notice is sent.
+- **A task's payload failed validation up to `MAX_REPAIRS` times → *"I couldn't get that right…"*** (`repairGiveUp`)
+- **A second orchestrator task was asked for in one batch and can't run there → *"…send me the other part on its own."*** (`dispatchSkipped`)
+- **A quoted audio couldn't be transcribed → *"I couldn't transcribe that audio…"*** (`audioFailed`) — the model can't ingest audio, so the system transcribes it; when that fails there is nothing to fold in.
+- **A task finished cleanly and the conversation closes → *"I have finished this task. Call me `@mary` again…"*** (`finishedSignOff`) — the mandatory sign-off, system-guaranteed on a clean task-completion close (gated on `state.didWork`; interpolates the real trigger tag). NOT sent on a chatter-ignore turn (which never closes) nor on a cap/error close.
+
+The separate **answer pass** and its notices (`toolTimeout`/`toolError`/`costCapHit`) are **gone** (card 327be40b): web search now runs inline on the unified turn call, and a tool timeout/error there degrades like any other turn (the degraded menu on turn 0, else a silent close).
 
 > **Flow diagram note:** the end-to-end flow diagram in `../../ARCHITECTURE.md` and `../../README.md`
 > is **pending** — those docs are owned by another card's in-flight work and were not touched here.
@@ -102,9 +102,13 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
      rides its caption); `tag = fromMe ? matchedTagNew(gateText) : null`; `isTagged = !!tag` → a
      **fresh** command (owner only); `matchedTagNew` returns whichever tag in `NEW_TAGS` the message
      starts with (or null).
-   - `isContinuation` = there's a `session`, it's not tagged, not one of the secretary's own
-     messages, **and** the sender matches `session.awaitFrom`: `owner`→`fromMe`, `contact`→`!fromMe`, `any`→both.
-   - If **neither** → `return` (ignored — incl. all non-owner messages with no session for them).
+   - `isContinuation` = the orchestrator marker is **OPEN** (`session?.open`), the message is not
+     tagged, and it is not one of the secretary's own messages — **from ANY sender** (card 327be40b).
+     The who-lock (`awaitFrom`) is gone: the model decides each turn from the whole visible
+     conversation whether a message is for it, so a guest the owner is scheduling with can answer
+     inline. Gating on `open` keeps this to orchestrator-owned conversations (a skill-owned session
+     sets no `open`).
+   - If **neither** → `return` (ignored — incl. any message with no open session).
 8. **Dedup** by `id` via the `seen` set (capped at 500).
 9. `order` = text minus the tag (fresh) or the whole text (continuation);
    `number` = `remoteJid` before `@`.
@@ -143,29 +147,30 @@ File: `server.js`. Helpers: `lib/evolution.js`, `lib/whatsapp.js`, `lib/sessions
 12. **Dispatch — the turn loop (see "The conversation loop" below).** Both a fresh tagged order
     and an untagged follow-up on a conversation the orchestrator owns feed the **same** multi-turn
     loop: a fresh order first `sessions.clear`s any stale session (a new `@mary` overrides), a
-    continuation rebuilds its counters from the marker. Each turn is **`route(ctx, turn)`** — one
-    Claude call that both classifies AND extracts — returning `{say, next, skills, info, lang,
-    awaitFrom, degraded}`; the model drives a three-state cycle and the orchestrator runs each
-    `NEW_SKILLS[task](ctx)` on an `execute`. A **degraded** router reply (refused/unparseable) on a
-    first turn → "I didn't understand… Available skills: …" plus an `unrouted` capture; an `execute`
-    that names no dispatchable skill closes silently (no menu, no report); per-skill errors → "I
-    failed to run that task."
+    continuation rebuilds its counters from the marker. Each turn is the **unified `route(ctx, turn)`**
+    — one Claude call carrying `output_config` (`TURN_DECISION_SCHEMA`) + the native toolset + adaptive
+    thinking — returning `{say, keepListening, execute, lang, pendingNeed, degraded}`; on an `execute` a
+    SECOND call `extract(ctx, turn)` produces the payload, then the orchestrator runs each
+    `NEW_SKILLS[task](ctx)`. A **degraded** router reply (refused/unparseable/still-paused) on a first
+    turn → "I didn't understand… Available skills: …" plus an `unrouted` capture; an `execute` that names
+    no dispatchable skill closes silently (no menu, no report); per-skill errors → "I failed to run that
+    task."
 
-      **THE PAYLOAD GATE, and it is plain code — no AI.** The turn call also returns `info`: the
-      **first** skill's declared inputs, as the model filled them. Before any skill sees it,
-      `checkPayload(primary.inputs, info)` (`lib/inputs.js`) checks it against the *declaration*:
-      is it an object, are the declared fields present, are the types right?
-      - **shape-VALID** → it is handed to the primary skill as `ctx.info`. That skill skips its own
-        extraction call. If the payload is valid but *incomplete* (no email for Laura) it is
-        **still handed over** — the skill's own clarification pass fills the gap exactly as it
-        does today. That is the "only if the check fails do we ask again" call.
-      - **shape-INVALID, or the task declared no inputs** → `ctx.info` is `null` and the skill
-        extracts for itself. Today's path, unchanged.
+      **THE PAYLOAD GATE, and it is plain code — no AI.** For an `execute`, `extract()` returns the
+      primary task's declared inputs, schema-locked by `buildExecuteSchema` (derived shape-only from the
+      declaration). Before any skill sees it, `checkPayload(primary.inputs, info)` (`lib/inputs.js`)
+      checks it against the *declaration*: is it an object, are the declared fields present, are the
+      types right?
+      - **orchestrator-tier & VALID (`ok`)** → handed to the primary skill as `ctx.info`.
+      - **orchestrator-tier & INVALID** → the loop **RE-RUNS `extract()`** with the validation problems
+        threaded in (`describeProblems` → the extraction call's `problems` block), bounded by
+        `MAX_REPAIRS`→`repairGiveUp`. Repair re-EXTRACTS; it never re-routes.
+      - **skill-tier** (no routable skill is this today) keeps the `shapeOk` hand-over gate.
 
-      So the worst case of the merge is **correct but slow**, never **fast and wrong** — and note
-      that a *declared field that is absent* is INVALID, not defaulted. That distinction is the
-      whole safety net: a skill that adds a schema field and forgets its declaration gets a slow
-      turn, not a silently un-shipped feature.
+      A *declared field that is absent* is INVALID, not defaulted — the safety net against a skill that
+      adds a schema field and forgets its declaration. A genuinely-missing detail is caught UPSTREAM:
+      `route()`'s certainty rule keeps the task out of `execute` and asks for it (`keepListening=true` +
+      `pendingNeed`), so repair only fixes fixable mis-parses.
 
 ### The conversation loop — the orchestrator holds the conversation
 
@@ -186,58 +191,45 @@ which `checkPayload` tier gates the dispatch, and whether a read-back happens.
 value ⇒ the orchestrator serializes it (truncated to `READBACK_CAP` bytes) and makes **one more
 turn call** — the *read-back* — showing the model the result and the prose the skill already sent.
 
-**`route(ctx, turn)` — the turn call.** `route` gained a second argument
-`turn = { labeledTranscript, readback? }` and now returns the control signal
-`{ say, next, skills, info, lang, awaitFrom }` (was `{ tasks, lang, info }`). Still **no
-`output_config`** — the reply shape is demanded in the prompt (`router/prompt.js`), and the
-read-back turn reuses the **same** system prompt (only the user message differs), so both calls stay
-on the generic path. The model reads a **labelled** transcript (`buildLabeledTranscript` —
-`OWNER`/`SECRETARY`/`CONTACT`, so it can tell her own past words from his); `ctx.transcript` (the
-unlabelled `ME:`/`OTHER:` string) is **unchanged**, so the six unconverted skills' own extractors
-see today's exact bytes. The labelled transcript is a plain webhook-handler local passed as the
-`route()` argument — **not** a `ctx` field, so the `ctx` surface is unchanged.
+**`route(ctx, turn)` — the unified turn call.** `turn = { labeledTranscript, readback?, stateBlock }`.
+It returns `{ say, keepListening, execute, lang, pendingNeed, degraded }`, having carried
+`output_config: jsonFormat(TURN_DECISION_SCHEMA)` + `buildNativeTools(ctx.env)` + `thinking:{type:"adaptive"}`
+on ONE `messages.create`, with the server-tool `pause_turn` resume loop inline (bounded by
+`NATIVE_MAX_TOOL_HOPS`, each create bounded by `NATIVE_ANSWER_TIMEOUT_MS`). The old "no `output_config`"
+rule is gone — the schema is the generic `TURN_DECISION_SCHEMA` (names no skill), and the extraction
+call's schema is derived shape-only, so the orchestrator still never imports a skill's schema.
+`readReply`/`parseJsonReply` is the retained degrade fallback. The read-back turn reuses the **same**
+system prompt (only the user message differs). The model reads a **labelled** transcript
+(`buildLabeledTranscript`), plus the rendered `state` (`renderStateBlock`) and, when present,
+`ctx.audioTranscript` (a system-side transcription, inline text — the model can't ingest audio).
+`ctx.transcript` (the unlabelled `ME:`/`OTHER:` string) is **unchanged**.
 
-**The four states, crossed with `say` (prose | null):**
-- **`listen`** — reply (or stay silent) and keep the conversation open; the model declares
-  `awaitFrom` (`owner`/`contact`/`any`) for who to listen to next.
-- **`execute`** — run `skills` now with `info` (the first skill's payload). Dispatch is the same
-  dual-intent batch as today: deduped, order preserved, **only `skills[0]` receives `info`**.
-- **`answer`** — a direct question no skill covers. The orchestrator runs a **second, tool-carrying
-  model call**, `answer(ctx, { labeledTranscript })` (`router/router.js`), with `lib/nativeTools.js`'s
-  bundle attached (`web_search` + `web_fetch`, plus `code_execution` when `NATIVE_CODE_EXEC` is on),
-  and delivers the **prose** inline via `sendSay` in the same reply. The classification call itself
-  still carries **no tools** and returns JSON, so an `answer` turn can never reach the degraded menu.
-  The answer pass resumes a `pause_turn` up to `NATIVE_MAX_TOOL_HOPS` (each call bounded by
-  `NATIVE_ANSWER_TIMEOUT_MS`), the marker caps the conversation at `NATIVE_MAX_ANSWERS` answers, and
-  `answer()` returns `{text, lang, hops, outcome}` — `ok` sends the prose and stays open, `timeout`/
-  `tool_error` send a notice and close, and `refusal` closes **silently**. `answer()` never throws.
-- **`done`** — the conversation is over.
+**The three decisions, crossed with `say` (prose | null):**
+- **`execute = []` & `keepListening = true`** — reply (or stay silent) and keep the conversation open;
+  `pendingNeed` names what the model awaits, if anything. Answering a question — including one it ran a
+  live web search for THIS turn — is just `say=prose` here; there is no separate `answer` mode.
+- **`execute = [ids]`** — run the task(s). Dispatch is the same dual-intent batch: deduped, order
+  preserved, **only the primary (`execute[0]`) receives the extracted `info`** (from `extract()`).
+- **`execute = []` & `keepListening = false`** — close. A clean task-completion close (`state.didWork`,
+  not degraded) sends the mandatory `finishedSignOff` after any `say`, then closes.
 
-**The tier is chosen by `conversation`:** an `"orchestrator"` primary is gated on **`ok`** (all
-three `checkPayload` tiers) — a failure is the **repair loop**, *not* a dispatch: the problems are
-rendered back to the model (`describeProblems`), which retries; after `MAX_REPAIRS` consecutive
-failures it gives up (`repairGiveUp`). A `"skill"` primary keeps today's **`shapeOk`** gate.
+**Extraction (`extract`) + the tier.** For an `execute`, `extract(ctx, {labeledTranscript, primary,
+spec, stateBlock, problems?})` produces the payload with its own `output_config` (no tools). An
+`"orchestrator"` primary is gated on **`ok`** — a failure re-runs `extract()` with `problems` threaded
+in (`MAX_REPAIRS`→`repairGiveUp`). A `"skill"` primary keeps the **`shapeOk`** hand-over gate. A primary
+that declares **no** inputs (`manifest.inputs == null`) skips extraction and dispatches directly
+(`infoFor = null`) — a harmless guard now that no routable skill is `inputs:null`.
 
-**RAILS CHANGE (b) — `inputs:null ⇒ dispatch-without-validation` (2026-07-15).** An `"orchestrator"`
-primary that declares **no** inputs (`manifest.inputs == null`, e.g. `transcribe_audio`) is
-dispatched **directly** (`infoFor = null`) instead of being gated on `ok`. Without it,
-`checkPayload(null, …).ok === false` would trap such a skill in the repair loop forever. The
-declared-inputs path is unchanged — the existing `checkPayload` gate is simply moved verbatim into
-the `else` branch, so `assistant_settings` and every declared skill behave exactly as before.
-
-**Read-back vs repair — two different follow-up turns, two different prompts.** A read-back
-(`turn.readback`) shows the model a dispatch's result and **forbids** executing again (the write
-invariant); a repair (`turn.repair`) shows the model its validation problems and **invites** a
-corrected execute. They are mutually exclusive and each has its own user prompt
-(`buildReadbackUser` vs `buildRepairUser` in `router/prompt.js`), sharing the same system prompt so
-both stay on the generic no-`output_config` path. (An earlier build reused the read-back prompt for
-the repair turn, so the prompt told the model it may NOT execute on the exact turn the repair loop
-needs it to — fixed here.)
+**Read-back vs repair.** A read-back (`turn.readback`) shows the model a dispatch's result and
+**forbids** executing again (the write invariant; `buildReadbackUser`). A repair is **no longer a
+decision turn**: it re-runs `extract()` with a `problems` block, so there is no `buildRepairUser` and
+`route()` never receives a repair arg. This is the Rev-3.1 fix — the correction feedback reaches the
+call that actually produces the payload.
 
 **The caps (module-locals in `server.js`) — the model can loop on skills, so the bound is code:**
 - **`MAX_TURNS = 10`** — *productive* turns only. **A deliberate-silence turn
-  (`{say:null, next:"listen"}`) is FREE** and does not count: the secretary listens to a real
-  human thread and must stay silent on chatter without the conversation dying.
+  (`{say:null, keepListening:true, execute:[]}`) is FREE** and does not count: the secretary listens
+  to a real human thread and must stay silent on chatter without the conversation dying.
 - **`MAX_DISPATCHES = 3`** — a **DISPATCH ceiling, NOT "3 writes".** Under a read-back design a
   dispatch can be a *read* (a future calendar delete costs two dispatches for one write). Do not
   re-document this as a write ceiling, and do not size the next card's constant against a pilot
@@ -252,8 +244,10 @@ additive, invisible to every caller — because that is the outcome message the 
 model. `sendFailure` records too, so a *failing* read-back does not re-narrate.
 
 **The conversation marker — and yielding the key.** The orchestrator's own open session is a
-**conversation marker** (`{ open, awaitFrom, lang, turns, dispatches, expiresAt }`) with **no
-`skill` field** — it carries the loop's counters between messages. Before the orchestrator clears
+**conversation marker** (`{ open, openingLang, lang, turns, dispatches, state }`) with **no
+`skill` field** — it carries the loop's counters AND the `state` object (goal + decision log + last
+payload + `pendingNeed` + `didWork`) between messages. `awaitFrom` is gone; the continuation gate keys
+on `open`. Before the orchestrator clears
 **or** writes the marker it **re-reads the key** and leaves it alone if a dispatched skill has taken
 it (a session that skill opened, carrying a `skill` field — its confirmation outranks the marker;
 `sessions.set` is a full overwrite).
@@ -412,7 +406,7 @@ choke point, on `ctx.lang`) to the owner's **own** number — `OWNER_NUMBER = pr
 || process.env.OWNER_NUMBER || null` — rather than to the current chat. It is a **no-op when
 `OWNER_NUMBER` is unset** (returns without sending), and it does **not** record onto
 `ctx._turn.said` (a side note, not this chat's outbound reply). It exists because the orchestrator
-only ever holds the *current* chat's number, which in an `awaitFrom:"contact"` booking is the
+only ever holds the *current* chat's number, which in a booking driven from the guest's chat is the
 **guest's**; originating a note to the owner needs a distinct send path. Additive — no existing
 `ctx` field or `send()` caller changes; today only `calendar_action` calls it (the Contacts
 "email saved" note). Skills guard the call with `typeof ctx.dmOwner === "function"` so they stay
@@ -439,8 +433,10 @@ continue without the `@secretary` tag. Shape:
   "expiresAt": 1720000900         // TTL — the skill sets it (e.g. 10–15 min)
 }
 ```
-The orchestrator only **reads** `awaitFrom`/`skill` (to gate + dispatch) and `lang` (to set
-`ctx.lang` on the continuation, since continuations bypass the router that detects it);
+The orchestrator's **own** marker gate now keys on `open` and continues from **any** sender (the
+`awaitFrom` field above is a legacy skill-session field the pure-task @mary flow no longer sets — see
+the marker gate at step 7). The orchestrator reads `skill` (to yield the key when a skill owns it) and
+`lang` (to set `ctx.lang` on the continuation, since continuations bypass the router that detects it);
 **skills own the rest.** A skill opts into multi-turn via the store on `ctx`, persisting
 `ctx.lang` so a later bare "yes" answers in the language the flow started in:
 ```js

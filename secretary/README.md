@@ -18,17 +18,18 @@ secretary/
 │   │   ├── llm.js           #     jsonFormat/readReply/readText/parseJsonReply + withThinkingDefault
 │   │   │                    #     (wraps the ONE Anthropic client: every call defaults thinking:disabled)
 │   │   ├── inputs.js        #     the declared-inputs contract: describeInputs (prompt text) +
-│   │   │                    #     checkPayload (the plain-code, no-AI gate). Knows declarations, not skills.
+│   │   │                    #     buildExecuteSchema (shape-only extraction schema) + checkPayload (no-AI gate)
 │   │   ├── sessions.js      #     per-chat conversation state in Redis (confirmations, clarifications)
+│   │   ├── transcribe.js    #     transcribeAudio(env,buffer,lang): system-side AssemblyAI transcription,
+│   │   │                    #     folded into the turn prompt as ctx.audioTranscript (the model can't take audio)
 │   │   └── nativeTools.js   #     buildNativeTools(env): the native server-side tool bundle (web_search +
-│   │                        #     web_fetch, code_execution when NATIVE_CODE_EXEC) for the answer pass
+│   │                        #     web_fetch, code_execution when NATIVE_CODE_EXEC), attached to the turn call
 │   └── router/
-│       ├── prompt.js        #     the MERGED prompt: classifies AND asks for the chosen skill's declared
-│       │                    #     inputs. No output_config — the format is demanded in the prompt, which is
-│       │                    #     what keeps the orchestrator from having to know what a calendar is.
-│       │                    #     Also holds buildAnswerSystem/buildAnswerUser (the answer-pass prompts).
-│       └── router.js        #     ONE Claude classification call ({ tasks, lang, info }); plus answer(): the
-│                            #     tool-carrying prose pass for the "answer" state (pause_turn loop + ceilings)
+│       ├── prompt.js        #     the turn + extraction prompts: buildRouterSystem (3-decision contract +
+│       │                    #     preamble), buildExtractionUser (the per-task payload call, with a repair
+│       │                    #     block), renderStateBlock. Both calls carry output_config (see router.js).
+│       └── router.js        #     the UNIFIED turn call route() ({say,keepListening,execute} + tools + adaptive
+│                            #     thinking + pause_turn loop) and extract() (the schema-locked per-task payload)
 ├── improvements/           # runtime failure-report spool (gitignored; pulled to Bugs and Malfunctions/)
 ├── specs/                  # runtime feature-spec spool (gitignored; pulled to New Features Plans/)
 └── 3. Mary Skills/          # one folder per skill; the orchestrator scans this at boot

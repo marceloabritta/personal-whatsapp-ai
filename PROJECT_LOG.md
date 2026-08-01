@@ -25,14 +25,19 @@ state, shared with Evolution's cache) + per-skill external APIs (Google Calendar
 AssemblyAI). Everything runs in Docker on a single DigitalOcean droplet. See
 `ARCHITECTURE.md` for the full "what is sent to each service" data flow.
 
-Seven skills exist today:
+The router catalog serves **FIVE routable tasks** today (card 327be40b): audio and flight left the
+catalog — audio is handled by **system-side transcription** folded into the turn prompt (`lib/transcribe.js`
++ `ctx.audioTranscript`), and flight questions are answered **natively** via the turn call's inline web
+search (no dispatched skill). The two skills stay on disk, `routable:false`, DORMANT (one-line flip to
+re-enable). The seven skill directories:
 - `calendar_action` — **creates**, **edits/reschedules**, **cancels/deletes**, and
   **reads/lists** Google Calendar events. Create and cancel are confirm-first (the owner
   types `yes`); edit is a reply-driven change (move/relength/rename/add-remove attendee),
   confirm-first and stays open until saved, clarifying when ambiguous; **list is read-only**
   (no session, no confirm, no write — "what's on tomorrow?", "what's my next meeting?").
-- `transcribe_audio` — reply to a voice message + `@secretary transcribe`; downloads the
-  audio from WhatsApp and transcribes it via AssemblyAI.
+- `transcribe_audio` — **DORMANT (`routable:false`).** Reply to a voice message + `@mary transcribe`;
+  audio is now transcribed SYSTEM-SIDE (`lib/transcribe.js`) and folded into the turn prompt as inline
+  text, so the model handles it as ordinary prose — no dispatched skill. The skill code is retained.
 - `task_action` — a to-do inbox: add / list / complete / edit / delete todos, **one or many
   per message**, via a single list-aware planner that matches the owner's words to tasks on
   file. Stays **engaged without re-tagging** for a window. A todo for the owner goes to Google
@@ -46,12 +51,9 @@ Seven skills exist today:
   `scripts/self-learning-pull.sh` + `/triage-failures` turn into an implementation plan. The
   only way a **false positive** or a confidently-wrong answer ever gets caught — the code has
   no idea it failed. Part of **self-learning** (see `ARCHITECTURE.md`).
-- `flight_search` — search flights from a sentence, **confirm-first**, then the **3 cheapest
-  options a human would actually pick**: a mandatory client-side filter throws away the
-  multi-stop and carrier-chained (self-transfer) itineraries Kiwi floats to the top of a
-  cheapest-first list, **before** the sort. One follow-up turn hands over the booking link
-  (`link for option 2`, tagged or not). It **never buys**. Provider: Kiwi's keyless MCP
-  endpoint. See `secretary/3. Mary Skills/6. Flight Search/SKILL.md`.
+- `flight_search` — **DORMANT (`routable:false`).** Flight questions are now answered NATIVELY: the
+  unified turn call runs a live web search inline and replies in prose, dispatching no skill. The Kiwi
+  skill code is retained on disk. See `secretary/3. Mary Skills/6. Flight Search/SKILL.md`.
 - `assistant_settings` — **change how you summon her, by asking her.** `@mary, change your
   tag to @assist`: she deduces whether the other language's call should change too, says the
   reasoning in prose, shows the **complete** new tag list, and applies it only on a `yes`. The
@@ -85,12 +87,16 @@ there is no cross-skill `startCreate`/`callSkill` coupling. The tree is discover
   `git pull` updates the live code. SSH from this Mac via alias **`secretaria-droplet`**
   (key `~/.ssh/whatsapp_droplet`; real IP in `~/.ssh/config`, kept out of this file).
 
-- **Single always-@mary flow (2026-07-28).** `@mary` (env `SECRETARY_TAG_NEW`, default `@mary`)
-  summons the orchestrator turn loop: the model drives listen/execute/done, and `execute` is
-  non-terminal (a skill's return value drives a read-back turn). Skills live only under
-  `secretary/3. Mary Skills/` (all seven pure tasks — the orchestrator holds every conversation;
-  calendar/tasks/flights are READ-then-ACT). There is no @assistant flow, no OLD/NEW split, no
-  A/B run: the retired `2. Skills/` tree and `1. Orchestrator/legacy/` are deleted.
+- **Single always-@mary flow (2026-07-28; overhauled 2026-07-31, card 327be40b).** `@mary` (env
+  `SECRETARY_TAG_NEW`, default `@mary`) summons the orchestrator turn loop. Each turn is now ONE unified
+  `messages.create` carrying `output_config` (the three-decision envelope `{say, keepListening, execute}`)
+  + the native toolset + adaptive thinking; an `execute` triggers a second, per-task, schema-locked
+  `extract()` call (repair re-extracts on a validation failure), then dispatches. The conversation is
+  stateful (a `state` object on the marker), the continuation gate is open to ANY sender while the marker
+  is open (no `awaitFrom`), and a clean task-completion close sends a mandatory sign-off. The catalog is
+  FIVE routable tasks (audio + flight dormant). Skills live only under `secretary/3. Mary Skills/` (pure
+  tasks — the orchestrator holds every conversation; calendar/tasks are READ-then-ACT). There is no
+  @assistant flow, no OLD/NEW split, no separate answer pass.
 
 **What works now:** `calendar_action` end-to-end — **create** (real events + invite emails;
 Google OAuth token re-minted + consent screen published, see §8) and **cancel/delete**
@@ -505,6 +511,44 @@ purpose — this list went stale once already by counting.*
 ## 10. Changelog (evolution log)
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
+
+- **2026-07-31 — Overhaul: unified per-turn call + two-phase execute + stateful conversations
+  (card 327be40b).** A RAILS re-architecture of the @mary turn loop. **(1) One unified turn call.**
+  `route()` is now a SINGLE `messages.create` carrying `output_config: jsonFormat(TURN_DECISION_SCHEMA)`
+  **and** the native toolset (`buildNativeTools`) **and** adaptive thinking, with the server-tool
+  `pause_turn` resume loop inline. It returns a THREE-decision envelope `{say, keepListening, execute}`
+  (no `next`, no `answer`, no inline `info`, no `awaitFrom`). Answering a question — including one that
+  needs a live web search this turn — is simply `say=prose`; the separate `answer()` pass is **DELETED**
+  and its capability absorbed. `parseJsonReply` (via `readReply`) is retained as the degrade-to-menu
+  fallback. **Verified live**: `output_config` + tools + adaptive thinking + the media/vision path all
+  compose and return a schema-valid decision, and a tool-using/pause_turn turn resolves to the final
+  JSON. `max_tokens` on the turn call was raised 1024→**8192** because adaptive thinking can otherwise eat
+  the budget and truncate the JSON (observed live at 2048). **(2) Two-phase execute.** Because
+  `output_config` forbids the polymorphic `info`, payload extraction moved to a second per-task call,
+  `extract()`, whose schema is derived SHAPE-ONLY from the skill's `manifest.inputs` by a new
+  `buildExecuteSchema` (`lib/inputs.js`) — the orchestrator still never imports a skill's schema.
+  `checkPayload` stays the net; a failed validation **RE-RUNS `extract()`** with the `describeProblems`
+  feedback threaded in (repair = re-extraction, NOT a re-decision), bounded by `MAX_REPAIRS`→`repairGiveUp`.
+  `buildRepairUser`/`turn.repair`/`pendingRepair` are retired. **(3) Stateful conversation.** The marker
+  carries a `state` object (goal + decision log + last payload + pendingNeed + `didWork`), fed to every
+  turn via `renderStateBlock`. `awaitFrom` is removed and the continuation gate opens to ANY sender while
+  the marker is `open` (a guest scheduling with the owner can now answer inline). A mandatory bilingual
+  **sign-off** (`ORCH_MSG.finishedSignOff`) is system-guaranteed on a clean task-completion close (gated
+  on `state.didWork`; never on chatter-ignore or a cap/error close). **(4) Catalog trimmed to FIVE.**
+  `transcribe_audio` and `flight_search` are flagged `routable:false` and skipped by `loadSkills()` (left
+  DORMANT on disk, one-line flip to re-enable): audio is handled by SYSTEM-SIDE transcription (new
+  `lib/transcribe.js` + a new `ctx.audioTranscript` field, folded into the turn prompt as inline text,
+  because the model cannot ingest audio); flight questions are answered natively via the inline toolset.
+  `feedback` gained an extraction `rulebook`. **Cost/latency is materially higher per turn** (adaptive
+  thinking + full toolset on every turn, +1 extraction call per execute) — accepted for the capability
+  (inline web search like the Claude.ai app) and the single code path. Rails edits (all authorized by
+  PLAN Rev 3.1): `router/router.js`, `router/prompt.js`, `lib/inputs.js`, `lib/whatsapp.js` (named
+  `HISTORY_WINDOW`), new `lib/transcribe.js`, `server.js`. Tests: new `scripts/mary-turn-twophase-selftest.mjs`
+  (offline); `settings-selftest`/`retire-assistant-selftest` reworked to the two-phase `kindOf` + sign-off;
+  `mary-calendar-guest-email-await-selftest` rewritten to the open-gate contract; `unrouted-classification`
+  + `feature-request-autofile` + `router-selftest` repointed to the three-decision envelope;
+  `native-tools-selftest` DELETED (its `answer()` path is gone). Live `router-selftest` 13/13 green on the
+  five-task catalog.
 
 - **2026-07-29 — Fix: Mary no longer emits a garbled "translate X into X" reply (card
   bea6dea5).** `localizeBody` (`server.js`) could hand the cheap `TRANSLATE_MODEL` text

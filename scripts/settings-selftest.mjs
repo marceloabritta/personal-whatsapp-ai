@@ -85,27 +85,30 @@ let unscripted = [];   // a recognised call with no fixture -> informational
 let unrecognised = []; // a call kindOf could NOT place -> harness fault
 let CLOCK = 1768307000;
 
-// Identify WHICH call the fake is answering, from the WHOLE request body.
-//  - "turn"             : the merged/turn call — NO output_config, and the skill catalog
-//                         ("Available tasks:") in the system prompt. The read-back turn reuses
-//                         the same system prompt, so it is a "turn" too (told apart by order).
-//  - "selflearn_analyze": lib/selflearning.js analyze() — a prose call fired by every capture.
-//  Anything else with no output_config is a harness fault, surfaced loudly (never a default).
+// Identify WHICH call the fake is answering, from the WHOLE request body. AFTER the Mary overhaul
+// (card 327be40b) BOTH the decision call and the extraction call carry output_config, so the kind
+// is read off the SCHEMA's property set, not the presence/absence of output_config:
+//  - "turn"             : the unified DECISION call — output_config schema = TURN_DECISION_SCHEMA
+//                         (has `keepListening`). The read-back turn reuses the same schema, so it is
+//                         a "turn" too (told apart by fixture order).
+//  - "extract"          : the per-task EXTRACTION call — output_config schema is derived shape-only
+//                         from the skill's declaration (buildExecuteSchema), so NO `keepListening`
+//                         and NO tools. It returns the payload.
+//  - "selflearn_analyze": lib/selflearning.js analyze() — a prose call (no output_config).
+//  Anything else is a harness fault, surfaced loudly (never a default).
 function kindOf(body) {
   const schema = body?.output_config?.format?.schema;
   if (!schema) {
     const sys = String(body?.system || "");
-    if (/Available tasks:/.test(sys)) return "turn";
     if (/senior engineer triaging a failure/i.test(sys)) return "selflearn_analyze";
     throw new Error(
-      `kindOf: a no-output_config call that is neither the turn call nor the ` +
-        `self-learning analyze — system="${sys.slice(0, 70)}…"`
+      `kindOf: a no-output_config call that is not the self-learning analyze — ` +
+        `system="${sys.slice(0, 70)}…"`
     );
   }
-  // The @secretaria pilot has NO output_config path — the whole flow is the merged turn call.
-  // So any output_config (schema) call is a real fault.
-  const keys = Object.keys(schema.properties || {});
-  throw new Error(`kindOf: an unexpected output_config call — properties=${JSON.stringify(keys)}`);
+  const props = Object.keys(schema.properties || {});
+  if (props.includes("keepListening")) return "turn"; // the unified decision envelope
+  return "extract"; // a per-task derived extraction schema (the payload call)
 }
 
 const JID_OWNER = "5511994224000@s.whatsapp.net";
@@ -289,6 +292,7 @@ async function say(text, { fromMe = true, pushName = "Marcelo" } = {}) {
   return {
     out: sent.slice(before),
     turnCalls: llmCalls.slice(callsBefore).filter((c) => c.kind === "turn").length,
+    extractCalls: llmCalls.slice(callsBefore).filter((c) => c.kind === "extract").length,
   };
 }
 
@@ -299,18 +303,22 @@ function resetScenario() {
   scripted = [];
 }
 
-// ---- fixtures: a single pinned TURN reply in the new three-state shape -------
-// PLAN.md §route: route(ctx, turn) -> { say, next, skills, info, lang }. `awaitFrom` rides the
-// reply so the orchestrator can persist the marker with the party it should listen to next
-// (PLAN.md Sequence 6.4 "the model's declared awaitFrom").
-const turnReply = (o) => ({ kind: "turn", json: JSON.stringify({ lang: "en", ...o }) });
-const listen = (say, awaitFrom = "owner") =>
-  turnReply({ say, next: "listen", awaitFrom, skills: [], info: null });
-const silent = (awaitFrom = "owner") =>
-  turnReply({ say: null, next: "listen", awaitFrom, skills: [], info: null });
-const execute = (tags) =>
-  turnReply({ say: null, next: "execute", skills: ["assistant_settings"], info: { tags } });
-const done = (say = null) => turnReply({ say, next: "done", skills: [], info: null });
+// ---- fixtures: the two-phase shape ------------------------------------------
+// The unified DECISION call returns { say, keepListening, execute, lang, pendingNeed } (no `next`,
+// no `info`, no `awaitFrom`); an EXECUTE decision is followed by a separate EXTRACTION call that
+// returns the skill's payload. So `execute` splits into a decision fixture (kind "turn") + an
+// extract fixture (kind "extract"): push both, decision first.
+const turnReply = (o) => ({
+  kind: "turn",
+  json: JSON.stringify({ lang: "en", say: null, keepListening: true, execute: [], pendingNeed: null, ...o }),
+});
+const extractReply = (payload) => ({ kind: "extract", json: JSON.stringify(payload) });
+const listen = (say) => turnReply({ say, keepListening: true, execute: [] });
+const silent = () => turnReply({ say: null, keepListening: true, execute: [] });
+const done = (say = null) => turnReply({ say, keepListening: false, execute: [] });
+// An execute is a DECISION (run assistant_settings) + the EXTRACTED payload it needs.
+const executeDecision = () => turnReply({ say: null, keepListening: true, execute: ["assistant_settings"] });
+const executeTags = (tags) => extractReply({ tags });
 
 const raw = (msgs) => msgs.join("\n~~~\n");
 const has = (msgs, s) => raw(msgs).includes(s);
@@ -339,7 +347,7 @@ console.log("\n=== §1  ask -> execute -> read-back -> close (flow A) ===\n");
 
   // TURN 1: a tag-change order. The model asks (listen) — one proposal message, nothing
   // written, the marker left open.
-  scripted = [listen("Want me to switch how you summon me? Reply to confirm.", "owner")];
+  scripted = [listen("Want me to switch how you summon me? Reply to confirm.")];
   const t1 = await say("@secretaria change your tag to @assist");
   console.log(`   owner    : @secretaria change your tag to @assist`);
   console.log(`   assistant: ${t1.out.map((m) => JSON.stringify(m.slice(0, 60))).join(" | ") || "(nothing)"}`);
@@ -352,16 +360,21 @@ console.log("\n=== §1  ask -> execute -> read-back -> close (flow A) ===\n");
   // TURN 2: the owner confirms (UNTAGGED). The model executes (the skill runs, saves, reports
   // ONE outcome), then the returned value drives a READ-BACK turn that says done -> close.
   scripted = [
-    execute(["@assist"]), // the execute turn: dispatch the skill once
-    done(null),           // the read-back turn: nothing more to say -> close
+    executeDecision(),          // the execute DECISION turn: run the skill
+    executeTags(["@assist"]),   // the EXTRACTION call: the payload it needs
+    done(null),                 // the read-back turn: nothing more to say -> clean close
   ];
   const t2 = await say("yeah go for it");
   console.log(`   owner    : yeah go for it   <- UNTAGGED confirmation`);
   console.log(`   assistant: ${t2.out.map((m) => JSON.stringify(m.slice(0, 60))).join(" | ") || "(nothing)"}`);
-  console.log(`   -> turn calls: ${t2.turnCalls}, messages: ${t2.out.length}`);
-  check("§1.4  the execute turn runs the skill and sends EXACTLY ONE outcome message", t2.out.length === 1);
+  console.log(`   -> turn calls: ${t2.turnCalls}, extract calls: ${t2.extractCalls}, messages: ${t2.out.length}`);
+  // Two messages now: the skill's outcome, then the system-guaranteed sign-off on the clean close.
+  check("§1.4  the execute turn runs the skill (outcome + sign-off = 2 messages)", t2.out.length === 2);
   check("§1.5  …the tag is APPLIED (the outcome names @assist)", has(t2.out, "@assist"));
-  check("§1.6  a READ-BACK turn fires after execute (execute + read-back = 2 turn calls)", t2.turnCalls === 2);
+  check("§1.6  a READ-BACK turn fires after execute (decision + read-back = 2 turn calls, 1 extract)",
+    t2.turnCalls === 2 && t2.extractCalls === 1);
+  check("§1.6b  the mandatory sign-off fired on the clean close (names the trigger tag)",
+    has(t2.out, "finished this task") && has(t2.out, "@secretaria"));
 
   // The cycle CLOSED: a further untagged owner message is now ignored (the marker is gone).
   scripted = [done(null)]; // unused if closed, harmless if the loop mistakenly re-opens
@@ -370,8 +383,8 @@ console.log("\n=== §1  ask -> execute -> read-back -> close (flow A) ===\n");
   check("§1.7  the conversation is CLOSED — a later untagged message triggers no turn, no reply",
     probe.turnCalls === 0 && probe.out.length === 0);
 
-  // Across flow A the owner saw exactly TWO messages: the proposal and the outcome.
-  check("§1.8  end to end: exactly TWO owner-visible messages (proposal + outcome)", sent.length === 2);
+  // Across flow A the owner saw THREE messages: the proposal, the outcome, and the sign-off.
+  check("§1.8  end to end: exactly THREE owner-visible messages (proposal + outcome + sign-off)", sent.length === 3);
 
   await s.done();
 }
@@ -387,8 +400,9 @@ console.log("\n=== §2  the write invariant: a read-back may not execute ===\n")
   // read-back turn ILLEGALLY emits execute again. The orchestrator must treat that as done and
   // dispatch NOTHING: no second write, no @nope outcome, and a read-back-execute capture filed.
   scripted = [
-    execute(["@assist"]),  // legit execute
-    execute(["@nope"]),    // the read-back turn tries to write again — must be REFUSED
+    executeDecision(),         // legit execute decision
+    executeTags(["@assist"]),  // its payload
+    executeDecision(),         // the read-back turn tries to execute again — REFUSED before extraction
   ];
   const before = await nReports(s.dir);
   const t = await say("@secretaria change your tag to @assist");
@@ -416,11 +430,11 @@ console.log("\n=== §3a  MAX_TURNS: a conversation that never closes is capped =
   // turn consumes one of MAX_TURNS. Drive well past the cap and prove: the marker really did
   // stay open across messages (turn calls fired for the untagged follow-ups), then the cap
   // closed it (a capture was filed and a later message is ignored).
-  scripted = [listen("still thinking about it…", "owner")];
+  scripted = [listen("still thinking about it…")];
   let openTurns = 0;
   await say("@secretaria change your tag to @assist"); // turn 1 opens the marker
   for (let i = 0; i < MAX_TURNS + 3; i++) {
-    scripted = [listen("still thinking about it…", "owner")];
+    scripted = [listen("still thinking about it…")];
     const r = await say(`keep going ${i}`);
     if (r.turnCalls > 0) openTurns++;
     if (r.turnCalls === 0) break; // capped/closed
@@ -431,7 +445,7 @@ console.log("\n=== §3a  MAX_TURNS: a conversation that never closes is capped =
     openTurns <= MAX_TURNS + 1);
   check("§3a.3  a MAX_TURNS cap capture was filed", (await nReports(s.dir)) >= 1);
   // The cycle is closed now: a fresh untagged message is ignored.
-  scripted = [listen("x", "owner")];
+  scripted = [listen("x")];
   const after = await say("still there?");
   check("§3a.4  after the cap the conversation is CLOSED (a later message is ignored)",
     after.turnCalls === 0 && after.out.length === 0);
@@ -447,7 +461,7 @@ console.log("\n=== §3b  MAX_DISPATCHES + one-dispatch-per-message ===\n");
   // ONCE (one batch = one dispatch, PLAN.md 6a). After MAX_DISPATCHES the next execute is
   // capped. So the number of outcome messages that name a written tag == MAX_DISPATCHES, no
   // more — the (N+1)th message writes nothing.
-  const scriptExecuteThenListen = () => { scripted = [execute(["@keepx"]), silent("owner")]; };
+  const scriptExecuteThenListen = () => { scripted = [executeDecision(), executeTags(["@keepx"]), silent()]; };
   scriptExecuteThenListen();
   const t1 = await say("@secretaria set your tag to @keepx");
   let outcomes = has(t1.out, "@keepx") ? 1 : 0;
@@ -474,10 +488,10 @@ console.log("\n=== §4  deliberate silence does not consume MAX_TURNS ===\n");
   // Open the marker to listen to ANYONE (awaitFrom:"any"), then pour MORE than MAX_TURNS worth
   // of silent turns through it — chatter the model answers with {say:null,next:"listen"}. A
   // silent turn is FREE. If it were counted, the cap would have fired by now.
-  scripted = [listen("okay, I'm listening — tell me the new tag.", "any")];
+  scripted = [listen("okay, I'm listening — tell me the new tag.")];
   await say("@secretaria I want to change my tag");
   for (let i = 0; i < MAX_TURNS + 4; i++) {
-    scripted = [silent("any")];
+    scripted = [silent()];
     await say(`chatter ${i}`, { fromMe: false, pushName: "Ana" }); // a contact talking
   }
   const reportsAfterSilence = await nReports(s.dir);
@@ -485,7 +499,7 @@ console.log("\n=== §4  deliberate silence does not consume MAX_TURNS ===\n");
   check("§4.1  silence filed NO cap capture (deliberate silence did not consume MAX_TURNS)",
     reportsAfterSilence === 0);
   // Prove the conversation is STILL OPEN: an owner message still drives a turn and gets a reply.
-  scripted = [listen("still here — what's the new tag?", "any")];
+  scripted = [listen("still here — what's the new tag?")];
   const probe = await say("ok here it is");
   console.log(`   owner    : ok here it is   <- the conversation should STILL be open`);
   check("§4.2  the conversation is STILL OPEN after all that silence (a turn fires, a reply is sent)",
@@ -495,28 +509,30 @@ console.log("\n=== §4  deliberate silence does not consume MAX_TURNS ===\n");
 }
 
 // ============================================================================
-//  §5 — THE REPAIR LOOP: a payload that fails checkPayload is a TURN, not a dispatch.
+//  §5 — THE REPAIR LOOP (Rev-3.1): a payload that fails checkPayload RE-EXTRACTS, never writes.
 // ============================================================================
-console.log("\n=== §5  the repair loop: a bad payload re-turns, never writes ===\n");
+console.log("\n=== §5  the repair loop: a bad payload re-EXTRACTS, never writes ===\n");
 {
   const s = await scenario();
 
-  // The model executes with a payload that fails the pilot's consistency check
-  // (normalizeTags rejects tags with spaces). That is NOT a dispatch: describeProblems is
-  // rendered back into a repair turn and the model is asked again — still in the SAME webhook.
-  // Two consecutive failures hit MAX_REPAIRS -> repairGiveUp. Nothing is ever written.
+  // ONE decision turn (execute the skill), then the EXTRACTION call returns a payload that fails the
+  // pilot's consistency check (normalizeTags rejects tags with spaces). That is NOT a dispatch and NOT
+  // a fresh decision turn: describeProblems is threaded back into a SECOND extract() call, still in
+  // the SAME webhook. Two consecutive extraction failures hit MAX_REPAIRS -> repairGiveUp. Nothing is
+  // ever written, and route() runs EXACTLY ONCE (repair re-extracts, it does not re-route).
   scripted = [
-    execute(["@ ass ist"]),  // invalid (spaces) -> repair turn 1
-    execute(["@b a d"]),     // invalid again    -> repair turn 2 -> give up
-    done(null),              // spare, in case the loop asks once more
+    executeDecision(),               // the ONE decision turn
+    executeTags(["@ ass ist"]),      // extract #1: invalid (spaces) -> re-extract
+    executeTags(["@b a d"]),         // extract #2: invalid again    -> give up (MAX_REPAIRS)
+    done(null),                      // spare, in case the loop asks once more
   ];
   const before = await nReports(s.dir);
   const t = await say("@secretaria rename yourself to '@ ass ist'");
   console.log(`   owner    : @secretaria rename yourself to '@ ass ist'`);
   console.log(`   assistant: ${t.out.map((m) => JSON.stringify(m.slice(0, 60))).join(" | ") || "(nothing)"}`);
-  console.log(`   -> turn calls in the webhook: ${t.turnCalls}`);
-  check("§5.1  a failing payload RE-TURNS (>= 2 turn calls) — it repaired, it did not dispatch",
-    t.turnCalls >= 2);
+  console.log(`   -> turn calls: ${t.turnCalls}, extract calls: ${t.extractCalls}`);
+  check("§5.1  a failing payload RE-EXTRACTS (>= 2 extract calls) and route() ran ONCE — no re-route",
+    t.extractCalls >= 2 && t.turnCalls === 1);
   check("§5.2  NOTHING was written (no outcome message names an applied tag)",
     !has(t.out, "@ ass ist") && !has(t.out, "@b a d") && !has(t.out, "@assist"));
   check("§5.3  a repair-give-up capture was filed", (await nReports(s.dir)) > before);
