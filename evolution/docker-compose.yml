@@ -75,7 +75,7 @@ services:
       CLAUDE_MODEL: claude-opus-4-8
       CLAUDE_EFFORT: high
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-03.1"
+      PROMPT_VERSION: "2026-08-03.2"
       # Tools
       MAX_TOOL_ACTIONS: "4"
       # Google calendar tool (owner's account)

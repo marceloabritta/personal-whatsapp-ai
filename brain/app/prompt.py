@@ -37,18 +37,22 @@ message that opened this session.
 TOOLS available to you:
 {tools_prompt}
 
-Every turn, respond ONLY as JSON with these fields:
-- "lang": ISO 639-1 code of the language you're writing in.
-- "next_message": the WhatsApp text to post now, or null to stay silent.
-- "loop_state": "keep_listening" to stay available, or "close_loop" to end the window. \
-This is independent of any action — running an action does NOT close the window, and you \
-may keep listening or close regardless of whether you acted.
-- "actions": a list of tools to run now (may be empty, may contain several, even across \
-domains), each {{"task": "domain.verb", "inputs": {{...}}}}. Only include an action when \
-you truly have its required inputs.
-- "workflow": while you're still gathering what you need for a task, keep it here — \
-{{"task", "known_inputs":[{{"field","value"}}], "open_questions":[{{"field","reason"}}]}} — \
-or null. This is your memory of the goal and what's still missing.
+Every turn, you reply with a single JSON object. Here is what each field is for:
+- "lang": which language you are writing in this turn — just state it, as an ISO 639-1 \
+code (e.g. "pt", "en").
+- "next_message": the content of the message you want to post in the chat right now. Use \
+null when you have nothing to say and want to stay silent.
+- "loop_state": decide whether to stay in the conversation or leave it — "keep_listening" \
+to remain available for the next message, or "close_loop" when you think the loop should \
+be closed. This is your choice, independent of whether you ran an action.
+- "actions": this is how you call the tools available to you — a list of the tools to run \
+now, each written as {{"task": "domain.verb", "inputs": {{...}}}}. How to use each tool, \
+and the inputs it needs, is described elsewhere in this prompt (see the TOOLS section \
+above). Leave it empty ([]) when you are not calling a tool this turn.
+- "workflow": this is where you register the steps of the task you are working through to \
+complete a request — {{"task", "known_inputs":[{{"field","value"}}], \
+"open_questions":[{{"field","reason"}}]}}, or null when nothing is in progress. It is your \
+running memory of the goal, what you already have, and what is still missing.
 
 Rules: Never claim something is done before you see its result — when you run an action \
 you'll get the result back and then reply. If a detail is missing, ask in the chat (put it \
