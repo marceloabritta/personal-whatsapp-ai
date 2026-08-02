@@ -3,39 +3,14 @@
 **/.env
 !**/.env.example
 
-# Dependencies
-node_modules/
-**/node_modules/
-package-lock.json
-
-# Reorg leftovers
-_to_delete/
-**/_to_delete/
-
-# Old scratch (abandoned Z-API approach)
-_deprecated_zapi_scaffold/
-
-# Self-learning: runtime failure reports (spool; synced to the top-level Improvements/).
-# LOAD-BEARING: /opt/secretary is a symlink INTO the production git tree, so reports the
-# container writes land in the live working copy. Untracked, they keep `git pull --ff-only`
-# on the droplet unblocked and keep private chat content out of the production checkout.
-secretary/improvements/*.md
-secretary/improvements/_synced/
-
-# Feature-spec spool (same load-bearing reason as improvements/ above): the skill writes specs
-# here at runtime, they are pulled to the top-level New Features Plans/, and are kept out of the
-# production checkout so `git pull --ff-only` on the droplet stays unblocked.
-secretary/specs/*.md
-secretary/specs/_synced/
+# Python (the brain)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
 
 # OS / editor cruft
 .DS_Store
 Thumbs.db
-
-# Impeccable — machine-local + ephemeral only. Shared artifacts (.impeccable/config.json,
-# design.json, critique/*.md) stay tracked so the design context lives with the repo.
-.impeccable/config.local.json
-.impeccable/live/
-.impeccable/cache/
-.impeccable/**/cache/
-.impeccable/screenshots/
