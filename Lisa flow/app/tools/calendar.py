@@ -29,34 +29,74 @@ _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 # `find` will surface it, so "no match" returns empty instead of the whole calendar.
 _MATCH_THRESHOLD = 0.6
 
+# Fixed English labels for the agenda layout, so a listing reads the same regardless of the
+# container's locale (strftime("%A"/"%b") would follow the server locale).
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
 DESCRIBE = (
     "Create, find, reschedule or cancel events on {owner_name}'s Google Calendar."
 )
 
 # Per-task guidance, appended to the system prompt (registry.build_task_prompts). Templated
 # with {owner_name}. Co-located with the handler so prompt and behaviour never drift.
-GUIDANCE = """Calendar actions — you manage {owner_name}'s Google Calendar with create, list, \
-find, update and delete.
+GUIDANCE = """Calendar actions — you manage {owner_name}'s Google Calendar: create an event, list the agenda, find an event, reschedule it (update), or cancel it (delete). General rules first, then each verb.
 
-- Times: treat everything in the configured timezone and write times as full ISO 8601 with \
-the offset. Resolve relative dates yourself ("tomorrow 3pm", "next Friday") into an explicit \
-ISO datetime — never pass vague words to the tool.
-- Creating: you only need a title and a start. Do not interrogate {owner_name} for details he \
-did not give; add a reasonable end and go (if you omit it, a default length is used). Clarify \
-only when acting without the answer would be wrong. Use `virtual: true` for a video call (a \
-Meet link is attached and location is dropped — video wins over a place); otherwise set \
-`location`. Add `attendees` emails when he names people; invites are emailed by default, so \
-when there are external guests they get notified — set `send_invites: false` only if he does \
-not want them emailed.
-- Editing or deleting: you never know an event's id. ALWAYS run `find` first to resolve the \
-exact event from what {owner_name} said — search by title words, by the person on it, or by \
-its time window. Read the candidates back, confirm the specific event if there is any doubt, \
-and only then update or delete using the id you found. Never invent an id.
-- Confirm before you change anything: for create, update and delete, restate the plan in one \
-short line and set `confirmed: true` only once {owner_name} has agreed. `list` and `find` are \
-free — no confirmation needed.
-- Report what actually happened, from the tool's result — never say something is done before \
-you have seen the result come back."""
+ALWAYS
+- The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" → 2026-08-07T15:00:00-03:00) — never pass a vague phrase to the tool.
+- Report what actually happened FROM the tool's result — never announce success before you have seen it come back.
+- Do not write the reply header (the system stamps it). No emoji.
+- You cannot make recurring/repeating events or all-day / multi-day events. If asked for one, say so briefly and offer a single timed event instead — never pretend you set up a recurrence.
+
+CREATE
+- You only need a title and a start; do not interrogate {owner_name} for details he did not give.
+- Title is what the event is ABOUT — a short topic ("Budget review", "Apartment viewing") — not who is on it; "Meeting with Ana" names the person, not the subject.
+- If he gives no end, it defaults to 45 minutes. Use `virtual: true` for a video call (a Google Meet link is created and the location is dropped — video wins over a place); otherwise set `location`. Add `attendees` emails when he names people; they are emailed an invite by default — set `send_invites: false` only if he does not want that.
+- If he is vague about the hour, assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) and show that assumption in the confirmation so he can fix it.
+- Get his go-ahead first — set `confirmed: true` only after he agrees — using EXACTLY this shape (omit the attendees line when there are none):
+
+Ok, confirming before I dispatch:
+<title>
+<date>
+<time>
+<attendees>
+<location — or "Google Meet (video call)" if virtual>
+
+Should I go ahead, or is anything missing?
+
+- Once it is created, confirm briefly and include the Google Meet link when there is one.
+
+LIST
+- Read-only, no confirmation. Resolve the window from his question (default: what is coming up).
+- The list tool returns the agenda ALREADY formatted by day. Send it back exactly as returned — do not reformat, re-sort, or add lines. The shape is a "DD/MMM - Weekday" header, then one "HH:MM - Title" per event, with a blank line between days. Say plainly when there is nothing.
+
+FIND
+- The resolver. Search by title words (`query`), the person on it (`attendee`), and/or a time window (`time_min`/`time_max`). If he asked "when is X", answer directly; when it is a step toward an edit or cancel it is internal — you do not announce it.
+- One clear match → proceed. Several → read them back and ask which one. None → say so. Never invent an id.
+
+UPDATE (reschedule / edit)
+- ALWAYS `find` first to get the id — never guess one. A new start keeps the original length unless you also give a new end. You can change the time, title, location, virtual, or attendees.
+- Get his go-ahead first (set `confirmed: true` only after he agrees), showing WHAT changes as before → now — EXACTLY this shape:
+
+Ok, confirming this change:
+<title> — <current date/time>
+<each change as "Field: was → now", e.g. Time: Fri 8 Aug 15:00 → Mon 11 Aug 17:00>
+
+Go ahead?
+
+- Once it is changed, confirm briefly what the event is now.
+
+DELETE (cancel)
+- ALWAYS `find` first to get the id. Confirm WHICH event so there is no mistake — set `confirmed: true` only after he agrees — using EXACTLY this shape (include the last sentence only if the event has attendees):
+
+Ok, confirming this cancellation:
+<title>
+<date>
+<time>
+
+Cancel this one? The guests will be notified.
+
+- Once it is cancelled, confirm briefly."""
 
 
 class GoogleCalendarService:
@@ -133,6 +173,7 @@ class GoogleCalendarService:
 
     @staticmethod
     def _lines(views: list[dict], fmt) -> str:
+        """Candidate lines for `find` — numbered, id-bearing, so the model can pick one to act on."""
         return "\n".join(
             f"{i + 1}. {v['title']} — {fmt(v['start'])}"
             + (f" @ {v['location']}" if v.get("location") else "")
@@ -140,6 +181,29 @@ class GoogleCalendarService:
             + f" [id={v['event_id']}]"
             for i, v in enumerate(views)
         )
+
+    @staticmethod
+    def _agenda(views: list[dict]) -> str:
+        """The owner's agenda layout for `list` — start-sorted events grouped by local day:
+            DD/MMM - Weekday
+            HH:MM - Title
+        one blank line between days; an all-day event shows 'All day - Title'."""
+        days: list[tuple] = []  # (date, [lines])
+        for v in views:
+            iso = v.get("start")
+            if not iso:
+                continue
+            try:
+                dt = datetime.fromisoformat(iso)
+            except ValueError:
+                continue
+            all_day = "T" not in iso
+            if not days or days[-1][0] != dt.date():
+                header = f"{dt.day:02d}/{_MONTHS[dt.month - 1]} - {_WEEKDAYS[dt.weekday()]}"
+                days.append((dt.date(), [header]))
+            time_str = "All day" if all_day else dt.strftime("%H:%M")
+            days[-1][1].append(f"{time_str} - {v.get('title') or '(no title)'}")
+        return "\n\n".join("\n".join(lines) for _, lines in days)
 
     def _body_from(self, inp: dict, base: dict | None = None) -> tuple[dict, bool]:
         """Build (event body, want_meet). Only fields present in `inp` are set, so the same
@@ -205,7 +269,7 @@ class GoogleCalendarService:
             params["timeMax"] = inp["time_max"]
         items = self._service().events().list(**params).execute().get("items", [])
         views = [self._event_view(e) for e in items]
-        return {"ok": True, "summary": self._lines(views, self._fmt) or "No upcoming events.",
+        return {"ok": True, "summary": self._agenda(views) or "No upcoming events.",
                 "data": {"items": views}}
 
     def _find(self, inp: dict) -> ActionResult:

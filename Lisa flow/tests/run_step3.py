@@ -483,14 +483,24 @@ async def calendar_checks() -> None:
     r = await _cal_handler().run("create", {"start": "2026-08-05T15:00:00-03:00"})
     check("[create] missing title -> validation error", r["ok"] is False and r["error"] == "validation")
 
-    # list: tz-aware timeMin (never naive -> Google 400).
+    # list: tz-aware timeMin (never naive -> Google 400) + the DD/MMM - Weekday agenda layout.
     import datetime as _dt
-    h = _cal_handler([_ev("L1", "Standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00")])
+    h = _cal_handler([
+        _ev("L1", "Standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00"),
+        _ev("L2", "Review", "2026-08-05T15:00:00-03:00", "2026-08-05T16:00:00-03:00"),
+        _ev("L3", "Dentist", "2026-08-06T11:00:00-03:00", "2026-08-06T12:00:00-03:00"),
+    ])
     r = await h.run("list", {})
     lm = next(kw["timeMin"] for v, kw in h._svc.events().calls if v == "list")
     check("[list] timeMin is tz-aware", _dt.datetime.fromisoformat(lm).tzinfo is not None)
-    check("[list] returns items with ids in the summary",
-          r["data"]["items"][0]["event_id"] == "L1" and "[id=L1]" in r["summary"])
+    check("[list] agenda header is 'DD/MMM - Weekday'", "05/Aug - Wednesday" in r["summary"])
+    check("[list] events are 'HH:MM - Title', time-ordered under the day",
+          "09:00 - Standup\n15:00 - Review" in r["summary"])
+    check("[list] a blank line separates days", "\n\n06/Aug - Thursday\n11:00 - Dentist" in r["summary"])
+    check("[list] ids still carried in data (not in the display)",
+          r["data"]["items"][0]["event_id"] == "L1" and "[id=" not in r["summary"])
+    check("[list] empty calendar says so", (await _cal_handler([]).run("list", {}))["summary"]
+          == "No upcoming events.")
 
     # find: full-text resolves the right event.
     seed = [
