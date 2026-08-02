@@ -22,9 +22,7 @@ def parse_node(
     text = extract_text(data.get("message")).strip()
     number = remote_jid.split("@")[0]
 
-    # main._run mints the trace id and puts it on the contextvar before ainvoke; honour
-    # it so the whole run shares one id. Fallback (direct-invoke tests): mint here.
-    tid = state.get("trace_id") or trace.start(number)
+    tid = trace.start(number)
     tag = matched_tag(text, tags) if from_me else None
 
     trace.code(
