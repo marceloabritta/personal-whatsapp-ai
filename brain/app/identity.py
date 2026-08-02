@@ -20,14 +20,21 @@ LEGACY_HEADERS = ["[Mary]:"]
 _LEADING_MARKERS = "*_~ \t\r\n"
 
 
-def header_for(owner_name: str) -> str:
-    """The reply header for this owner, e.g. '[Marcelo's AI Assistant]:'."""
+def header_for(owner_name: str, lang: str = "en") -> str:
+    """The reply header for this owner, localised to the session language.
+      en → [Marcelo's AI Assistant]:
+      pt → [Assistente IA do Marcelo]:
+    Any other language falls back to the English header (the body is still written
+    in the model's language)."""
+    if (lang or "en").lower().startswith("pt"):
+        return f"[Assistente IA do {owner_name}]:"
     return f"[{owner_name}'s AI Assistant]:"
 
 
 def all_headers(owner_name: str) -> list[str]:
-    """Every header we could have emitted — the current one plus retired ones."""
-    return [header_for(owner_name), *LEGACY_HEADERS]
+    """Every header we could have emitted — every language variant plus retired ones.
+    is_own_message needs all of them so an echoed PT reply is still recognised."""
+    return [header_for(owner_name, "en"), header_for(owner_name, "pt"), *LEGACY_HEADERS]
 
 
 def _ends_tag(ch: str) -> bool:
@@ -51,6 +58,6 @@ def is_own_message(text: str, owner_name: str) -> bool:
     return any(t.startswith(h) for h in all_headers(owner_name))
 
 
-def frame(body: str, owner_name: str) -> str:
-    """Stamp the bold reply header on a message body."""
-    return f"*{header_for(owner_name)}*\n\n{body}"
+def frame(body: str, owner_name: str, lang: str = "en") -> str:
+    """Stamp the bold, language-appropriate reply header on a message body."""
+    return f"*{header_for(owner_name, lang)}*\n\n{body}"

@@ -14,6 +14,7 @@ class MessageState(TypedDict, total=False):
     messages: Annotated[list, add_messages]  # model conversation history
     last_whatsapp_message_id: Optional[str]  # ingestion cursor
     initialized: bool  # seeded the window yet?
+    session_lang: Optional[str]  # language locked at the tag that opened the window
 
     # --- per-turn scratch ---
     raw: dict
@@ -36,6 +37,7 @@ class MessageState(TypedDict, total=False):
     # reasoning output + metadata (for the record)
     llm_state: str  # "keep_listening" | "close"
     reply_body: Optional[str]  # the model's message, or None (silence)
+    lang: Optional[str]  # language the model wrote in this turn
     provider: Optional[str]
     model: Optional[str]
     provider_request_id: Optional[str]

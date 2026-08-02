@@ -75,7 +75,7 @@ services:
       CLAUDE_MODEL: claude-opus-4-8
       CLAUDE_EFFORT: high
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-02.2"
+      PROMPT_VERSION: "2026-08-02.3"
     networks:
       - evolution-net
 

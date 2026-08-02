@@ -9,8 +9,11 @@ OUTPUT_SCHEMA = {
     "properties": {
         "state": {"type": "string", "enum": ["keep_listening", "close"]},
         "message": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        # ISO 639-1 code of the language the reply is written in (the language of
+        # the tagged message that started the session). Drives the reply header.
+        "lang": {"type": "string"},
     },
-    "required": ["state", "message"],
+    "required": ["state", "message", "lang"],
     "additionalProperties": False,
 }
 
@@ -18,6 +21,7 @@ OUTPUT_SCHEMA = {
 class ReasonResult(TypedDict, total=False):
     state: str  # "keep_listening" | "close"
     message: Optional[str]  # prose to send, or None (silence)
+    lang: Optional[str]  # ISO 639-1 code the reply is written in
     usage: Optional[dict]  # {"input": int, "output": int}
     provider_request_id: Optional[str]
     stop_reason: Optional[str]

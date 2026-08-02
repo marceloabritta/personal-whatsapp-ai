@@ -80,7 +80,7 @@ class AnthropicReasoner:
 
         if stop_reason == "refusal":  # declined — stay quiet, keep listening
             return ReasonResult(
-                state="keep_listening", message=None, usage=usage,
+                state="keep_listening", message=None, lang=None, usage=usage,
                 provider_request_id=request_id, stop_reason=stop_reason,
                 tool_calls=tool_names, error_category="none",
             )
@@ -92,18 +92,19 @@ class AnthropicReasoner:
             data = json.loads(text)
             state = data.get("state") or "keep_listening"
             message = data.get("message")
+            lang = data.get("lang")
             if state not in ("keep_listening", "close"):
                 state = "keep_listening"
         except (ValueError, TypeError):
             log.error("could not parse enforced JSON: %r", text[:300])
             return ReasonResult(
-                state="keep_listening", message=None, usage=usage,
+                state="keep_listening", message=None, lang=None, usage=usage,
                 provider_request_id=request_id, stop_reason=stop_reason,
                 tool_calls=tool_names, error_category="provider",
             )
 
         return ReasonResult(
-            state=state, message=message, usage=usage,
+            state=state, message=message, lang=lang, usage=usage,
             provider_request_id=request_id, stop_reason=stop_reason,
             tool_calls=tool_names, error_category="none",
         )

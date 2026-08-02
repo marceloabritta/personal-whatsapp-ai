@@ -45,6 +45,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     update: dict = {
         "llm_state": llm_state,
         "reply_body": message,
+        "lang": result.get("lang"),
         "provider": settings.llm_provider,
         "model": settings.claude_model,
         "provider_request_id": result.get("provider_request_id"),

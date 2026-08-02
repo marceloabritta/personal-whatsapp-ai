@@ -25,6 +25,7 @@ from app.trace import build_trace  # noqa: E402
 
 OWNER_JID = "5511976001033@s.whatsapp.net"
 OTHER_JID = "5531888888888@s.whatsapp.net"
+PT_JID = "5521777777777@s.whatsapp.net"
 _checks = {"pass": 0, "fail": 0}
 
 
@@ -42,9 +43,9 @@ class StubReasoner:
         self.calls.append({"system": system, "messages": list(messages)})
         if self.script:
             return self.script.pop(0)
-        return {"state": "keep_listening", "message": None, "usage": {"input": 1, "output": 1},
-                "provider_request_id": "req_stub", "stop_reason": "end_turn",
-                "tool_calls": [], "error_category": "none"}
+        return {"state": "keep_listening", "message": None, "lang": "en",
+                "usage": {"input": 1, "output": 1}, "provider_request_id": "req_stub",
+                "stop_reason": "end_turn", "tool_calls": [], "error_category": "none"}
 
 
 class FakeEvolution:
@@ -95,7 +96,7 @@ async def main() -> None:
     deps, evo, stub, graph = make_env(history=[rec("h1", "@mary who won the match?")])
 
     print("1. owner opens the window with @mary")
-    stub.script = [{"state": "keep_listening", "message": "On it — checking.",
+    stub.script = [{"state": "keep_listening", "message": "On it — checking.", "lang": "en",
                     "usage": {"input": 5, "output": 3}, "provider_request_id": "req_1",
                     "stop_reason": "end_turn", "tool_calls": ["web_search"], "error_category": "none"}]
     await invoke(graph, upsert("@mary who won the match?", mid="a1"))
@@ -149,12 +150,27 @@ async def main() -> None:
     await invoke(graph6, upsert("@mary hi", from_me=False, mid="b1", jid=OTHER_JID), jid=OTHER_JID)
     check("nothing sent (non-owner, no window)", len(evo6.sent) == 0)
 
-    print("7. Mary's own echoed reply is ignored (no loop)")
+    print("7. Mary's own echoed reply is ignored (no loop) — EN and PT headers")
     _, evo7, _, graph7 = make_env(history=[])
-    echo = frame("On it — checking.", "Marcelo")
-    st = await invoke(graph7, upsert(echo, from_me=True, mid="b2"))
-    check("is_own detected", st["is_own"] is True)
-    check("nothing sent (own echo)", len(evo7.sent) == 0)
+    st = await invoke(graph7, upsert(frame("On it — checking.", "Marcelo", "en"), from_me=True, mid="b2"))
+    check("is_own detected (EN header)", st["is_own"] is True)
+    st = await invoke(graph7, upsert(frame("Já verifico.", "Marcelo", "pt"), from_me=True, mid="b3"))
+    check("is_own detected (PT header)", st["is_own"] is True)
+    check("nothing sent (own echoes)", len(evo7.sent) == 0)
+
+    print("8. a Portuguese tag → PT header, and the language is locked for the window")
+    _, evoP, stubP, graphP = make_env(history=[rec("p0", "@mary qual a previsão?")])
+    stubP.script = [{"state": "keep_listening", "message": "Vou verificar agora.", "lang": "pt",
+                     "usage": {}, "provider_request_id": "req_p1", "stop_reason": "end_turn",
+                     "tool_calls": [], "error_category": "none"}]
+    await invoke(graphP, upsert("@mary qual a previsão?", mid="p1", jid=PT_JID), jid=PT_JID)
+    check("PT header used", evoP.sent[-1][1].startswith("*[Assistente IA do Marcelo]:*"))
+    # continuation: model drifts to en, but the session language stays PT
+    stubP.script = [{"state": "keep_listening", "message": "Still here.", "lang": "en",
+                     "usage": {}, "provider_request_id": "req_p2", "stop_reason": "end_turn",
+                     "tool_calls": [], "error_category": "none"}]
+    await invoke(graphP, upsert("e amanhã?", mid="p2", jid=PT_JID), jid=PT_JID)
+    check("session language locked to PT (header stays PT)", evoP.sent[-1][1].startswith("*[Assistente IA do Marcelo]:*"))
 
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
