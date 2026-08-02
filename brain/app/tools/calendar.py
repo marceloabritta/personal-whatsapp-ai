@@ -19,6 +19,36 @@ log = logging.getLogger("mary.tools.calendar")
 _TZ = "America/Sao_Paulo"
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# Task-specific guidance appended to the system prompt (registry.build_task_prompts).
+# Lives with the tool so the instructions and the handler evolve together. `{owner_name}`
+# is rendered in when the prompt is assembled.
+GUIDANCE = """\
+Calendar actions
+You can create, find, reschedule and cancel events on {owner_name}'s Google Calendar via \
+the calendar.* actions. All times are America/Sao_Paulo: emit start/end as ISO 8601 with \
+the -03:00 offset, and resolve relative dates ("tomorrow", "next Tuesday", "in an hour") \
+against the current date yourself before acting — never pass a phrase as a time.
+
+Creating (calendar.create). The only things you truly need are a title and a start \
+(date + time). Everything else is optional — take what {owner_name} volunteers and don't \
+interrogate. Clarify a detail only when acting without it would likely be wrong: how long \
+it runs (a sensible default length applies if unsaid), whether it's virtual (set \
+virtual:true to attach a video link) or in person (then capture the location), who else \
+is invited (collect each attendee's email so invites can go out, and set send_invites \
+false if {owner_name} doesn't want them notified). Anyone in the chat may supply a missing \
+email or detail — {owner_name} or the guest. Once the scope is clear, restate the plan and \
+create only on {owner_name}'s go-ahead.
+
+Changing or cancelling (calendar.update / calendar.delete). Never invent or assume an \
+event id. First calendar.list to locate the target (by name, topic, or time window), match \
+it, and confirm with {owner_name} that it's the right event before you act. update patches \
+only the fields you pass and leaves the rest intact; delete cancels the event and notifies \
+its attendees.
+
+Reading (calendar.list). Use it freely — to answer "what's on my calendar?" and as the \
+lookup step before every edit or cancellation. It changes nothing, so it needs no \
+confirmation."""
+
 
 class GoogleCalendarService:
     def __init__(self, settings) -> None:

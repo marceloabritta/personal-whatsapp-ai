@@ -13,6 +13,7 @@ from .tools.registry import (
     TOOLS,
     build_mcp_servers,
     build_output_schema,
+    build_task_prompts,
     build_tools_prompt,
     local_handlers,
 )
@@ -28,6 +29,7 @@ class Deps:
     reasoner: Any
     tools: dict = field(default_factory=dict)  # {domain: local handler}
     tools_prompt: str = ""
+    task_prompts: str = ""  # per-domain guidance, appended to the system prompt
     redis: Any = None
 
 
@@ -48,6 +50,7 @@ def build_deps(settings: Settings | None = None) -> Deps:
     output_schema = build_output_schema(TOOLS)
     mcp_servers = build_mcp_servers(TOOLS, settings)
     tools_prompt = build_tools_prompt(TOOLS)
+    task_prompts = build_task_prompts(TOOLS, settings.owner_name)
     handlers = local_handlers(TOOLS, settings)
 
     return Deps(
@@ -59,5 +62,6 @@ def build_deps(settings: Settings | None = None) -> Deps:
         reasoner=build_reasoner(settings, output_schema=output_schema, mcp_servers=mcp_servers),
         tools=handlers,
         tools_prompt=tools_prompt,
+        task_prompts=task_prompts,
         redis=redis_client,
     )

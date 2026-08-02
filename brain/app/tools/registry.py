@@ -4,6 +4,7 @@ schema (local tools), the MCP connector config (mcp tools), and the prompt (both
 Add a tool here and everything downstream updates."""
 from __future__ import annotations
 
+from .calendar import GUIDANCE as CALENDAR_GUIDANCE
 from .calendar import GoogleCalendarService
 from .schemas import CALENDAR_TASK_SCHEMAS
 
@@ -17,6 +18,7 @@ TOOLS: dict[str, dict] = {
         "schemas": CALENDAR_TASK_SCHEMAS,
         "confirm_first": {"create", "update", "delete"},
         "describe": "Create, find, reschedule or cancel events on the owner's Google Calendar.",
+        "guidance": CALENDAR_GUIDANCE,  # per-task prompt, appended by build_task_prompts
     },
     # --- examples for later; not registered yet ---
     # "contacts": {"type": "local", "handler": GoogleContactsService, ...},
@@ -106,6 +108,20 @@ def build_tools_prompt(tools: dict = TOOLS) -> str:
         else:
             lines.append(f"- {name} (call directly): {spec.get('describe','')}")
     return "\n".join(lines) if lines else "(no tools)"
+
+
+def build_task_prompts(tools: dict = TOOLS, owner_name: str = "the owner") -> str:
+    """Per-task guidance blocks — each tool's `guidance`, rendered and stacked.
+
+    Every registered tool may carry a `guidance` template (co-located in its own module)
+    telling the assistant how to think when acting in that domain. We render `{owner_name}`
+    and join the blocks; the result is appended to the system prompt at build time."""
+    blocks = [
+        spec["guidance"].format(owner_name=owner_name)
+        for spec in tools.values()
+        if spec.get("guidance")
+    ]
+    return "\n\n".join(blocks)
 
 
 def local_handlers(tools: dict, settings) -> dict:
