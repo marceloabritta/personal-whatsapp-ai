@@ -131,6 +131,9 @@ async def main() -> None:
                     "usage": {}, "provider_request_id": "req_4", "stop_reason": "end_turn",
                     "tool_calls": [], "error_category": "none"}]
     await invoke(graph, upsert("@mary thanks", mid="a4"))
+    convo4 = stub.calls[-1]["messages"]
+    check("fresh @mary tag wiped the prior loop's memory (no context leak)", not any(
+        ("On it" in m["content"]) or ("Barcelona" in m["content"]) for m in convo4))
     sent = evo.sent[-1][1]
     check("closing reply sent", len(evo.sent) == 3)
     check("message sent verbatim", "Glad I could help! Talk soon 👋" in sent)

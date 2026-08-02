@@ -1,10 +1,14 @@
 """context — assemble the turn (§01/§02).
 
-First activation (not initialized): seed the last CONTEXT_WINDOW_MESSAGES from Evolution.
-Later: fetch only messages after the cursor. Assistant-origin messages are filtered
-(they're already AIMessages in the checkpoint). The new messages become one labeled
-user turn; the cursor advances."""
+A fresh @mary tag starts a NEW loop: it wipes the checkpointed conversation memory
+and re-seeds the last CONTEXT_WINDOW_MESSAGES from Evolution, so one loop never
+leaks into the next on the same chat. A window continuation (untagged follow-up
+while the loop is open) fetches only messages after the cursor and keeps the loop's
+memory. Assistant-origin messages are filtered (they're already AIMessages in the
+checkpoint). The new messages become one labeled user turn; the cursor advances."""
 from __future__ import annotations
+
+from langchain_core.messages import RemoveMessage
 
 from ..identity import is_own_message
 from ..state import MessageState
@@ -27,8 +31,11 @@ async def context_node(state: MessageState, *, evolution, settings, trace: Trace
     owner = settings.owner_name
     window = settings.context_window_messages
 
+    # A fresh @mary tag opens a new loop → start from a clean context window.
+    reset = state.get("trigger") == "tag"
+
     records = await evolution.fetch_history(jid)  # oldest → newest
-    if not state.get("initialized"):
+    if reset or not state.get("initialized"):
         new = records[-window:]
     else:
         new = _after_cursor(records, state.get("last_whatsapp_message_id"), window)
@@ -52,7 +59,7 @@ async def context_node(state: MessageState, *, evolution, settings, trace: Trace
     trace.user(tid, "you", state.get("text") or "")
     trace.code(
         tid, node="context", initialized=bool(state.get("initialized")),
-        ingested=len(new), context_message_ids=ids,
+        reset=reset, ingested=len(new), context_message_ids=ids,
     )
 
     update: dict = {
@@ -60,6 +67,18 @@ async def context_node(state: MessageState, *, evolution, settings, trace: Trace
         "last_whatsapp_message_id": newest,
         "context_message_ids": ids,
     }
+
+    # add_messages appends, so to truly start fresh we must first REMOVE every
+    # message the checkpoint restored, then add this loop's seed turn.
+    msgs: list = []
+    if reset:
+        for m in state.get("messages") or []:
+            mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+            if mid:
+                msgs.append(RemoveMessage(id=mid))
+        update["session_lang"] = None  # re-lock the language on this tag's turn
     if transcript.strip():
-        update["messages"] = [{"role": "user", "content": transcript}]
+        msgs.append({"role": "user", "content": transcript})
+    if msgs:
+        update["messages"] = msgs
     return update
