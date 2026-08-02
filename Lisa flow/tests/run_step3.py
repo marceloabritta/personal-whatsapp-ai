@@ -222,15 +222,20 @@ async def _invoke(graph, body, jid=OWNER_JID):
 async def graph_checks() -> None:
     print("\nStep-3 P2 — the tool loop")
 
-    # 1. clean write (confirmed create) -> act; one reason pass, no read-back.
+    # 1. a successful write reads back so it confirms FROM the result (never announced before).
     deps, evo, stub, cal, graph = make_toolenv()
-    stub.script = [{"message": "Booked your 3pm.", "actions": [
-        {"task": "calendar.create", "title": "Call", "start": "2026-08-05T15:00:00-03:00",
-         "confirmed": True}]}]
+    stub.script = [
+        {"message": None, "actions": [
+            {"task": "calendar.create", "title": "Call", "start": "2026-08-05T15:00:00-03:00",
+             "confirmed": True}]},
+        {"message": "Booked your 3pm."},
+    ]
     await _invoke(graph, _upsert("@mary book a call at 3pm", mid="c1"))
     check("[create] handler ran exactly once", cal.n("create") == 1)
-    check("[create] clean write did NOT read back (single reason pass)", len(stub.calls) == 1)
-    check("[create] confirmation sent", len(evo.sent) == 1 and "Booked" in evo.sent[-1][1])
+    check("[create] the write reads back so it can confirm (two reason passes)",
+          len(stub.calls) == 2)
+    check("[create] confirmation sent from the result", len(evo.sent) == 1
+          and "Booked" in evo.sent[-1][1])
     check("[create] execute != close — window stays open", deps.sessions.is_open(OWNER_JID))
 
     # 2. read (find) -> read-back -> reply.
@@ -290,16 +295,17 @@ async def graph_checks() -> None:
                              "data": {"items": [{"event_id": "E9"}]}}
     stub.script = [
         {"message": None, "actions": [{"task": "calendar.find", "query": "review"}]},
-        {"message": "Moved it to Friday.", "actions": [
+        {"message": None, "actions": [
             {"task": "calendar.update", "event_id": "E9", "confirmed": True,
              "start": "2026-08-07T15:00:00-03:00"}]},
+        {"message": "Moved it to Friday."},
     ]
     await _invoke(graph, _upsert("@mary move the review to Friday", mid="fu1"))
     check("[find->update] update ran on the resolved id",
           cal.n("find") == 1 and cal.n("update") == 1)
     check("[find->update] the id passed to update was the found one",
           next((i["event_id"] for v, i in cal.calls if v == "update"), None) == "E9")
-    check("[find->update] final confirmation sent", "Moved it" in evo.sent[-1][1])
+    check("[find->update] final confirmation sent from the result", "Moved it" in evo.sent[-1][1])
 
     # 7. workflow persists across turns, then is cleared by a fresh tag (anti-delirium).
     deps, evo, stub, cal, graph = make_toolenv()

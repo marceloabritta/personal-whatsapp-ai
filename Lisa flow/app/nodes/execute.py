@@ -82,9 +82,11 @@ async def execute_node(
             "content": f"[{task} result] {res.get('summary', '')}".rstrip(),
         })
 
-    # Read, failure, or blocked gate → let the model read the result and reply truthfully,
-    # bounded so it can't spin. A clean write goes straight to act.
-    readback = (any_read or any_fail) and hops < settings.max_tool_actions
+    # Any executed action reads back so the model reports the real outcome (a successful
+    # write must be confirmed FROM its result, never announced before it — the prompt promises
+    # "the system shows you the result before you reply"). Bounded so it can never spin. Only a
+    # turn that ran no actions at all skips straight past (it already spoke).
+    readback = bool(results) and hops < settings.max_tool_actions
 
     trace.code(
         tid, node="execute", loop_id=state.get("loop_id"),
