@@ -13,7 +13,21 @@ from langchain_core.messages import RemoveMessage
 from ..identity import is_own_message
 from ..state import MessageState
 from ..trace import Trace
-from ..whatsapp import build_labeled_transcript
+from ..whatsapp import build_labeled_transcript, label_for
+
+
+def _log_transcript(trace: Trace, tid: str, loop_id: str | None, records: list[dict],
+                    owner: str) -> None:
+    """Record each chat message into the loop's transcript stream (deduped by id in the
+    store). Both sides — owner, contact, and Mary — so the log is the real conversation."""
+    if not loop_id:
+        return
+    for r in records:
+        text = (r.get("text") or "").strip()
+        if not text:
+            continue
+        trace.user(tid, label_for(r, owner), text, loop_id=loop_id,
+                   wa_id=r.get("id"), ts=r.get("ts"), from_me=bool(r.get("from_me")))
 
 
 def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[dict]:
@@ -51,6 +65,8 @@ async def context_node(
             "ts": state.get("ts", 0),
         }]
 
+    raw = list(new)  # both sides, before the assistant-origin filter — for the log
+
     # Filter assistant-origin — already AIMessages; never re-ingest. Primary filter is
     # the message id we recorded when we sent it; the header stamp is the fallback.
     new = [
@@ -63,9 +79,14 @@ async def context_node(
     ids = [r["id"] for r in new if r.get("id")]
     newest = ids[-1] if ids else state.get("last_whatsapp_message_id")
 
-    trace.user(tid, "you", state.get("text") or "")
+    # Durable transcript. On a fresh tag (loop open) log the whole seed — the ~30
+    # messages before the tag, both sides — as the loop's opening context. On a window
+    # continuation log only the new inbound; Mary's own replies are logged by `act`.
+    loop_id = state.get("loop_id")
+    _log_transcript(trace, tid, loop_id, raw if reset else new, owner)
     trace.code(
-        tid, node="context", initialized=bool(state.get("initialized")),
+        tid, node="context", loop_id=loop_id,
+        initialized=bool(state.get("initialized")),
         reset=reset, ingested=len(new), context_message_ids=ids,
     )
 

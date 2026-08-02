@@ -5,8 +5,14 @@
   - continuation: ANY message (owner or contact) while the window is open — option (a),
     she listens to everything and decides per-message whether to speak (§05).
 
-Everything else stops here with a one-line "ignored" trace."""
+Everything else stops here with a one-line "ignored" trace.
+
+Loop identity: a fresh @mary tag opens a NEW loop (mints a loop_id — the grouping key
+for the durable log, matching the checkpointer's reset-on-tag). A window continuation
+carries the open loop's id forward. Only loop-scoped activations reach the log."""
 from __future__ import annotations
+
+import time
 
 from ..state import MessageState
 from ..trace import Trace
@@ -22,12 +28,18 @@ def gate_node(state: MessageState, *, sessions, trace: Trace) -> dict:
 
     if state["from_me"] and state["tag"]:
         sessions.open(jid)  # open the window (act refreshes/closes it)
-        trace.code(tid, node="gate", decision="run", trigger="tag", window="opened")
-        return {"decision": "run", "trigger": "tag"}
+        loop_id = trace.new_loop_id(state["number"])  # every tag = a new loop
+        started = state.get("ts") or int(time.time())
+        trace.code(tid, node="gate", loop_id=loop_id, decision="run",
+                   trigger="tag", window="opened")
+        return {"decision": "run", "trigger": "tag", "loop_id": loop_id,
+                "loop_opened": True, "loop_started_ts": started}
 
     if sessions.is_open(jid):
-        trace.code(tid, node="gate", decision="run", trigger="window")
-        return {"decision": "run", "trigger": "window"}
+        loop_id = state.get("loop_id")
+        trace.code(tid, node="gate", loop_id=loop_id, decision="run", trigger="window")
+        return {"decision": "run", "trigger": "window", "loop_id": loop_id,
+                "loop_opened": False}
 
     trace.code(
         tid, node="gate", decision="stop", reason="no_trigger",

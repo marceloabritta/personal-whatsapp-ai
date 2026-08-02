@@ -35,9 +35,13 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     message = result.get("message")
     usage = result.get("usage") or {}
 
+    # Reasoning stream: the model's own turn — its stated rationale, the enforced-JSON
+    # decision it reached, and the metadata for the record.
     trace.code(
-        tid, node="reason", provider=settings.llm_provider, model=settings.claude_model,
-        state=llm_state, stop_reason=result.get("stop_reason"),
+        tid, node="reason", loop_id=state.get("loop_id"),
+        provider=settings.llm_provider, model=settings.claude_model,
+        state=llm_state, message=message, lang=result.get("lang"),
+        reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
         tools=result.get("tool_calls") or [], latency_ms=latency_ms,
     )

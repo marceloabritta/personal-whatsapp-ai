@@ -41,7 +41,8 @@ async def act_node(
         delivery = "ok" if sent else "failed"
         if sent_id:
             echoes.record(jid, sent_id)  # so we never re-ingest our own reply
-        trace.user(tid, "mary", text, status="delivered" if sent else "failed")
+        trace.user(tid, "AI Assistant", text, loop_id=state.get("loop_id"),
+                   wa_id=sent_id or None, status="delivered" if sent else "failed")
 
     close_reason = None
     if llm_state == "close":
@@ -54,6 +55,9 @@ async def act_node(
     usage = state.get("usage") or {}
     trace.code(
         tid, node="record",
+        loop_id=state.get("loop_id"),
+        trigger=state.get("trigger"),
+        loop_started_ts=state.get("loop_started_ts"),
         activation_message_id=state.get("msg_id"),
         chat_id=jid,
         context_message_ids=state.get("context_message_ids") or [],

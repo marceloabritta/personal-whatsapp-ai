@@ -37,11 +37,35 @@ async def lifespan(app: FastAPI):
         checkpointer = MemorySaver()
         log.info("%s", '{"boot":"in-memory-checkpointer"}')
 
+    # Durable loop log — shares DATABASE_URL, isolated in its own schema. Best-effort:
+    # if it can't open, the reply path runs exactly as before (stdout + ring only).
+    store = None
+    s = deps.settings
+    if s.database_url and s.log_enabled:
+        from .logstore import LogStore
+
+        store = LogStore(
+            s.database_url, schema=s.log_schema, queue_max=s.log_queue_max,
+            retention_events_days=s.log_retention_events_days,
+            retention_loops_days=s.log_retention_loops_days,
+        )
+        try:
+            await store.open()
+            store.start()
+            deps.trace.attach_sink(store)
+            log.info("%s", '{"boot":"loop-logstore"}')
+        except Exception as exc:  # logging must never block startup
+            log.warning("loop-logstore disabled: %s", exc)
+            store = None
+
     app.state.deps = deps
+    app.state.logstore = store
     app.state.graph = build_graph(deps, checkpointer)
     try:
         yield
     finally:
+        if store is not None:
+            await store.aclose()
         if cp_cm is not None:
             await cp_cm.__aexit__(None, None, None)
 

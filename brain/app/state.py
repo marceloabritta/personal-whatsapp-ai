@@ -15,6 +15,8 @@ class MessageState(TypedDict, total=False):
     last_whatsapp_message_id: Optional[str]  # ingestion cursor
     initialized: bool  # seeded the window yet?
     session_lang: Optional[str]  # language locked at the tag that opened the window
+    loop_id: Optional[str]  # id of the current listening loop (grouping key for the log)
+    loop_started_ts: Optional[int]  # unix ts the loop opened (tag on a closed window)
 
     # --- per-turn scratch ---
     raw: dict
@@ -31,6 +33,7 @@ class MessageState(TypedDict, total=False):
 
     decision: str  # gate: "run" | "stop"
     trigger: Optional[str]  # "tag" | "window"
+    loop_opened: bool  # this activation opened a NEW loop (tag on a closed window)
 
     context_message_ids: list  # WhatsApp ids ingested this run
 
