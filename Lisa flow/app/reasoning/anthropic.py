@@ -8,16 +8,26 @@ from __future__ import annotations
 import json
 import logging
 
-from .base import OUTPUT_SCHEMA, ReasonResult
+from .base import ReasonResult
 
 log = logging.getLogger("mary.reasoner.anthropic")
 
-_MAX_TOOL_HOPS = 6  # bound the server-tool pause_turn loop
+_MAX_TOOL_HOPS = 8  # bound the server-tool / MCP pause_turn loop
+_MCP_BETA = "mcp-client-2025-11-20"
 
 
 class AnthropicReasoner:
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, output_schema: dict | None = None,
+                 mcp_servers: list[dict] | None = None) -> None:
         self.s = settings
+        self.mcp_servers = mcp_servers or []
+        # The enforced-JSON schema is built from the tool registry and injected here. Fall
+        # back to building it directly so the reasoner is usable without going through deps.
+        if output_schema is None:
+            from ..tools.registry import build_output_schema
+
+            output_schema = build_output_schema()
+        self.output_schema = output_schema
         self._client = None  # lazy — so importing this module never needs a key
 
     def _client_or_make(self):
@@ -28,9 +38,8 @@ class AnthropicReasoner:
         return self._client
 
     def _tools(self) -> list[dict]:
-        # No tools of our own — enable the model's server-side web tools. The
-        # _20260209 variants carry dynamic filtering, so we do NOT also declare
-        # code_execution (that would create a second execution env and confuse it).
+        # The model's server-side web tools. The _20260209 variants carry dynamic filtering,
+        # so we do NOT also declare code_execution (a second execution env would confuse it).
         n = self.s.web_search_max_uses
         return [
             {"type": "web_search_20260209", "name": "web_search", "max_uses": n},
@@ -46,7 +55,7 @@ class AnthropicReasoner:
 
         try:
             for _ in range(_MAX_TOOL_HOPS):
-                resp = await client.messages.create(
+                kwargs = dict(
                     model=self.s.claude_model,
                     max_tokens=self.s.claude_max_tokens,
                     system=system,
@@ -55,9 +64,17 @@ class AnthropicReasoner:
                     thinking={"type": "adaptive"},
                     output_config={
                         "effort": self.s.claude_effort,
-                        "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
+                        "format": {"type": "json_schema", "schema": self.output_schema},
                     },
                 )
+                # MCP tools (if any registered) ride the beta connector API. Empty today,
+                # so the normal path runs; the branch activates when an MCP tool is added.
+                if self.mcp_servers:
+                    resp = await client.beta.messages.create(
+                        **kwargs, mcp_servers=self.mcp_servers, betas=[_MCP_BETA],
+                    )
+                else:
+                    resp = await client.messages.create(**kwargs)
                 usage["input"] += getattr(resp.usage, "input_tokens", 0) or 0
                 usage["output"] += getattr(resp.usage, "output_tokens", 0) or 0
                 for block in resp.content:
@@ -94,6 +111,8 @@ class AnthropicReasoner:
             message = data.get("message")
             lang = data.get("lang")
             reasoning = data.get("reasoning")  # the model's stated rationale, for the log
+            actions = data.get("actions") or []
+            workflow = data.get("workflow")
             if state not in ("keep_listening", "close"):
                 state = "keep_listening"
         except (ValueError, TypeError):
@@ -105,7 +124,8 @@ class AnthropicReasoner:
             )
 
         return ReasonResult(
-            state=state, message=message, lang=lang, reasoning=reasoning, usage=usage,
+            state=state, message=message, lang=lang, reasoning=reasoning,
+            actions=actions, workflow=workflow, usage=usage,
             provider_request_id=request_id, stop_reason=stop_reason,
             tool_calls=tool_names, error_category="none",
         )

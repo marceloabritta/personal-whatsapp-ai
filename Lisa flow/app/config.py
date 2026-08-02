@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 8192
     web_search_max_uses: int = 5
 
+    # Tools. The read-back loop (list/find/failure -> reason) is bounded so it can't spin.
+    max_tool_actions: int = 4
+
+    # Google Calendar tool — OAuth2 refresh-token client on the owner's own account.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_refresh_token: str = ""
+    google_calendar_id: str = "primary"
+    default_meeting_minutes: int = 45
+    calendar_timezone: str = "America/Sao_Paulo"
+
     prompt_version: str = "2026-08-03.1"
 
     @property
