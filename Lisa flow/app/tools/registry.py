@@ -193,3 +193,20 @@ def count_unions(schema: Any) -> int:
         for v in schema:
             n += count_unions(v)
     return n
+
+
+def count_optionals(schema: Any) -> int:
+    """Count optional (not-required) parameters across the whole schema — Anthropic caps this
+    at 24 (a SEPARATE limit from the 16 union cap; grammar compilation). For each object, that
+    is len(properties) - len(required); summed recursively through anyOf branches / array items."""
+    n = 0
+    if isinstance(schema, dict):
+        if isinstance(schema.get("properties"), dict):
+            req = set(schema.get("required", []))
+            n += sum(1 for k in schema["properties"] if k not in req)
+        for v in schema.values():
+            n += count_optionals(v)
+    elif isinstance(schema, list):
+        for v in schema:
+            n += count_optionals(v)
+    return n

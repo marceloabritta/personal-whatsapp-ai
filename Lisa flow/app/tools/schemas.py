@@ -28,17 +28,19 @@ def _verb(required: list[str], properties: dict) -> dict:
 _CONFIRMED = {"type": "boolean"}
 
 # create — needs only title + start; everything else optional.
+# NB: Anthropic caps the TOTAL optional-parameter count of an enforced schema at 24 (a
+# separate limit from the 16 union/array cap; see count_optionals + run_step3). duration_min
+# was dropped (use `end`) to keep margin under it; the handler still honours it if present.
 CREATE = _verb(
     ["title", "start"],
     {
         "title": _STR,
         "start": _STR,            # ISO 8601 with offset, resolved by the model
         "end": _STR,              # ISO 8601; omitted -> start + default_meeting_minutes
-        "duration_min": _INT,
         "virtual": _BOOL,         # true -> Google Meet link; nulls location (video wins)
         "location": _STR,
         "attendees": _STRARR,     # emails
-        "send_invites": _BOOL,    # default true; false -> sendUpdates="none"
+        "send_invites": _BOOL,    # default true; false -> don't email guests (sendUpdates=none)
         "confirmed": _CONFIRMED,
     },
 )
@@ -55,7 +57,6 @@ FIND = _verb(
     {
         "query": _STR,            # full-text over summary/description/location/attendees
         "attendee": _STR,         # name or email to anchor/rank on
-        "title_contains": _STR,   # ranking hint
         "time_min": _STR,
         "time_max": _STR,
     },
@@ -69,7 +70,6 @@ UPDATE = _verb(
         "title": _STR,
         "start": _STR,
         "end": _STR,
-        "duration_min": _INT,
         "virtual": _BOOL,
         "location": _STR,
         "attendees": _STRARR,

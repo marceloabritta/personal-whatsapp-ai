@@ -30,6 +30,7 @@ from app.tools.registry import (  # noqa: E402
     build_task_prompts,
     build_tools_prompt,
     confirm_first,
+    count_optionals,
     count_unions,
     local_handlers,
 )
@@ -91,9 +92,12 @@ def unit_checks() -> None:
     check("every branch sets additionalProperties:false",
           all(b.get("additionalProperties") is False for b in _branches(schema)))
 
-    # --- the union-cap guard (the outage backstop) ---
+    # --- the two Anthropic schema-compilation caps (outage backstops) ---
     n = count_unions(schema)
     check("schema union/array count <= 16", n <= 16, detail=f"count={n}")
+    opt = count_optionals(schema)
+    # Anthropic rejects > 24 optional params (grammar compilation). Keep real margin.
+    check("schema optional-param count <= 24", opt <= 24, detail=f"count={opt}")
 
     # --- prompt fan-out ---
     tp = build_tools_prompt(owner_name="Marcelo")
