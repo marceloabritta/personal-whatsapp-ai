@@ -5,12 +5,12 @@ from __future__ import annotations
 from .base import Reasoner, ReasonResult
 
 
-def build_reasoner(settings) -> Reasoner:
+def build_reasoner(settings, *, output_schema: dict, mcp_servers: list | None = None) -> Reasoner:
     provider = (settings.llm_provider or "anthropic").lower()
     if provider == "anthropic":
         from .anthropic import AnthropicReasoner
 
-        return AnthropicReasoner(settings)
+        return AnthropicReasoner(settings, output_schema=output_schema, mcp_servers=mcp_servers)
     raise ValueError(f"unknown LLM_PROVIDER: {provider!r}")
 
 
