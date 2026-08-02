@@ -17,6 +17,8 @@ class MessageState(TypedDict, total=False):
     session_lang: Optional[str]  # language locked at the tag that opened the window
     loop_id: Optional[str]  # id of the current listening loop (grouping key for the log)
     loop_started_ts: Optional[int]  # unix ts the loop opened (tag on a closed window)
+    workflow: Optional[dict]  # persistent gather memory toward a goal; cleared on tag-reset
+    seen_event_ids: list  # calendar ids surfaced by find/list this loop; gates update/delete
 
     # --- per-turn scratch ---
     raw: dict
@@ -49,6 +51,12 @@ class MessageState(TypedDict, total=False):
     stop_reason: Optional[str]
     tool_calls: list
     error_category: str
+
+    # tool loop (execute node)
+    actions: list  # calendar actions the model wants run this turn; [] if none
+    action_results: list  # ActionResults from this loop's executions (for the record)
+    needs_readback: bool  # execute -> reason again (a read happened, or something failed/blocked)
+    tool_hops: int  # execute passes taken this loop; bounds the read-back loop
 
     # act output
     reply: Optional[str]  # framed text actually sent

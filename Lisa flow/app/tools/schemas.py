@@ -22,6 +22,11 @@ def _verb(required: list[str], properties: dict) -> dict:
     return {"required": list(required), "properties": dict(properties)}
 
 
+# A mutating verb carries `confirmed`: the model sets it true only after the owner has given
+# a go-ahead. The execute node refuses to run a confirm_first verb without it (structural
+# gate, not prompt-alone). Plain-typed boolean — no union cost.
+_CONFIRMED = {"type": "boolean"}
+
 # create — needs only title + start; everything else optional.
 CREATE = _verb(
     ["title", "start"],
@@ -34,6 +39,7 @@ CREATE = _verb(
         "location": _STR,
         "attendees": _STRARR,     # emails
         "send_invites": _BOOL,    # default true; false -> sendUpdates="none"
+        "confirmed": _CONFIRMED,
     },
 )
 
@@ -68,13 +74,14 @@ UPDATE = _verb(
         "location": _STR,
         "attendees": _STRARR,
         "send_invites": _BOOL,
+        "confirmed": _CONFIRMED,
     },
 )
 
 # delete — needs a resolved event_id.
 DELETE = _verb(
     ["event_id"],
-    {"event_id": _STR},
+    {"event_id": _STR, "confirmed": _CONFIRMED},
 )
 
 CALENDAR_TASK_SCHEMAS: dict[str, dict] = {

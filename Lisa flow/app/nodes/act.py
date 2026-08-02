@@ -73,13 +73,19 @@ async def act_node(
         close_reason=close_reason,
         lang=session_lang,
         response=body,
+        actions=state.get("action_results") or [],
         delivery_result=delivery,
         error_category=state.get("error_category") or "none",
     )
 
-    return {
+    update = {
         "reply": reply,
         "sent": sent,
         "close_reason": close_reason,
         "session_lang": session_lang,
     }
+    # History is appended here — the single place a *sent* message enters the thread. The raw
+    # model text (not the framed header) is what the model should see it said.
+    if body and sent:
+        update["messages"] = [{"role": "assistant", "content": body.rstrip()}]
+    return update

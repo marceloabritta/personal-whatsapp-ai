@@ -94,7 +94,16 @@ async def context_node(
         "initialized": True,
         "last_whatsapp_message_id": newest,
         "context_message_ids": ids,
+        # Per-activation tool-loop scratch — always fresh so a bound/log never carries over.
+        "tool_hops": 0,
+        "action_results": [],
+        "needs_readback": False,
     }
+    if reset:
+        # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
+        # loop can never bleed into this one (the anti-delirium invariant).
+        update["workflow"] = None
+        update["seen_event_ids"] = []
 
     # add_messages appends, so to truly start fresh we must first REMOVE every
     # message the checkpoint restored, then add this loop's seed turn.

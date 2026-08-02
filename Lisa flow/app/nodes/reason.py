@@ -22,9 +22,15 @@ def _to_neutral(messages: list) -> list[dict]:
     return out
 
 
-async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) -> dict:
+async def reason_node(
+    state: MessageState, *, reasoner, settings, trace: Trace,
+    tools_prompt: str = "", task_prompts: str = "",
+) -> dict:
     tid = state["trace_id"]
-    system = build_system_prompt(settings.owner_name, settings.primary_tag)
+    system = build_system_prompt(
+        settings.owner_name, settings.primary_tag,
+        tools_prompt=tools_prompt, task_prompts=task_prompts,
+    )
     convo = _to_neutral(state.get("messages"))
 
     t0 = time.monotonic()
@@ -35,6 +41,9 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     message = result.get("message")
     usage = result.get("usage") or {}
 
+    actions = result.get("actions") or []
+    workflow = result.get("workflow")
+
     # Reasoning stream: the model's own turn — its stated rationale, the enforced-JSON
     # decision it reached, and the metadata for the record.
     trace.code(
@@ -43,13 +52,17 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
         state=llm_state, message=message, lang=result.get("lang"),
         reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
-        tools=result.get("tool_calls") or [], latency_ms=latency_ms,
+        tools=result.get("tool_calls") or [], actions=actions, latency_ms=latency_ms,
     )
 
-    update: dict = {
+    # NB: history is appended in `act` (the single place a *sent* message enters the thread),
+    # so a read-back reason pass never leaves a phantom, undelivered assistant turn behind.
+    return {
         "llm_state": llm_state,
         "reply_body": message,
         "lang": result.get("lang"),
+        "actions": actions,
+        "workflow": workflow,
         "provider": settings.llm_provider,
         "model": settings.claude_model,
         "provider_request_id": result.get("provider_request_id"),
@@ -59,6 +72,8 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
         "tool_calls": result.get("tool_calls") or [],
         "error_category": result.get("error_category") or "none",
     }
-    if message:  # only record actual utterances in history
-        update["messages"] = [{"role": "assistant", "content": message}]
-    return update
+
+
+def route_after_reason(state: MessageState) -> str:
+    """Actions to run → execute; otherwise straight to act (send/close)."""
+    return "execute" if state.get("actions") else "act"
