@@ -27,9 +27,10 @@ async def reason_node(
     tools_prompt: str = "", task_prompts: str = "",
 ) -> dict:
     tid = state["trace_id"]
+    locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
     system = build_system_prompt(
         settings.owner_name, settings.primary_tag,
-        tools_prompt=tools_prompt, task_prompts=task_prompts,
+        tools_prompt=tools_prompt, task_prompts=task_prompts, session_lang=locked_lang,
     )
     convo = _to_neutral(state.get("messages"))
 
@@ -57,7 +58,7 @@ async def reason_node(
 
     # NB: history is appended in `act` (the single place a *sent* message enters the thread),
     # so a read-back reason pass never leaves a phantom, undelivered assistant turn behind.
-    return {
+    update: dict = {
         "llm_state": llm_state,
         "reply_body": message,
         "lang": result.get("lang"),
@@ -72,6 +73,11 @@ async def reason_node(
         "tool_calls": result.get("tool_calls") or [],
         "error_category": result.get("error_category") or "none",
     }
+    # Lock the session language on the FIRST pass after a tag (when it isn't set yet), so every
+    # later read-back pass and window continuation is told to keep writing in it.
+    if not locked_lang and result.get("lang"):
+        update["session_lang"] = result["lang"]
+    return update
 
 
 def route_after_reason(state: MessageState) -> str:

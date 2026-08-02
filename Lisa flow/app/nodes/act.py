@@ -23,10 +23,9 @@ async def act_node(
     llm_state = state.get("llm_state") or "keep_listening"
     body = state.get("reply_body")
 
-    # Session language: lock it at the tag that opened the window; keep it thereafter.
-    session_lang = state.get("session_lang")
-    if state.get("trigger") == "tag" or not session_lang:
-        session_lang = state.get("lang") or session_lang or "en"
+    # Session language is locked in `reason` on the first pass after the tag and carried on the
+    # state; the header just reads it (fall back only if a turn never produced one).
+    session_lang = state.get("session_lang") or state.get("lang") or "en"
 
     reply = None
     sent = False

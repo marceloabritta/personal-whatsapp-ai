@@ -333,6 +333,21 @@ async def graph_checks() -> None:
     await _invoke(graph, _upsert("@mary find stuff", mid="b1"))
     check("[bound] read-back stopped at max_tool_actions", cal.n("find") == 2)
 
+    # 9. language locks at the tag and is fed to every later pass (the PT-drift bug).
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["find"] = {"ok": True, "summary": "1 [id=E1]", "data": {"items": [{"event_id": "E1"}]}}
+    stub.script = [
+        {"message": None, "lang": "en", "actions": [{"task": "calendar.find", "query": "x"}]},
+        {"message": "Feito.", "lang": "pt"},  # model tries to drift to PT on the read-back pass
+    ]
+    await _invoke(graph, _upsert("@mary what's on friday?", mid="l1"))
+    check("[lang] first pass judges from the tag (no lock yet)",
+          'in "en"' not in stub.calls[0]["system"])
+    check("[lang] read-back pass is TOLD to stay in the locked language",
+          'in "en"' in stub.calls[1]["system"] or 'to "en"' in stub.calls[1]["system"])
+    check("[lang] header stays locked EN despite the model drifting to PT",
+          evo.sent[-1][1].startswith("*[Marcelo's AI Assistant]:*"))
+
 
 # ===================== P3 — the Google Calendar handler (fake service) =====================
 

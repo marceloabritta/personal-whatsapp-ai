@@ -10,13 +10,30 @@ from .identity import header_for
 
 
 def build_system_prompt(
-    owner_name: str, tag: str, tools_prompt: str = "", task_prompts: str = ""
+    owner_name: str, tag: str, tools_prompt: str = "", task_prompts: str = "",
+    session_lang: str | None = None,
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
     tools_block = f"\n\nTOOLS available to you:\n{tools_prompt}" if tools_prompt else ""
     task_block = f"\n\nActing in each domain:\n{task_prompts}" if task_prompts else ""
+    # Language is LOCKED to the tag that opened the conversation. Once locked, tell the model
+    # exactly which language to use so a read-back pass (or a PT-heavy history) can't make it
+    # drift; on the very first pass (not yet locked) it judges from the tagged order itself.
+    if session_lang:
+        lang_rule = (
+            f'This conversation is in "{session_lang}" (ISO 639-1) — the language {owner_name} '
+            f'used in the message that opened it. Write EVERY message in {session_lang}, even '
+            f'when other messages in the recent history are in another language, and set "lang" '
+            f'to "{session_lang}".'
+        )
+    else:
+        lang_rule = (
+            f"{owner_name} speaks several languages. Write in the language of {owner_name}'s "
+            f"message that opened this conversation (the tagged order) — judge it from THAT "
+            f"message, not from other messages in the history."
+        )
     return f"""You are {owner_name}'s executive assistant, and you take part in his WhatsApp \
 conversations on his behalf. {owner_name} brings you into a chat by placing the tag {tag} on a \
 message. From that moment you are an active participant in that conversation: you can speak into \
@@ -46,8 +63,7 @@ may send a message and stay, send a message and close, stay silent and keep list
 silent and close — whatever fits the moment. When you close, you are simply stepping out; you do \
 not owe anyone a goodbye and you should not force one.
 
-{owner_name} speaks multiple languages. Always write your messages in the same language he used \
-in the tagged message that opened this conversation.
+{lang_rule}
 
 You are talking inside WhatsApp, so write the way people do there. Keep messages short, direct, \
 and polite. Do not use emoji. Break your text into short lines instead of long, dense \
