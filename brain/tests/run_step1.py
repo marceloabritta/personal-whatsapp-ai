@@ -71,7 +71,8 @@ def fresh_deps() -> tuple[Deps, StubEvolution]:
 
 async def main() -> None:
     ack_body = "🌿 Mary here — listening."
-    expected_reply = frame(ack_body)
+    owner = Settings(evolution_apikey="x").owner_name
+    expected_reply = frame(ack_body, owner)
 
     # 1. Owner @mary -> replies.
     print("1. owner sends '@mary hi'")

@@ -11,7 +11,9 @@ from ..trace import Trace
 from ..whatsapp import extract_text
 
 
-def parse_node(state: MessageState, *, trace: Trace, tags: list[str]) -> MessageState:
+def parse_node(
+    state: MessageState, *, trace: Trace, tags: list[str], owner_name: str
+) -> MessageState:
     raw = state.get("raw") or {}
     data = raw.get("data", raw)
     key = data.get("key") or {}
@@ -35,7 +37,7 @@ def parse_node(state: MessageState, *, trace: Trace, tags: list[str]) -> Message
             "push_name": data.get("pushName"),
             "number": number,
             "ts": int(data.get("messageTimestamp") or 0),
-            "is_own": is_own_message(text),
+            "is_own": is_own_message(text, owner_name),
             "tag": tag,
         }
     )

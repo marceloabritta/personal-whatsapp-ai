@@ -10,14 +10,24 @@ the original, both live because the tag list is owner-configurable:
 """
 from __future__ import annotations
 
-# The header Mary stamps on every outgoing message. It is the ONLY thing that
-# tells her own replies apart from genuine owner messages: both arrive with
-# fromMe=true (she sends from the owner's account). is_own_message MUST recognise
-# every header she could ever emit — add retired variants here, never remove them.
-OUTGOING_HEADER = "[Mary]:"
-ALL_HEADERS = [OUTGOING_HEADER]
+# The header stamped on every outgoing message. It is the ONLY thing that tells
+# the assistant's own replies apart from genuine owner messages: both arrive with
+# fromMe=true (it sends from the owner's account). is_own_message MUST recognise
+# every header it could ever have emitted, so retired ones live in LEGACY_HEADERS
+# forever — never remove them, or old own-messages get re-consumed as owner input.
+LEGACY_HEADERS = ["[Mary]:"]
 
 _LEADING_MARKERS = "*_~ \t\r\n"
+
+
+def header_for(owner_name: str) -> str:
+    """The reply header for this owner, e.g. '[Marcelo's AI Assistant]:'."""
+    return f"[{owner_name}'s AI Assistant]:"
+
+
+def all_headers(owner_name: str) -> list[str]:
+    """Every header we could have emitted — the current one plus retired ones."""
+    return [header_for(owner_name), *LEGACY_HEADERS]
 
 
 def _ends_tag(ch: str) -> bool:
@@ -35,12 +45,12 @@ def matched_tag(text: str, tags: list[str]) -> str | None:
     return None
 
 
-def is_own_message(text: str) -> bool:
-    """Is this one of Mary's OWN messages (echoed back by Evolution as fromMe)?"""
+def is_own_message(text: str, owner_name: str) -> bool:
+    """Is this one of our OWN messages (echoed back by Evolution as fromMe)?"""
     t = (text or "").lstrip(_LEADING_MARKERS)
-    return any(t.startswith(h) for h in ALL_HEADERS)
+    return any(t.startswith(h) for h in all_headers(owner_name))
 
 
-def frame(body: str, header: str = OUTGOING_HEADER) -> str:
+def frame(body: str, owner_name: str) -> str:
     """Stamp the bold reply header on a message body."""
-    return f"*{header}*\n\n{body}"
+    return f"*{header_for(owner_name)}*\n\n{body}"

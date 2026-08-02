@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MARY_TRIGGER_TAG", "SECRETARY_TAG_NEW"),
     )
 
-    owner_name: str = "User"
+    owner_name: str = "Marcelo"
     ack_text: str = "🌿 Mary here — listening."
 
     # Session marker + webhook dedup. In-memory fallback when redis_url is unset.

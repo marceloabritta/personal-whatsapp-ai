@@ -58,6 +58,8 @@ services:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
       EVOLUTION_INSTANCE: secretaria
+      # Reply header is [<OWNER_NAME>'s AI Assistant]:
+      OWNER_NAME: "Marcelo"
       # Trigger tag (comma-separated, lowercase). @mary wakes the brain — the single
       # source of truth for what starts a run.
       MARY_TRIGGER_TAG: "@mary"

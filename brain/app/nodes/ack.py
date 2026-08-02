@@ -12,6 +12,6 @@ from ..trace import Trace
 def ack_node(state: MessageState, *, settings: Settings, trace: Trace) -> MessageState:
     body = settings.ack_text
     state["reply_body"] = body
-    state["reply"] = frame(body)
+    state["reply"] = frame(body, settings.owner_name)
     trace.code(state["trace_id"], node="ack", reply_body=body)
     return state

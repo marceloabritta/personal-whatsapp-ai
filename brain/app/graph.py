@@ -20,7 +20,15 @@ from .state import MessageState
 def build_graph(deps: Deps):
     g = StateGraph(MessageState)
 
-    g.add_node("parse", partial(parse_node, trace=deps.trace, tags=deps.settings.tags))
+    g.add_node(
+        "parse",
+        partial(
+            parse_node,
+            trace=deps.trace,
+            tags=deps.settings.tags,
+            owner_name=deps.settings.owner_name,
+        ),
+    )
     g.add_node("gate", partial(gate_node, sessions=deps.sessions, trace=deps.trace))
     g.add_node("ack", partial(ack_node, settings=deps.settings, trace=deps.trace))
     g.add_node("send", partial(send_node, evolution=deps.evolution, trace=deps.trace))
