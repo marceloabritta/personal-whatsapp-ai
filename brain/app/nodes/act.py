@@ -15,7 +15,7 @@ from ..trace import Trace
 
 
 async def act_node(
-    state: MessageState, *, evolution, sessions, settings, trace: Trace
+    state: MessageState, *, evolution, sessions, echoes, settings, trace: Trace
 ) -> dict:
     tid = state["trace_id"]
     jid = state["remote_jid"]
@@ -36,8 +36,11 @@ async def act_node(
         # Send the model's message exactly as it decided — no programmatic trailer.
         text = body.rstrip()
         reply = frame(text, settings.owner_name, session_lang)
-        sent = await evolution.send_text(number, reply)
+        sent_id = await evolution.send_text(number, reply)
+        sent = sent_id is not None  # None == failure; "" == sent, id unknown
         delivery = "ok" if sent else "failed"
+        if sent_id:
+            echoes.record(jid, sent_id)  # so we never re-ingest our own reply
         trace.user(tid, "mary", text, status="delivered" if sent else "failed")
 
     close_reason = None

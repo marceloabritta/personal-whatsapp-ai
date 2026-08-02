@@ -38,20 +38,29 @@ class Evolution:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             return await client.post(url, json=payload, headers=self._headers)
 
-    async def send_text(self, number: str, text: str) -> bool:
+    async def send_text(self, number: str, text: str) -> Optional[str]:
         """POST /message/sendText/{instance}. Sends RAW text — the reply header is
-        stamped by the caller (act node), never here. Returns True on 2xx."""
+        stamped by the caller (act node), never here.
+
+        Returns the sent WhatsApp message id on success so the caller can record it
+        for echo-filtering; an empty string if the send was 2xx but no id came back
+        (still a success); None on failure."""
         try:
             resp = await self._post(
                 f"/message/sendText/{self.instance}", {"number": number, "text": text}
             )
         except httpx.HTTPError as exc:
             log.error("sendText transport error: %s", exc)
-            return False
+            return None
         if resp.status_code >= 400:
             log.error("sendText failed %s: %s", resp.status_code, resp.text[:500])
-            return False
-        return True
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return ""
+        key = (data.get("key") if isinstance(data, dict) else None) or {}
+        return key.get("id") or ""
 
     async def _find_messages(self, where: dict) -> list[dict]:
         """One findMessages page. Returns [] on any failure so one bad query can't

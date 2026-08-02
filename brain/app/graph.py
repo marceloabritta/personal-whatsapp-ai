@@ -28,8 +28,8 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node("gate", partial(gate_node, sessions=deps.sessions, trace=deps.trace))
     g.add_node(
         "context",
-        partial(context_node, evolution=deps.evolution, settings=deps.settings,
-                trace=deps.trace),
+        partial(context_node, evolution=deps.evolution, echoes=deps.echoes,
+                settings=deps.settings, trace=deps.trace),
     )
     g.add_node(
         "reason",
@@ -39,7 +39,7 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "act",
         partial(act_node, evolution=deps.evolution, sessions=deps.sessions,
-                settings=deps.settings, trace=deps.trace),
+                echoes=deps.echoes, settings=deps.settings, trace=deps.trace),
     )
 
     g.set_entry_point("parse")

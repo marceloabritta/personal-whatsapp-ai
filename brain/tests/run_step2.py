@@ -17,6 +17,7 @@ from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
 from app.config import Settings  # noqa: E402
 from app.deps import Deps  # noqa: E402
+from app.echoes import InMemoryEchoes  # noqa: E402
 from app.graph import build_graph  # noqa: E402
 from app.identity import frame  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
@@ -56,8 +57,9 @@ class FakeEvolution:
         self.history = history or []
 
     async def send_text(self, number, text):
+        mid = f"echo{len(self.sent)}"
         self.sent.append((number, text))
-        return True
+        return mid
 
     async def fetch_history(self, jid):
         return list(self.history)
@@ -81,7 +83,8 @@ def make_env(history=None):
     evo = FakeEvolution(history)
     stub = StubReasoner()
     deps = Deps(settings=settings, evolution=evo, sessions=InMemorySessions(ttl=60),
-                trace=build_trace(), reasoner=stub, redis=None)
+                echoes=InMemoryEchoes(ttl=3600), trace=build_trace(), reasoner=stub,
+                redis=None)
     graph = build_graph(deps, MemorySaver())
     return deps, evo, stub, graph
 
@@ -174,6 +177,18 @@ async def main() -> None:
                      "tool_calls": [], "error_category": "none"}]
     await invoke(graphP, upsert("e amanhã?", mid="p2", jid=PT_JID), jid=PT_JID)
     check("session language locked to PT (header stays PT)", evoP.sent[-1][1].startswith("*[Assistente IA do Marcelo]:*"))
+
+    print("9. our own reply is filtered from ingestion by message id (header-independent)")
+    depsE, evoE, stubE, graphE = make_env(history=[
+        rec("u1", "@mary hi", from_me=True),
+        # An echoed reply WITHOUT the header — only the recorded id can catch this.
+        rec("selfecho", "On it (no header)", from_me=True),
+    ])
+    depsE.echoes.record(OWNER_JID, "selfecho")
+    await invoke(graphE, upsert("@mary hi", mid="u1"))
+    seed = " ".join(m["content"] for m in stubE.calls[-1]["messages"])
+    check("owner's real message ingested", "hi" in seed)
+    check("own reply dropped by id despite missing header", "On it (no header)" not in seed)
 
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)

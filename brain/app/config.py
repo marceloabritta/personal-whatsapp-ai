@@ -28,8 +28,20 @@ class Settings(BaseSettings):
     # Memory: how many WhatsApp messages seed a fresh thread.
     context_window_messages: int = 30
 
+    # Echo store: how long a sent message id is remembered so we never re-ingest our
+    # own reply. Only needs to outlive the reseed window; default 7 days.
+    echo_ttl_seconds: int = 604800
+
     # LangGraph checkpointer (Postgres). In-memory fallback when unset (dev/tests).
     database_url: str | None = None
+
+    # Durable loop log (reuses DATABASE_URL; disabled when that is unset). Isolated in
+    # its own schema so it never collides with Evolution's or the checkpointer's tables.
+    log_enabled: bool = True
+    log_schema: str = "mary_log"
+    log_queue_max: int = 10_000
+    log_retention_events_days: int = 90
+    log_retention_loops_days: int = 365
 
     # Reasoning — provider-neutral selection + Anthropic knobs.
     llm_provider: str = "anthropic"

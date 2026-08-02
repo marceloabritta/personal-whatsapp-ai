@@ -25,7 +25,9 @@ def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[
     return records[-window:]
 
 
-async def context_node(state: MessageState, *, evolution, settings, trace: Trace) -> dict:
+async def context_node(
+    state: MessageState, *, evolution, echoes, settings, trace: Trace
+) -> dict:
     tid = state["trace_id"]
     jid = state["remote_jid"]
     owner = settings.owner_name
@@ -49,8 +51,13 @@ async def context_node(state: MessageState, *, evolution, settings, trace: Trace
             "ts": state.get("ts", 0),
         }]
 
-    # Filter assistant-origin — already AIMessages; never re-ingest.
-    new = [r for r in new if not is_own_message(r.get("text") or "", owner)]
+    # Filter assistant-origin — already AIMessages; never re-ingest. Primary filter is
+    # the message id we recorded when we sent it; the header stamp is the fallback.
+    new = [
+        r for r in new
+        if not echoes.is_ours(jid, r.get("id"))
+        and not is_own_message(r.get("text") or "", owner)
+    ]
 
     transcript = build_labeled_transcript(new, owner)
     ids = [r["id"] for r in new if r.get("id")]
