@@ -12,7 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.logstore import LogStore, redact_obj, redact_text, stream_for, label_for, turn_row  # noqa: E402
+from app.logstore import (  # noqa: E402
+    LogStore, redact_obj, redact_text, stream_for, label_for, token_ok, turn_row,
+)
 from app.trace import build_trace, current_trace_id  # noqa: E402
 
 _c = {"pass": 0, "fail": 0}
@@ -154,6 +156,13 @@ async def _writer_checks():
     for i in range(5):
         tiny.enqueue({"trace_id": "t", "level": "code", "node": "gate", "i": i})
     check("2 buffered, 3 dropped (reply path never blocked)", tiny.dropped == 3)
+
+    print("7. read-API token check (P3)")
+    check("valid bearer accepted", token_ok("Bearer s3cret", "s3cret") is True)
+    check("wrong token rejected", token_ok("Bearer nope", "s3cret") is False)
+    check("missing scheme rejected", token_ok("s3cret", "s3cret") is False)
+    check("empty header rejected", token_ok("", "s3cret") is False)
+    check("unset server token never authorises", token_ok("Bearer anything", "") is False)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ psycopg is imported lazily inside open() so this module imports with no DB prese
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import re
@@ -27,6 +28,18 @@ import time
 from typing import Any, Optional
 
 log = logging.getLogger("mary.logstore")
+
+
+def token_ok(auth_header: str, configured: str) -> bool:
+    """Constant-time check of an `Authorization: Bearer <token>` header against the
+    configured read-API token. False if either side is empty or the scheme is wrong —
+    so an unset token can never authorise (the endpoint denies before reaching here)."""
+    if not configured:
+        return False
+    prefix = "Bearer "
+    if not auth_header or not auth_header.startswith(prefix):
+        return False
+    return hmac.compare_digest(auth_header[len(prefix):], configured)
 
 _STOP = object()  # writer-loop shutdown sentinel
 _SEQ_CAP = 4096  # bound the per-turn seq counters (freed on `record`; capped for turns
@@ -266,6 +279,56 @@ class LogStore:
                 )
         except Exception as exc:
             log.warning("logstore purge skipped: %s", exc)
+
+    # -- reads (P3 read API) -------------------------------------------------
+    async def read_turn(self, trace_id: str, *, stream: str | None = None) -> Optional[dict]:
+        """One activation: the turns row (may be None for a control-only trace like a
+        dedup drop) plus its events, ordered. Optional single-stream filter."""
+        from psycopg.rows import dict_row
+
+        s = self.schema
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(f"SELECT * FROM {s}.turns WHERE trace_id = %s", (trace_id,))
+                turn = await cur.fetchone()
+                q = (f"SELECT seq, ts, stream, label, payload FROM {s}.events "
+                     "WHERE trace_id = %s")
+                params: list = [trace_id]
+                if stream:
+                    q += " AND stream = %s"
+                    params.append(stream)
+                q += " ORDER BY seq"
+                await cur.execute(q, params)
+                events = await cur.fetchall()
+        if turn is None and not events:
+            return None
+        return {"trace_id": trace_id, "turn": turn, "events": events}
+
+    async def read_turns(
+        self, *, chat: str | None = None, since: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        """Recent activations, newest first — the 'all calls that ran' view."""
+        from psycopg.rows import dict_row
+
+        s = self.schema
+        limit = max(1, min(limit, 500))  # bound the page
+        q = f"SELECT * FROM {s}.turns"
+        clauses: list = []
+        params: list = []
+        if chat:
+            clauses.append("chat_id = %s")
+            params.append(chat)
+        if since:
+            clauses.append("started_at >= %s::timestamptz")
+            params.append(since)
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        q += " ORDER BY started_at DESC LIMIT %s"
+        params.append(limit)
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(q, params)
+                return await cur.fetchall()
 
     # -- schema --------------------------------------------------------------
     def _ddl(self) -> str:
