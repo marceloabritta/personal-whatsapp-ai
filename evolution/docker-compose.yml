@@ -54,18 +54,28 @@ services:
     depends_on:
       - api
       - redis
+      - postgres
     environment:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
       EVOLUTION_INSTANCE: secretaria
       # Reply header is [<OWNER_NAME>'s AI Assistant]:
       OWNER_NAME: "Marcelo"
-      # Trigger tag (comma-separated, lowercase). @mary wakes the brain — the single
-      # source of truth for what starts a run.
+      # Trigger tag (comma-separated, lowercase). @mary wakes the brain.
       MARY_TRIGGER_TAG: "@mary"
-      # Session markers + webhook dedup + user transcripts. Own DB to stay clear of
-      # Evolution's cache on the same redis.
+      # Listening-window marker + webhook dedup. Own DB, clear of Evolution's cache.
       REDIS_URL: redis://redis:6379/1
+      LOOP_TTL_SECONDS: "60"
+      # Memory: seed size + the LangGraph checkpointer (reuses the Evolution Postgres).
+      CONTEXT_WINDOW_MESSAGES: "30"
+      DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution
+      # Reasoning (provider-neutral; Anthropic today).
+      LLM_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: claude-opus-4-8
+      CLAUDE_EFFORT: high
+      WEB_SEARCH_MAX_USES: "5"
+      PROMPT_VERSION: "2026-08-02.1"
     networks:
       - evolution-net
 

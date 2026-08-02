@@ -13,24 +13,44 @@ class Settings(BaseSettings):
     evolution_apikey: str = ""
     evolution_instance: str = "secretaria"
 
-    # Trigger tag(s). Accepts the old SECRETARY_TAG_NEW var as an alias so the
-    # existing compose keeps working without a rename.
+    # Trigger tag(s). Accepts the old SECRETARY_TAG_NEW var as an alias.
     mary_trigger_tag: str = Field(
         default="@mary",
         validation_alias=AliasChoices("MARY_TRIGGER_TAG", "SECRETARY_TAG_NEW"),
     )
 
     owner_name: str = "Marcelo"
-    ack_text: str = "🌿 Mary here — listening."
 
-    # Session marker + webhook dedup. In-memory fallback when redis_url is unset.
+    # Listening loop + webhook dedup. In-memory fallback when redis_url is unset.
     redis_url: str | None = None
-    session_ttl: int = 1800
+    loop_ttl_seconds: int = 60  # the listening-window TTL
+
+    # Memory: how many WhatsApp messages seed a fresh thread.
+    context_window_messages: int = 30
+
+    # LangGraph checkpointer (Postgres). In-memory fallback when unset (dev/tests).
+    database_url: str | None = None
+
+    # Reasoning — provider-neutral selection + Anthropic knobs.
+    llm_provider: str = "anthropic"
+    anthropic_api_key: str = Field(
+        default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY")
+    )
+    claude_model: str = "claude-opus-4-8"
+    claude_effort: str = "high"
+    claude_max_tokens: int = 8192
+    web_search_max_uses: int = 5
+
+    prompt_version: str = "2026-08-02.1"
 
     @property
     def tags(self) -> list[str]:
-        """The accepted trigger tags, lowercased and de-blanked."""
         return [t.strip().lower() for t in self.mary_trigger_tag.split(",") if t.strip()]
+
+    @property
+    def primary_tag(self) -> str:
+        tags = self.tags
+        return tags[0] if tags else "@mary"
 
 
 def load_settings() -> Settings:

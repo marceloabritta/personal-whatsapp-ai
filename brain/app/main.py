@@ -1,28 +1,58 @@
 """FastAPI entry — the webhook Evolution POSTs every message to.
 
-Replies 200 immediately (so Evolution never resends), then runs the graph in the
-background. Dedup by message id is an infra concern and lives here, not in the graph."""
+Replies 200 immediately, then runs the graph in the background, scoped to the chat's
+checkpoint thread. Correctness rails: message-id idempotency + a per-thread lock so
+two fast messages in one chat can't race the checkpoint or the window."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from .deps import build_deps
 from .graph import build_graph
+from .threads import make_thread_id
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("mary.webhook")
 
-deps = build_deps()
-graph = build_graph(deps)
 
-app = FastAPI(title="Mary brain", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    deps = build_deps()
+    cp_cm = None
+    if deps.settings.database_url:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-# Message-id dedup (Evolution may deliver a message more than once). Bounded LRU.
+        cp_cm = AsyncPostgresSaver.from_conn_string(deps.settings.database_url)
+        checkpointer = await cp_cm.__aenter__()
+        await checkpointer.setup()  # idempotent; creates the checkpoint tables
+        log.info("%s", '{"boot":"postgres-checkpointer"}')
+    else:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        checkpointer = MemorySaver()
+        log.info("%s", '{"boot":"in-memory-checkpointer"}')
+
+    app.state.deps = deps
+    app.state.graph = build_graph(deps, checkpointer)
+    try:
+        yield
+    finally:
+        if cp_cm is not None:
+            await cp_cm.__aexit__(None, None, None)
+
+
+app = FastAPI(title="Mary brain", version="0.2.0", lifespan=lifespan)
+
+# Message-id idempotency (webhook retries). Bounded LRU, per process.
 _seen: "OrderedDict[str, None]" = OrderedDict()
-_SEEN_MAX = 1000
+_SEEN_MAX = 2000
+# Per-thread serialization so activations in one chat never race.
+_locks: dict[str, asyncio.Lock] = {}
 
 
 def _already_seen(msg_id: str | None) -> bool:
@@ -37,25 +67,39 @@ def _already_seen(msg_id: str | None) -> bool:
 
 
 @app.get("/")
-async def health() -> dict:
-    return {"ok": True, "service": "mary-brain", "tags": deps.settings.tags}
+async def health(request: Request) -> dict:
+    deps = request.app.state.deps
+    return {
+        "ok": True,
+        "service": "mary-brain",
+        "version": "0.2.0",
+        "tags": deps.settings.tags,
+        "model": deps.settings.claude_model,
+    }
 
 
 @app.post("/webhook")
 async def webhook(request: Request, background: BackgroundTasks) -> Response:
     body = await request.json()
     data = body.get("data") or {}
-    msg_id = (data.get("key") or {}).get("id")
+    key = data.get("key") or {}
+    msg_id = key.get("id")
 
     if _already_seen(msg_id):
         return Response(status_code=200)
 
-    background.add_task(_run, body)
+    chat_jid = key.get("remoteJid") or ""
+    deps = request.app.state.deps
+    thread_id = make_thread_id(deps.settings.evolution_instance, chat_jid)
+    background.add_task(_run, request.app, body, thread_id)
     return Response(status_code=200)
 
 
-async def _run(body: dict) -> None:
-    try:
-        await graph.ainvoke({"raw": body})
-    except Exception:  # a bad payload must never crash the worker
-        log.exception("graph run failed")
+async def _run(app: FastAPI, body: dict, thread_id: str) -> None:
+    lock = _locks.setdefault(thread_id, asyncio.Lock())
+    async with lock:
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            await app.state.graph.ainvoke({"raw": body}, config=config)
+        except Exception:  # a bad payload must never crash the worker
+            log.exception("graph run failed")

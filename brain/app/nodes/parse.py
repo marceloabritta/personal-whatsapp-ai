@@ -1,8 +1,7 @@
-"""parse — normalise the Evolution MESSAGES_UPSERT payload into MessageState.
+"""parse — normalise the Evolution MESSAGES_UPSERT payload.
 
-The envelope: body.data.key = {fromMe, remoteJid, id}, body.data.message, plus
-messageTimestamp and pushName. Owner-vs-tag decisions happen in the gate; here we
-only extract and stamp the run's trace id."""
+Returns only the fields it sets (partial update) — never the whole state — so the
+`messages` add_messages channel isn't re-appended each node."""
 from __future__ import annotations
 
 from ..identity import is_own_message, matched_tag
@@ -13,7 +12,7 @@ from ..whatsapp import extract_text
 
 def parse_node(
     state: MessageState, *, trace: Trace, tags: list[str], owner_name: str
-) -> MessageState:
+) -> dict:
     raw = state.get("raw") or {}
     data = raw.get("data", raw)
     key = data.get("key") or {}
@@ -24,31 +23,23 @@ def parse_node(
     number = remote_jid.split("@")[0]
 
     tid = trace.start(number)
-    # Only the owner's account (fromMe) can trigger via tag.
     tag = matched_tag(text, tags) if from_me else None
 
-    state.update(
-        {
-            "trace_id": tid,
-            "from_me": from_me,
-            "remote_jid": remote_jid,
-            "msg_id": key.get("id"),
-            "text": text,
-            "push_name": data.get("pushName"),
-            "number": number,
-            "ts": int(data.get("messageTimestamp") or 0),
-            "is_own": is_own_message(text, owner_name),
-            "tag": tag,
-        }
+    trace.code(
+        tid, node="parse", chat=remote_jid, from_me=from_me,
+        is_own=is_own_message(text, owner_name), tag=tag, text_preview=text[:80],
     )
 
-    trace.code(
-        tid,
-        node="parse",
-        chat=remote_jid,
-        from_me=from_me,
-        is_own=state["is_own"],
-        tag=tag,
-        text_preview=text[:80],
-    )
-    return state
+    return {
+        "trace_id": tid,
+        "from_me": from_me,
+        "remote_jid": remote_jid,
+        "msg_id": key.get("id"),
+        "text": text,
+        "push_name": data.get("pushName"),
+        "number": number,
+        "ts": int(data.get("messageTimestamp") or 0),
+        "is_own": is_own_message(text, owner_name),
+        "tag": tag,
+        "error_category": "none",
+    }

@@ -1,30 +1,51 @@
-"""The graph's shared state. One dict flows parse -> gate -> ack -> send."""
+"""The graph's shared state.
+
+`messages` is persisted per chat by the checkpointer (add_messages reducer);
+everything else is per-turn scratch that the nodes overwrite each run."""
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+from typing import Annotated, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
 
 
 class MessageState(TypedDict, total=False):
-    # Input
-    raw: dict  # the full webhook body
+    # --- persisted memory (checkpointer) ---
+    messages: Annotated[list, add_messages]  # model conversation history
+    last_whatsapp_message_id: Optional[str]  # ingestion cursor
+    initialized: bool  # seeded the window yet?
 
-    # Parsed (parse node)
+    # --- per-turn scratch ---
+    raw: dict
     trace_id: str
     from_me: bool
     remote_jid: str
     msg_id: Optional[str]
     text: str
     push_name: Optional[str]
-    number: str  # reply target = remote_jid without the @domain
+    number: str
     ts: int
     is_own: bool
     tag: Optional[str]
 
-    # Decision (gate node)
-    decision: str  # "ack" | "stop"
-    trigger: Optional[str]  # "tag" | "session" | None
+    decision: str  # gate: "run" | "stop"
+    trigger: Optional[str]  # "tag" | "window"
 
-    # Output (ack + send nodes)
-    reply_body: str  # the human-readable body (for the transcript)
-    reply: str  # the framed message actually sent (header + body)
+    context_message_ids: list  # WhatsApp ids ingested this run
+
+    # reasoning output + metadata (for the record)
+    llm_state: str  # "keep_listening" | "close"
+    reply_body: Optional[str]  # the model's message, or None (silence)
+    provider: Optional[str]
+    model: Optional[str]
+    provider_request_id: Optional[str]
+    usage: Optional[dict]
+    latency_ms: Optional[int]
+    stop_reason: Optional[str]
+    tool_calls: list
+    error_category: str
+
+    # act output
+    reply: Optional[str]  # framed text actually sent
     sent: bool
+    close_reason: Optional[str]  # "model" | "timeout" | None
