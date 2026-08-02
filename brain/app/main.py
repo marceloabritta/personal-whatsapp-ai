@@ -10,10 +10,11 @@ import logging
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
 from .deps import build_deps
 from .graph import build_graph
+from .logstore import token_ok
 from .threads import make_thread_id
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
         log.info("%s", '{"boot":"logstore-postgres"}')
 
     app.state.deps = deps
+    app.state.logstore = logstore  # None when DATABASE_URL unset; guarded in the read API
     app.state.graph = build_graph(deps, checkpointer)
     try:
         yield
@@ -94,6 +96,39 @@ async def health(request: Request) -> dict:
         "tags": deps.settings.tags,
         "model": deps.settings.claude_model,
     }
+
+
+# --- Read API (P3) — inspect the durable log without SSH/psql. Both carry PII, so both
+#     require a bearer token (LOG_API_TOKEN); with it unset the endpoints refuse (503). ---
+def _require_log_api(request: Request):
+    deps = request.app.state.deps
+    ls = request.app.state.logstore
+    if ls is None or not deps.settings.log_api_token:
+        raise HTTPException(status_code=503, detail="log API not configured")
+    if not token_ok(request.headers.get("authorization", ""), deps.settings.log_api_token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return ls
+
+
+@app.get("/trace/{trace_id}")
+async def read_trace(trace_id: str, request: Request, stream: str | None = None) -> dict:
+    """One activation, replayed: the turn summary + its ordered events across the three
+    streams (optionally filtered to one via ?stream=transcript|reasoning|control)."""
+    ls = _require_log_api(request)
+    data = await ls.read_turn(trace_id, stream=stream)
+    if data is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return data
+
+
+@app.get("/turns")
+async def read_turns(
+    request: Request, chat: str | None = None, since: str | None = None, limit: int = 50
+) -> dict:
+    """Recent activations, newest first — the 'all calls that ran' view. Filter by
+    ?chat=<jid> and/or ?since=<ISO timestamp>; ?limit caps the page (max 500)."""
+    ls = _require_log_api(request)
+    return {"turns": await ls.read_turns(chat=chat, since=since, limit=limit)}
 
 
 @app.post("/webhook")
