@@ -43,26 +43,27 @@ services:
     networks:
       - evolution-net
 
-  secretary:
-    container_name: secretary
-    image: node:20-alpine
+  # The old Node "secretary" orchestrator is RETIRED — replaced by "brain" below.
+  # Its full source is preserved on the git branch `archive/secretary-v1`.
+
+  brain:
+    container_name: mary_brain
+    build:
+      context: ../brain        # the LangGraph brain (Python) lives in ../brain
     restart: always
-    working_dir: /app
     depends_on:
       - api
-    volumes:
-      - /opt/secretary:/app    # the secretary code lives here, mounted from the host
-                               # (put the contents of secretary/ in /opt/secretary)
-    env_file:
-      - /opt/secretary/.env    # secretary secrets (Claude, Google, AssemblyAI)
-    command: sh -c "npm install --no-audit --no-fund && npm start"
+      - redis
     environment:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
       EVOLUTION_INSTANCE: secretaria
-      # Trigger tag (comma-separated, lowercase). @mary summons the orchestrator
-      # conversation loop. This is the single source of truth for what starts the secretary.
-      SECRETARY_TAG_NEW: "@mary"
+      # Trigger tag (comma-separated, lowercase). @mary wakes the brain — the single
+      # source of truth for what starts a run.
+      MARY_TRIGGER_TAG: "@mary"
+      # Session markers + webhook dedup + user transcripts. Own DB to stay clear of
+      # Evolution's cache on the same redis.
+      REDIS_URL: redis://redis:6379/1
     networks:
       - evolution-net
 
