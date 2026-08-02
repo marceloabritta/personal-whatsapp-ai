@@ -43,6 +43,7 @@ DESCRIBE = (
 GUIDANCE = """Calendar actions — you manage {owner_name}'s Google Calendar: create an event, list the agenda, find an event, reschedule it (update), or cancel it (delete). General rules first, then each verb.
 
 ALWAYS
+- NEVER create, change or cancel anything until you have SENT the confirmation message for it AND {owner_name} has answered yes. No positive answer yet → do not act and do not set `confirmed: true`; send the confirmation and wait for his go-ahead. Only `list` and `find` may run without asking.
 - The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" → 2026-08-07T15:00:00-03:00) — never pass a vague phrase to the tool.
 - Report what actually happened FROM the tool's result — never announce success before you have seen it come back.
 - Do not write the reply header (the system stamps it). No emoji.
@@ -64,7 +65,17 @@ Ok, confirming before I dispatch:
 
 Should I go ahead, or is anything missing?
 
-- Once it is created, confirm briefly and include the Google Meet link when there is one.
+- Once it is created, report it EXACTLY like this (render the heading, weekday and any "Video call" label in the conversation's language):
+
+Scheduled:
+
+<title>
+<date as DD/MM - Weekday, e.g. 05/08 - Wednesday>
+<time — a MORNING time as 12-hour with AM (e.g. 09:00 AM); an AFTERNOON/EVENING time as 24-hour (e.g. 15:00)>
+<the location — or just "Video call" if it is virtual; never paste the Meet link>
+
+Here is the event link:
+<event link>
 
 LIST
 - Read-only, no confirmation. Resolve the window from his question (default: what is coming up).
@@ -252,12 +263,16 @@ class GoogleCalendarService:
         ev = self._service().events().insert(**kw).execute()
         view = self._event_view(ev)
         meet = self._meet_link(ev)
-        parts = [f"Created '{view['title']}' {self._fmt(view['start'])}"]
+        # The read-back summary carries what the model needs to render the "Scheduled:" message:
+        # the ISO start (it formats date/time), where (Video call vs a place — NOT the Meet URL,
+        # per the message spec), guest count, and the EVENT link.
+        where = "Video call (Google Meet)" if want_meet else (view["location"] or "no location")
+        parts = [f"Created '{view['title']}'", f"start {view['start']}", where]
         n = len(inp.get("attendees") or [])
         if n:
-            parts.append(f"invited {n}")
-        if meet:
-            parts.append(meet)
+            parts.append(f"{n} guest(s) invited")
+        if view["html_link"]:
+            parts.append(f"event link: {view['html_link']}")
         return {"ok": True, "summary": " · ".join(parts),
                 "data": {"event_id": view["event_id"], "html_link": view["html_link"],
                          "meet_link": meet}}

@@ -458,8 +458,11 @@ async def calendar_checks() -> None:
           body["summary"] == "Call Ana" and body["start"]["timeZone"] == tz)
     check("[create] end defaulted to start + 45min",
           body["end"]["dateTime"] == "2026-08-05T15:45:00-03:00")
+    check("[create] result carries the ISO start + event link for the 'Scheduled:' message",
+          "2026-08-05T15:00:00-03:00" in r["summary"] and "event link: http://cal/NEW1" in r["summary"])
 
-    # create virtual: video wins (no location) + Meet link attached.
+    # create virtual: video wins (no location) + Meet link in DATA but 'Video call' (not the URL)
+    # in the summary the model reads back.
     h = _cal_handler()
     r = await h.run("create", {"title": "Sync", "start": "2026-08-05T09:00:00-03:00",
                                "virtual": True, "location": "ignored", "confirmed": True})
@@ -467,7 +470,9 @@ async def calendar_checks() -> None:
     check("[create] virtual drops location + requests Meet",
           ins["body"]["location"] is None and "conferenceData" in ins["body"]
           and ins.get("conferenceDataVersion") == 1)
-    check("[create] Meet link surfaced in result", "meet.google.com" in (r["data"]["meet_link"] or ""))
+    check("[create] Meet link kept in data", "meet.google.com" in (r["data"]["meet_link"] or ""))
+    check("[create] summary says 'Video call' and does NOT paste the Meet link",
+          "Video call" in r["summary"] and "meet.google.com" not in r["summary"])
 
     # create with attendees + send_invites False -> sendUpdates none.
     h = _cal_handler()
@@ -477,7 +482,7 @@ async def calendar_checks() -> None:
     ins = next(kw for v, kw in h._svc.events().calls if v == "insert")
     check("[create] attendees set + invites suppressed",
           ins["body"]["attendees"] == [{"email": "ana@x.com"}] and ins["sendUpdates"] == "none")
-    check("[create] summary notes the invite count", "invited 1" in r["summary"])
+    check("[create] summary notes the invite count", "1 guest(s) invited" in r["summary"])
 
     # create validation.
     r = await _cal_handler().run("create", {"start": "2026-08-05T15:00:00-03:00"})
