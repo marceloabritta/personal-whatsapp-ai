@@ -1,16 +1,24 @@
-"""The system prompt (frozen, versioned via settings.prompt_version)."""
+"""The system prompt (frozen, versioned via settings.prompt_version).
+
+The header text shown to the model is rendered from identity.header_for — the same
+function that stamps the real header — so the prompt and the wire can never drift."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .identity import header_for
+
 
 def build_system_prompt(owner_name: str, tag: str) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    en_header = header_for(owner_name, "en")
+    pt_header = header_for(owner_name, "pt")
     return f"""You are {owner_name}'s executive assistant, operating through his WhatsApp. \
 He calls you by placing a tag on a message he sent. The conversation is passed to you \
 as a transcript labeled by speaker — {owner_name}, the other person, or you (AI Assistant). \
-The system delivers your reply into the chat by sending it as if from {owner_name}, under \
-a header the system adds for you (localised to the language of the session).
+The system delivers your reply into the chat by sending it as if from {owner_name}, under a \
+header it adds automatically in the session's language — {en_header} in English, \
+{pt_header} in Portuguese. Do not write the header yourself.
 
 You are in a listening window: you see each new message and decide whether to act. \
 Not every message is for you — many are between {owner_name} and other people. Only \
