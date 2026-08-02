@@ -1,0 +1,10 @@
+# Board Inbox — runtime queue state for scripts/board-ingest.mjs.
+#
+# The queue, the delivered archive and the lockfile are RUNTIME STATE, not repo content:
+queue/
+delivered/
+.drain.lock
+
+# ledger.tsv is DELIBERATELY NOT ignored — it IS tracked. It is the record of every file
+# already accounted for, and it must survive a fresh clone: losing it re-opens cards for
+# work already done. (Nothing to add here to keep it — it is simply not listed above.)

@@ -1,5 +1,6 @@
 # ============================================================================
-#  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis + secretary
+#  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis +
+#  dispatcher + three flows (mary = @assistant/@mary, lisa = @lisa).
 #  Runs on a single droplet. Everything talks over the internal "evolution-net".
 # ============================================================================
 services:
@@ -43,13 +44,82 @@ services:
     networks:
       - evolution-net
 
-  # The old Node "secretary" orchestrator is RETIRED — replaced by "brain" below.
-  # Its full source is preserved on the git branch `archive/secretary-v1`.
+  # ── THREE FLOWS, ONE NUMBER ────────────────────────────────────────────────
+  # One Evolution instance posts every message to ONE webhook. The `dispatcher`
+  # is that single target; it reads the summon @tag (and per-chat window
+  # ownership) and forwards the raw payload to the flow that owns the turn:
+  #   @assistente / @assistant / @mary → mary  (Node secretary, db83a6a)
+  #   @lisa                            → lisa  (LangGraph brain)
+  # The old secretary's full source is also preserved on branch archive/secretary-v1.
 
-  brain:
-    container_name: mary_brain
+  dispatcher:
+    container_name: flow_dispatcher
     build:
-      context: ../brain        # the LangGraph brain (Python) lives in ../brain
+      context: ../dispatcher
+    restart: always
+    depends_on:
+      - api
+      - redis
+      - mary
+      - lisa
+    ports:
+      - "8090:8090"          # the ONE webhook Evolution posts to
+    environment:
+      OWNER_NAME: "Marcelo"
+      # Window TTL for untagged continuations. Keep >= each flow's own window so a
+      # valid continuation is never dropped before the flow's gate would close it.
+      WINDOW_TTL: "120"
+      # Own DB index, clear of Evolution's cache and the flows' session stores.
+      REDIS_URL: redis://redis:6379/4
+      # tag → flow wiring (forwarded by Docker service DNS on evolution-net).
+      MARY_TAGS: "@assistente,@assistant,@mary"
+      MARY_URL: http://mary:3000/webhook
+      LISA_TAGS: "@lisa"
+      LISA_URL: http://lisa:8000/webhook
+    networks:
+      - evolution-net
+
+  # @assistant + @mary — the restored Node "secretary" (db83a6a). ONE process,
+  # two personas selected by tag inside 1. Orchestrator/server.js. Redis DB 0
+  # (it namespaces its own keys with `secretary:*`); no Postgres.
+  mary:
+    container_name: mary_flow
+    build:
+      context: ../Mary flow
+    restart: always
+    depends_on:
+      - api
+      - redis
+    environment:
+      EVOLUTION_URL: http://api:8080
+      EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
+      EVOLUTION_INSTANCE: secretaria
+      OWNER_NAME: "Marcelo"
+      # Trigger tags (lowercase). NOTE: the secretary persists tag changes in Redis
+      # (secretary:settings:tags / :new:tags) and those WIN over these at boot — clear
+      # them once if the stored values differ (see the plan / .env.example).
+      SECRETARY_TAG: "@assistente,@assistant"
+      SECRETARY_TAG_NEW: "@mary"
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: claude-sonnet-5
+      # Skills: Google (calendar + tasks), AssemblyAI (audio), Kiwi flights (keyless).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
+      ASSEMBLYAI_LANGUAGE: en
+      FLIGHT_CURRENCY: BRL
+    networks:
+      - evolution-net
+
+  # @lisa — the LangGraph brain (Python). Redis DB 1; Postgres checkpointer + its
+  # own log schema (renamed lisa_log so it never reads as Mary's).
+  lisa:
+    container_name: lisa_brain
+    build:
+      context: ../Lisa flow     # the LangGraph brain (Python) lives in ../Lisa flow
     restart: always
     depends_on:
       - api
@@ -61,14 +131,15 @@ services:
       EVOLUTION_INSTANCE: secretaria
       # Reply header is [<OWNER_NAME>'s AI Assistant]:
       OWNER_NAME: "Marcelo"
-      # Trigger tag (comma-separated, lowercase). @mary wakes the brain.
-      MARY_TRIGGER_TAG: "@mary"
+      # Trigger tag (comma-separated, lowercase). @lisa wakes the brain.
+      MARY_TRIGGER_TAG: "@lisa"
       # Listening-window marker + webhook dedup. Own DB, clear of Evolution's cache.
       REDIS_URL: redis://redis:6379/1
       LOOP_TTL_SECONDS: "60"
       # Memory: seed size + the LangGraph checkpointer (reuses the Evolution Postgres).
       CONTEXT_WINDOW_MESSAGES: "30"
       DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution
+      LOG_SCHEMA: lisa_log
       # Reasoning (provider-neutral; Anthropic today).
       LLM_PROVIDER: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}

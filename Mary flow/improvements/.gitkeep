@@ -1,0 +1,6 @@
+# Self-learning spool.
+#
+# The container writes failure reports here at runtime (see 1. Orchestrator/lib/selflearning.js).
+# This file is tracked ONLY so the directory exists on the droplet after a git pull; the
+# reports themselves are gitignored and are pulled to the top-level Improvements/ by
+# scripts/self-learning-pull.sh, which then archives them into ./_synced/.
