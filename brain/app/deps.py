@@ -46,6 +46,9 @@ def build_deps(settings: Settings | None = None) -> Deps:
         sessions = RedisSessions(redis_client, ttl=settings.loop_ttl_seconds)
         store = redis_client
 
+    # Built first so the IO clients can emit control-stream events through it.
+    trace = build_trace(store=store)
+
     # Fan the tool registry out into schema (local) + MCP servers (mcp) + prompt (both).
     output_schema = build_output_schema(TOOLS)
     mcp_servers = build_mcp_servers(TOOLS, settings)
@@ -56,9 +59,9 @@ def build_deps(settings: Settings | None = None) -> Deps:
     return Deps(
         settings=settings,
         evolution=Evolution(settings.evolution_url, settings.evolution_apikey,
-                            settings.evolution_instance),
+                            settings.evolution_instance, trace=trace),
         sessions=sessions,
-        trace=build_trace(store=store),
+        trace=trace,
         reasoner=build_reasoner(settings, output_schema=output_schema, mcp_servers=mcp_servers),
         tools=handlers,
         tools_prompt=tools_prompt,

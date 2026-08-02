@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # LangGraph checkpointer (Postgres). In-memory fallback when unset (dev/tests).
     database_url: str | None = None
 
+    # Durable turn log (reuses DATABASE_URL; disabled when that is unset). Isolated in
+    # its own schema so it never collides with Evolution's or the checkpointer's tables.
+    log_schema: str = "mary_log"
+    log_queue_max: int = 10_000
+    log_retention_events_days: int = 90
+    log_retention_turns_days: int = 365
+    log_api_token: str = ""  # bearer for the read API (P3); unused until then
+
     # Reasoning — provider-neutral selection + Anthropic knobs.
     llm_provider: str = "anthropic"
     anthropic_api_key: str = Field(
@@ -51,7 +59,7 @@ class Settings(BaseSettings):
     google_refresh_token: str = ""
     google_calendar_id: str = "primary"
 
-    prompt_version: str = "2026-08-03.1"
+    prompt_version: str = "2026-08-03.2"
 
     @property
     def tags(self) -> list[str]:

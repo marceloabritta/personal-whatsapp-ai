@@ -6,6 +6,8 @@ happens only if an action was a read (search/list) or any failed — a clean wri
 goes straight to `act` with the message + loop_state the model already chose."""
 from __future__ import annotations
 
+import time
+
 from ..state import MessageState
 from ..trace import Trace
 
@@ -27,10 +29,12 @@ async def execute_node(
         inputs = (a or {}).get("inputs") or {}
         domain, _, verb = task.partition(".")
         handler = tools.get(domain)
+        t0 = time.monotonic()
         if handler is None:
             res = {"ok": False, "summary": f"no handler for {task}", "error": "unknown_tool"}
         else:
             res = await handler.run(verb, inputs)
+        ms = int((time.monotonic() - t0) * 1000)
         ok = bool(res.get("ok"))
         any_read = any_read or verb == "list"
         any_fail = any_fail or not ok
@@ -41,7 +45,8 @@ async def execute_node(
             "event_id": (res.get("data") or {}).get("event_id"),
             "error": res.get("error"), "need": res.get("need"),
         })
-        trace.code(tid, node="execute", task=task, ok=ok,
+        # inputs are recorded so a tool run can be replayed; the sink redacts secrets.
+        trace.code(tid, node="execute", task=task, ok=ok, inputs=inputs, ms=ms,
                    error=res.get("error"), event_id=(res.get("data") or {}).get("event_id"))
 
     readback = (any_read or any_fail) and count < settings.max_tool_actions
