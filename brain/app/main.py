@@ -37,11 +37,29 @@ async def lifespan(app: FastAPI):
         checkpointer = MemorySaver()
         log.info("%s", '{"boot":"in-memory-checkpointer"}')
 
+    logstore = None
+    if deps.settings.database_url:
+        from .logstore import LogStore
+
+        logstore = LogStore(
+            deps.settings.database_url,
+            schema=deps.settings.log_schema,
+            queue_max=deps.settings.log_queue_max,
+            retention_events_days=deps.settings.log_retention_events_days,
+            retention_turns_days=deps.settings.log_retention_turns_days,
+        )
+        await logstore.open()
+        logstore.start()
+        deps.trace.attach_sink(logstore)
+        log.info("%s", '{"boot":"logstore-postgres"}')
+
     app.state.deps = deps
     app.state.graph = build_graph(deps, checkpointer)
     try:
         yield
     finally:
+        if logstore is not None:
+            await logstore.aclose()
         if cp_cm is not None:
             await cp_cm.__aexit__(None, None, None)
 
@@ -85,21 +103,35 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     key = data.get("key") or {}
     msg_id = key.get("id")
 
-    if _already_seen(msg_id):
-        return Response(status_code=200)
-
     chat_jid = key.get("remoteJid") or ""
     deps = request.app.state.deps
+
+    if _already_seen(msg_id):
+        # A webhook retry we've already run — record the drop under a stable id so the
+        # duplicate is visible in the control stream, then ack.
+        deps.trace.code(f"dedup-{msg_id}", node="webhook", event="dup_drop",
+                        chat_id=chat_jid, msg_id=msg_id)
+        return Response(status_code=200)
+
+    number = chat_jid.split("@")[0]
+    trace_id = deps.trace.start(number)  # minted here so the contextvar can carry it
     thread_id = make_thread_id(deps.settings.evolution_instance, chat_jid)
-    background.add_task(_run, request.app, body, thread_id)
+    background.add_task(_run, request.app, body, thread_id, trace_id)
     return Response(status_code=200)
 
 
-async def _run(app: FastAPI, body: dict, thread_id: str) -> None:
+async def _run(app: FastAPI, body: dict, thread_id: str, trace_id: str) -> None:
+    # Set the trace id on the context BEFORE ainvoke, so every graph node task inherits
+    # it (copy_context at task creation) and the IO clients can trace through it.
+    from .trace import current_trace_id
+
+    current_trace_id.set(trace_id)
+    deps = app.state.deps
     lock = _locks.setdefault(thread_id, asyncio.Lock())
     async with lock:
         try:
             config = {"configurable": {"thread_id": thread_id}}
-            await app.state.graph.ainvoke({"raw": body}, config=config)
-        except Exception:  # a bad payload must never crash the worker
+            await app.state.graph.ainvoke({"raw": body, "trace_id": trace_id}, config=config)
+        except Exception as exc:  # a bad payload must never crash the worker
             log.exception("graph run failed")
+            deps.trace.code(trace_id, node="webhook", event="run_failed", error=str(exc))
