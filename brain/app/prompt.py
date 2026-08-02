@@ -9,6 +9,22 @@ def signoff_for(tag: str) -> str:
     return f"I am signing off here, call me with {tag} if you need my help again."
 
 
+def strip_trailing_signoff(message: str, tags: list[str]) -> str:
+    """Remove any trailing farewell the model tacked on before we append the exact
+    sign-off, so it isn't doubled. Heuristic: a close-turn farewell reliably names a
+    trigger tag (e.g. "@mary") — which the assistant otherwise never writes — so we
+    drop trailing lines that reference one."""
+    lines = (message or "").rstrip().split("\n")
+    tags_l = [t.lower() for t in tags]
+    while lines:
+        last = lines[-1].strip().lower()
+        if last == "" or any(t in last for t in tags_l):
+            lines.pop()
+            continue
+        break
+    return "\n".join(lines).rstrip()
+
+
 def build_system_prompt(owner_name: str, tag: str) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return f"""You are {owner_name}'s executive assistant, operating through his WhatsApp. \

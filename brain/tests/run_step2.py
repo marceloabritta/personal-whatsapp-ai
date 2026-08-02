@@ -125,13 +125,18 @@ async def main() -> None:
     check("memory carried prior turns", any(
         m["role"] == "assistant" and "On it" in m["content"] for m in stub.calls[-1]["messages"]))
 
-    print("4. model closes with a message → sign-off appended, window closes")
-    stub.script = [{"state": "close", "message": "Anything else?", "usage": {},
-                    "provider_request_id": "req_4", "stop_reason": "end_turn",
+    print("4. model closes AND writes its own @mary farewell → single sign-off")
+    stub.script = [{"state": "close",
+                    "message": "Glad I could help!\n\nJust tag me with @mary anytime you need me.",
+                    "usage": {}, "provider_request_id": "req_4", "stop_reason": "end_turn",
                     "tool_calls": [], "error_category": "none"}]
     await invoke(graph, upsert("@mary thanks", mid="a4"))
+    sent = evo.sent[-1][1]
     check("closing reply sent", len(evo.sent) == 3)
-    check("exact sign-off appended", signoff_for("@mary") in evo.sent[-1][1])
+    check("canonical sign-off present", signoff_for("@mary") in sent)
+    check("sign-off NOT doubled", sent.count("signing off here") == 1)
+    check("model's own farewell stripped", "Just tag me with" not in sent)
+    check("kept the real content", "Glad I could help!" in sent)
     check("window closed", not deps.sessions.is_open(OWNER_JID))
     rc = [e for e in deps.trace.events if e.get("node") == "record"][-1]
     check("record close_reason == model", rc.get("close_reason") == "model")
