@@ -370,6 +370,18 @@ def create_app() -> FastAPI:
         view = board.card_view(card_id)
         return JSONResponse(view) if view else err("not found", 404)
 
+    @app.get("/api/card/{card_id}/plan")
+    async def get_card_plan(card_id: str):
+        """Serve the card's generated Notion-style plan doc (written when it reached Plan
+        Ready). Rendered fresh into the card folder by Board._plan_doc_if_ready."""
+        c = board.cards.get(card_id)
+        if not c:
+            return err("not found", 404)
+        path = os.path.join(board.abs_dir(c), "plan.html")
+        if not os.path.isfile(path):
+            return err("no plan doc for this card yet", 404)
+        return FileResponse(path, media_type="text/html")
+
     @app.post("/api/card")
     async def create_card(payload: dict):
         title = (payload.get("title") or "").strip()

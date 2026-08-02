@@ -96,6 +96,11 @@
   .col-h .tool{opacity:0;cursor:pointer;color:var(--muted);font-size:12px;padding:1px 3px;border-radius:4px}
   .col:hover .col-h .tool{opacity:1}
   .col-h .tool:hover{color:var(--text);background:var(--panel2)}
+  .col-h .ship-filter{font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);
+    background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 4px;cursor:pointer;
+    -webkit-appearance:none;appearance:none}
+  .col-h .ship-filter:hover{color:var(--text)}
+  .ship-hidden{font-size:11px;color:var(--muted);text-align:center;padding:6px 4px 2px;opacity:.75}
   .drop{padding:2px 9px 10px;min-height:44px;flex:1}
   /* A card is painted from the pipeline it BELONGS to (its kind), not the column it is
      parked in — so a fix stays yellow after it is promoted into the red build pipeline,
@@ -229,6 +234,10 @@
   #d-card .dh select.mini{background:#2e3852;border-color:#46506a}
   #d-card .dh .arts a{background:#2e3852;border-color:#46506a;color:#b9cdff}
   #d-card .dh .arts a:hover{border-color:#8fb0ff}
+  /* The generated plan doc — a prominent link that opens the rendered page, not raw source. */
+  .arts a.plan-view,#d-card .dh .arts a.plan-view{background:var(--accent-solid);border-color:var(--accent-solid);
+          color:#fff;font-weight:600;font-family:inherit;font-size:12px}
+  .arts a.plan-view:hover,#d-card .dh .arts a.plan-view:hover{filter:brightness(1.1);border-color:var(--accent-solid)}
   /* A thread scrolls; the "new messages" pill must NOT scroll with it. So the thread lives
      inside a positioned wrapper and the pill is pinned to the wrapper, not the content. */
   .thread-wrap{position:relative;display:flex;flex-direction:column;flex:1;min-height:0}
@@ -594,6 +603,10 @@ let ws=null, openCard=null, openMgr=null, seenTs=0, colCtx=null;
 // Is the board paused, and which cards actually have a run in flight? The badges need both:
 // see workBadge(). Owned by setPaused(), which reads them from the server and never guesses.
 let PAUSED=false, WINDING=new Set();
+// Which shipped cards the Ship column shows, by when they were last touched (≈ shipped).
+// 'week' | 'month' | 'all'. Display only — the server keeps every card regardless.
+let SHIP_FILTER='month';
+const SHIP_WINDOWS={week:7*86400, month:30*86400, all:Infinity};
 
 /* ---------- socket ---------- */
 function connect(){
@@ -658,7 +671,7 @@ function renderHeader(){
   // shipped. The count used to be every card he owned, backlog and finished alike, so it only
   // ever went up — a number that never falls tells you nothing about the load right now.
   const shipped=new Set();
-  for(const p of BOARD.pipelines) for(const col of p.columns) if(col.slug==='shipped') shipped.add(col.id);
+  for(const p of BOARD.pipelines) for(const col of p.columns) if(col.slug==='ship') shipped.add(col.id);
   const isActive=c=>c.pipeline!=='backlog' && !shipped.has(c.column);
   for(const m of BOARD.managers){
     const n = BOARD.cards.filter(c=>c.manager_id===m.id && isActive(c)).length;
@@ -716,10 +729,8 @@ function renderBoards(){
   // Every pipeline is laid out on the SAME number of tracks — the longest pipeline's — so a
   // column is the same width everywhere and the board never scrolls sideways.
   const cols=Math.max(1,...BOARD.pipelines.map(p=>p.columns.length));
-  // The express (expedited) lane rides at the TOP of the pipelines — it is the fast path, and
-  // you want it under your eye first. Everything else keeps the order the server sent. This is
-  // display only; the server's PIPELINES order is untouched.
-  const ordered=[...BOARD.pipelines].sort((a,b)=>(a.id==='exped'?0:1)-(b.id==='exped'?0:1));
+  // Pipelines render in the order the server sent (PIPELINES): Plan, Maintenance, Build.
+  const ordered=[...BOARD.pipelines];
   for(const p of ordered){
     const sec=document.createElement('div'); sec.className='pipe';
     sec.style.setProperty('--pipe-bg',p.color||'transparent');
@@ -792,17 +803,40 @@ async function newCard(){
 
 function colEl(pipe,col,i){
   const el=document.createElement('div');
-  const list=BOARD.cards.filter(c=>c.column===col.id);
-  // A SHIPPED column is where finished work piles up and never leaves, so it is the one column
-  // that grows without bound and would push every pipeline below it off the screen. Once it is
-  // past a handful, condense its cards to thin one-line rows — title only — so "done" stays
-  // visible without costing the whole board its vertical space. Working columns are never
-  // condensed: there you want every badge and every card at full height.
-  const condensed = col.slug==='shipped' && list.length>4;
+  let list=BOARD.cards.filter(c=>c.column===col.id);
+
+  // The SHIP column is where finished work piles up and never leaves — the one column that
+  // grows without bound. So it gets a time-frame filter (this week / month / all time): show
+  // only what shipped recently and the board stays readable. Filtering is display only; the
+  // server keeps every card. `updated_at` is when the card last moved, i.e. when it shipped.
+  const isShip = col.slug==='ship';
+  let hiddenByTime=0;
+  if(isShip && SHIP_WINDOWS[SHIP_FILTER]!==Infinity){
+    const cutoff=(Date.now()/1000)-SHIP_WINDOWS[SHIP_FILTER];
+    const before=list.length;
+    list=list.filter(c=>(c.updated_at||0)>=cutoff);
+    hiddenByTime=before-list.length;
+  }
+
+  // Once past a handful, condense shipped cards to thin one-line rows — title only — so "done"
+  // stays visible without costing the whole board its vertical space. Working columns are
+  // never condensed: there you want every badge and every card at full height.
+  const condensed = isShip && list.length>4;
   el.className='col'+(col.gate?' gate':'')+(condensed?' condensed':'');
 
   const h=document.createElement('div'); h.className='col-h';
   h.innerHTML=`<span class="t">${esc(col.title)}${col.gate?' ⏸':''}</span>`;
+  if(isShip){
+    const sel=document.createElement('select'); sel.className='ship-filter';
+    sel.title='Show cards shipped within…';
+    for(const [v,label] of [['week','This week'],['month','This month'],['all','All time']]){
+      const o=document.createElement('option'); o.value=v; o.textContent=label;
+      if(v===SHIP_FILTER) o.selected=true; sel.appendChild(o);
+    }
+    sel.onclick=e=>e.stopPropagation();
+    sel.onchange=e=>{ SHIP_FILTER=e.target.value; renderBoards(); };
+    h.appendChild(sel);
+  }
   const brain=document.createElement('span'); brain.className='tool'; brain.textContent='🧠';
   brain.title='Edit this column’s worker'; brain.onclick=e=>{e.stopPropagation();openWorker(pipe.id,col);};
   const gear=document.createElement('span'); gear.className='tool'; gear.textContent='⚙';
@@ -812,6 +846,11 @@ function colEl(pipe,col,i){
 
   const drop=document.createElement('div'); drop.className='drop';
   for(const c of list) drop.appendChild(cardEl(c));
+  if(isShip && hiddenByTime>0){
+    const more=document.createElement('div'); more.className='ship-hidden';
+    more.textContent=`${hiddenByTime} older card${hiddenByTime>1?'s':''} hidden — widen the range to see ${hiddenByTime>1?'them':'it'}.`;
+    drop.appendChild(more);
+  }
   el.appendChild(drop);
 
   // No "+ card" inside a pipeline any more. Cards are created in the BACKLOG and routed out
@@ -984,8 +1023,14 @@ function cardHeader(c){
     if(m.id===c.manager_id) o.selected=true; sel.appendChild(o);
   }
   sel.onchange=()=>send({type:'assign',card_id:c.id,manager_id:sel.value});
-  $('c-arts').innerHTML=Object.keys(c.artifacts||{}).map(n=>`<a data-f="${esc(n)}">📄 ${esc(n)}</a>`).join('');
-  $('c-arts').querySelectorAll('a').forEach(a=>a.onclick=()=>viewFile(c.id,a.dataset.f));
+  const arts=Object.keys(c.artifacts||{});
+  // plan.html is the generated plan doc — open it RENDERED (served as text/html) in a new tab,
+  // not as raw source via viewFile. The other artifacts keep the raw-view behaviour.
+  const planLink=arts.includes('plan.html')
+    ? `<a class="plan-view" href="/api/card/${c.id}/plan" target="_blank" rel="noopener">📄 View plan</a>` : '';
+  const others=arts.filter(n=>n!=='plan.html');
+  $('c-arts').innerHTML=planLink+others.map(n=>`<a data-f="${esc(n)}">📄 ${esc(n)}</a>`).join('');
+  $('c-arts').querySelectorAll('a[data-f]').forEach(a=>a.onclick=()=>viewFile(c.id,a.dataset.f));
   const q=$('c-quick'); q.innerHTML='';
   const btn=(label,fn,cls)=>{const b=document.createElement('button'); b.textContent=label; if(cls)b.className=cls; b.onclick=fn; q.appendChild(b);};
   if(c.gate) btn('✓ Approve', ()=>sendCard('approve'));

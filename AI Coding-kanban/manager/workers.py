@@ -101,8 +101,11 @@ environment. You are given that key — the SAME one production uses — as
 **Never stop to ask the human for an API key** — you have one, so use it and run the tests
 your contract asks for. Only if `PROJECT_ANTHROPIC_API_KEY` is genuinely unset do you note it,
 in one line, as a setup gap under FLAGS — run the tests that do not need a key and carry on.
-(This is about the KEY being present, not about cost: a specific test your contract tells you
-to escalate rather than run — because it is expensive — you still escalate.)
+**Cost is not a reason to skip a live test.** There is budget to spend — run every live test your
+contract calls for; they cost real money and that is fine and expected. Do not skip one, and do not
+stop to ask, merely because it makes paid API calls. The ONLY cost worth pausing for is **massive
+token consumption** — a runaway loop, an accidental fan-out, or a single call in the millions of
+tokens. Flag THAT; an ordinary live test is not that.
 
 ## Git discipline — you are NOT the only card in this repo
 Other cards may be building in this SAME repository at the same time. Treat the working tree

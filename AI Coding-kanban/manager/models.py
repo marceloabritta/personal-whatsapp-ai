@@ -34,7 +34,6 @@ from typing import Any
 # ---------------------------------------------------------------------------
 PLAN = "plan"
 MAINT = "maint"
-EXPED = "exped"
 BUILD = "build"
 
 # The BACKLOG is not a pipeline, and calling it one would be a lie that costs us later: it
@@ -44,18 +43,17 @@ BUILD = "build"
 BACKLOG = "backlog"
 
 # Order matters: this is the order the board renders in, top to bottom.
-PIPELINES: tuple[str, ...] = (PLAN, MAINT, EXPED, BUILD)
+PIPELINES: tuple[str, ...] = (PLAN, MAINT, BUILD)
 PIPELINE_TITLES: dict[str, str] = {
     BACKLOG: "Backlog",
-    PLAN: "New Feature Plan",
+    PLAN: "Plan",
     MAINT: "Maintenance",
-    EXPED: "Expedited",
     BUILD: "Build",
 }
 
 # Where the manager may ROUTE a card out of the backlog. Build is not on this list: nothing
 # reaches the build pipeline that has not been planned first.
-ROUTABLE: tuple[str, ...] = (PLAN, MAINT, EXPED)
+ROUTABLE: tuple[str, ...] = (PLAN, MAINT)
 
 # The colour each pipeline is painted, and — one shade darker — the cards that BELONG to it.
 # These are DEFAULTS: the colour is state, editable per pipeline in the UI, so an upgrade
@@ -63,7 +61,6 @@ ROUTABLE: tuple[str, ...] = (PLAN, MAINT, EXPED)
 DEFAULT_PIPELINE_COLORS: dict[str, str] = {
     PLAN: "#1d3b2a",  # green — new work
     MAINT: "#3d3620",  # yellow — repair
-    EXPED: "#22304d",  # blue — the fast lane
     BUILD: "#3b2222",  # red — shipping, the expensive end
 }
 

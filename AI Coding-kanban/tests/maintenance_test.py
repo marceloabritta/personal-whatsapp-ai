@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manager import migrations  # noqa: E402
 from manager.board import Board  # noqa: E402
 from manager.migrations import m0003_maintenance_pipeline as m0003  # noqa: E402
-from manager.models import BACKLOG, BUILD, EXPED, FEATURE, MAINT, MAINTENANCE, PIPELINES, PLAN, UNSET  # noqa: E402
+from manager.models import BACKLOG, BUILD, FEATURE, MAINT, MAINTENANCE, PIPELINES, PLAN, UNSET  # noqa: E402
 from manager.pipelines import DEFAULT_COLUMNS  # noqa: E402
 from manager.workspace import Workspace  # noqa: E402
 
@@ -42,13 +42,13 @@ def new_board() -> Board:
 async def main() -> int:
     # -----------------------------------------------------------------
     section("the board has three pipelines, maintenance between plan and build")
-    check("order is plan → maint → exped → build", PIPELINES == (PLAN, MAINT, EXPED, BUILD))
+    check("order is plan → maint → build", PIPELINES == (PLAN, MAINT, BUILD))
 
     b = new_board()
     slugs = [c.slug for c in b.pipelines.columns[MAINT]]
     check(
-        "the columns are report → replication → exploring → plan-fix → plan-ready-to-build",
-        slugs == ["report", "replication", "exploring", "plan-fix", "plan-ready-to-build"],
+        "the columns are report → plan",
+        slugs == ["report", "plan"],
     )
     check("the last one is a GATE", b.pipelines.columns[MAINT][-1].gate is True)
     check(
@@ -56,12 +56,12 @@ async def main() -> int:
         all(os.path.isfile(b.workers.path(MAINT, s)) for s in slugs),
     )
     check(
-        "the replication worker demands a reproduction",
-        "Reproduced?" in b.workers.ensure(b.pipelines.by_slug(MAINT, "replication")).instructions,
+        "the report worker pins the bug down as expected-vs-actual",
+        "Expected" in b.workers.ensure(b.pipelines.by_slug(MAINT, "report")).instructions,
     )
     check(
-        "plan-fix writes PLAN.md — the artifact the BUILD pipeline already demands",
-        "PLAN.md" in b.workers.ensure(b.pipelines.by_slug(MAINT, "plan-fix")).instructions,
+        "plan writes PLAN.md — the artifact the BUILD pipeline already demands",
+        "PLAN.md" in b.workers.ensure(b.pipelines.by_slug(MAINT, "plan")).instructions,
     )
 
     # -----------------------------------------------------------------
@@ -124,7 +124,7 @@ async def main() -> int:
     plan_cols = b.pipelines.columns[PLAN]
     await b.move_card(idea.id, plan_cols[1].id)
     check("it SURVIVES the next move within the pipeline", b.cards[idea.id].kind == MAINTENANCE)
-    await b.move_card(idea.id, plan_cols[2].id)
+    await b.move_card(idea.id, plan_cols[0].id)
     check("...and the one after that", b.cards[idea.id].kind == MAINTENANCE)
 
     check("junk is refused", await b.set_card_kind(idea.id, "banana") is None)
@@ -188,7 +188,7 @@ async def main() -> int:
     ws2.ensure()
     check("nothing pending", migrations.pending(ws2) == [])
     b3 = Board(ws2.path)
-    check("maintenance is there from birth", len(b3.pipelines.columns[MAINT]) == 5)
+    check("maintenance is there from birth", len(b3.pipelines.columns[MAINT]) == 2)
 
     print(f"\n{'=' * 70}")
     if FAILED:

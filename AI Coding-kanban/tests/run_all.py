@@ -35,6 +35,7 @@ SUITES = [
     "decouple_test.py",
     "boardchat_test.py",
     "boardtools_test.py",
+    "plandoc_test.py",
     "pause_test.py",
     "ship_test.py",
     "restart_test.py",

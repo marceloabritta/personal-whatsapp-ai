@@ -18,7 +18,6 @@ import re
 from .models import (
     BUILD,
     DEFAULT_PIPELINE_COLORS,
-    EXPED,
     MAINT,
     PLAN,
     PIPELINES,
@@ -42,44 +41,23 @@ def valid_color(value: str) -> str | None:
 # state — rename them, gate them, reorder them, delete them. Nothing here is load-bearing.
 # ---------------------------------------------------------------------------
 DEFAULT_COLUMNS: dict[str, list[tuple[str, str, bool]]] = {
+    # New stuff. Idea -> Plan, then promote to Build. The one gate is at Plan: the human
+    # approves the plan before a line of code is written.
     PLAN: [
-        ("Ideas", "ideas", False),
-        ("Scoping", "scoping", False),
-        ("Scope Review", "scope-review", False),
-        ("Planning", "planning", False),
-        ("Plan Review", "plan-review", False),
-        ("Plan Ready", "plan-ready", True),  # GATE: human approves the hand-off to build
+        ("Idea", "idea", False),
+        ("Plan", "plan", True),  # GATE: human approves the plan before it hands off to Build
     ],
-    # Maintenance answers a different question from Plan: not "what should this do?" but
-    # "why is it not doing it?". Hence the shape — you may not diagnose a bug you have not
-    # reproduced, and you may not fix one you have not diagnosed.
+    # The fix. A reported bug or malfunction. Same simple shape — plan the fix, get it
+    # approved, then hand off to Build.
     MAINT: [
         ("Report", "report", False),
-        ("Replication", "replication", False),  # reproduce it, or there is nothing to fix
-        ("Exploring", "exploring", False),  # ROOT CAUSE, not a symptom
-        ("Plan Fix", "plan-fix", False),
-        ("Plan Ready to Build", "plan-ready-to-build", True),  # GATE: human approves the fix
+        ("Plan", "plan", True),  # GATE: human approves the fix plan before Build
     ],
-    # The fast lane. One pipeline end to end — scope, plan, build, ship — for work that does
-    # not need the full ceremony. It takes BOTH kinds: a small feature and a small fix.
-    #
-    # The two gates are the whole reason it is allowed to be fast. Speed is bought by cutting
-    # STEPS, never by cutting the human out: you approve the plan before any code is written,
-    # and — mirroring the build pipeline — the finished build lands in Ready to Ship and waits
-    # for your review before anything is committed, pushed or deployed.
-    EXPED: [
-        ("Scope", "scope", False),
-        ("Plan", "plan", True),  # GATE: the human approves the plan before a line is written
-        ("Build", "build", False),  # the one-pass build — no gate; auto-advances when done
-        ("Ready to Ship", "ready-to-ship", True),  # GATE: the human reviews, then says ship
-        ("Shipped", "shipped", False),
-    ],
+    # The shared destination. Both origins promote here. Build does the work; Ship commits
+    # and pushes it. No gate — the human already approved the plan upstream.
     BUILD: [
-        ("Preflight", "preflight", False),
-        ("Tests", "tests", False),
-        ("Coding", "coding", False),
-        ("Build Review", "build-review", True),  # GATE: human approves the ship
-        ("Shipped", "shipped", False),
+        ("Build", "build", False),
+        ("Ship", "ship", False),
     ],
 }
 

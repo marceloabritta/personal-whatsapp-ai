@@ -51,7 +51,14 @@ def main() -> int:
     cid = post(port, "/api/card", {"title": "Resume me", "description": "without being asked",
                                    "pipeline": "plan", "kind": "feature"})["id"]
     send_ws_sync(port, {"type": "message", "card_id": cid, "text": "start"})
-    time.sleep(1.4)  # the mock manager pauses at each column, so this lands mid-run
+    # Land mid-run: kill the instant the first column's artifact appears, while the card is
+    # still in Idea (a non-gate column) and before it reaches the Plan gate — so recovery has a
+    # real column to finish on its own.
+    first = get(port, f"/api/card/{cid}")
+    idea_md = os.path.join(first["abs_dir"], "IDEA.md")
+    deadline = time.time() + 10
+    while time.time() < deadline and not os.path.isfile(idea_md):
+        time.sleep(0.01)
 
     mid = get(port, f"/api/card/{cid}")
     check("the manager is mid-run", mid["busy"] is True)
@@ -96,7 +103,7 @@ def main() -> int:
     if done:
         check(
             "the column's artifacts are on disk",
-            os.path.isfile(os.path.join(done["abs_dir"], "SCOPE.md"))
+            os.path.isfile(os.path.join(done["abs_dir"], "IDEA.md"))
             and os.path.isfile(os.path.join(done["abs_dir"], "PLAN.md")),
         )
         check("no human message was needed", not any(

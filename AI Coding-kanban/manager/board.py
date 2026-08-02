@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -41,6 +42,9 @@ from .models import (
 )
 from .pipelines import PipelineConfig
 from .workers import WorkerStore
+from . import plandoc
+
+log = logging.getLogger("manager.board")
 
 Broadcaster = Callable[[dict], Awaitable[None]]
 
@@ -391,7 +395,24 @@ class Board:
             c.touch()
             self._save()
         await self.broadcast_board()
+        await self._plan_doc_if_ready(c, col)
         return c
+
+    async def _plan_doc_if_ready(self, card: Card, col: Column) -> None:
+        """When a card reaches an origin pipeline's final (Plan gate) column, render its plan
+        artifacts into `plan.html` in the card folder and expose it as an artifact, so the
+        human can review the finished plan as a Notion-style web page instead of raw
+        markdown. Fires for both origins — Plan and Maintenance both end in a Plan gate.
+        Non-fatal: a render/IO problem is logged and never blocks the move."""
+        try:
+            cols = self.pipelines.columns.get(col.pipeline, [])
+            if col.pipeline not in ORIGIN_PIPELINES or not cols or col.id != cols[-1].id:
+                return
+            path = plandoc.write_plan_doc(self.abs_dir(card), card.title)
+            if path:
+                await self.set_artifact(card.id, "plan.html", path)
+        except Exception as e:  # doc generation must never break a card move
+            log.warning("plan-doc generation failed for card %s: %s", card.id, e)
 
     def next_column(self, card_id: str) -> Column | None:
         """The next column for this card, or None at the end of a pipeline. Crossing from
@@ -504,6 +525,17 @@ class Board:
             c.session_id = session_id
             self._save()
 
+    async def clear_session(self, card_id: str) -> None:
+        """Forget a card's SDK session, so its next run starts a fresh context window rather
+        than resuming the old (and ever-growing) one. Everything the run needs is rebuilt from
+        the card folder and board state, so nothing that matters is lost."""
+        async with self._lock:
+            c = self.cards.get(card_id)
+            if not c or c.session_id is None:
+                return
+            c.session_id = None
+            self._save()
+
     async def set_artifact(self, card_id: str, name: str, path: str) -> None:
         async with self._lock:
             c = self.cards.get(card_id)
@@ -513,6 +545,15 @@ class Board:
             c.touch()
             self._save()
         await self.broadcast_board()
+        # When a plan SOURCE artifact lands while the card is sitting at the Plan gate, the
+        # plan is (re)done — regenerate plan.html so it reflects the finished PLAN.md. This is
+        # the real path: the plan worker writes PLAN.md *at* the gate column, with no further
+        # move to hang generation off. Guarded to source artifacts so setting plan.html itself
+        # never recurses.
+        if name in plandoc.PLAN_SOURCE_ARTIFACTS:
+            col = self.pipelines.get(c.column)
+            if col:
+                await self._plan_doc_if_ready(c, col)
 
     async def append_message(self, card_id: str, role: str, text: str) -> ChatMessage | None:
         async with self._lock:
@@ -639,6 +680,16 @@ class Board:
             if not m or not session_id or m.session_id == session_id:
                 return
             m.session_id = session_id
+            self._save()
+
+    async def clear_manager_session(self, manager_id: str) -> None:
+        """Forget a manager's board-chat SDK session, so his next turn starts fresh. The board
+        prompt is regenerated from disk every turn, so he loses no state that matters."""
+        async with self._lock:
+            m = self.managers.get(manager_id)
+            if not m or m.session_id is None:
+                return
+            m.session_id = None
             self._save()
 
     async def append_manager_message(

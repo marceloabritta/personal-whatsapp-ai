@@ -13,9 +13,6 @@ The invariants this file exists to hold:
   3. **You cannot un-decide a card.** `unset` is settable by nobody. A type only ever moves
      forward.
 
-  4. **Expedited is fast because it has fewer STEPS, never fewer humans.** Both of its gates
-     are real: the plan is approved before code is written, the build before anything ships.
-
     python tests/backlog_test.py        (no API key, no network)
 """
 import asyncio
@@ -32,7 +29,6 @@ from manager.migrations import m0006_backlog_and_expedited as m0006  # noqa: E40
 from manager.models import (  # noqa: E402
     BACKLOG,
     BUILD,
-    EXPED,
     FEATURE,
     MAINT,
     MAINTENANCE,
@@ -42,6 +38,11 @@ from manager.models import (  # noqa: E402
     UNSET,
     valid_kind,
 )
+
+# Expedited was removed from the model in m0008. The m0006 migration below is a historical
+# record that still SEEDS it (m0008, which runs after, then removes it), so the slug it uses
+# lives here as a plain string rather than an import from a `models` that no longer has it.
+EXPED = "exped"
 from manager.workspace import Workspace  # noqa: E402
 
 FAILED: list = []
@@ -74,30 +75,16 @@ async def main() -> int:
     page = open(WEB, encoding="utf-8").read()
 
     # -----------------------------------------------------------------
-    section("four pipelines, and the backlog is not one of them")
-    check("order is plan → maint → exped → build", PIPELINES == (PLAN, MAINT, EXPED, BUILD))
+    section("three pipelines, and the backlog is not one of them")
+    check("order is plan → maint → build", PIPELINES == (PLAN, MAINT, BUILD))
     check("the backlog is NOT a pipeline", BACKLOG not in PIPELINES)
-    check("you may route to plan, maint, exped — never straight to build", ROUTABLE == (PLAN, MAINT, EXPED))
+    check("you may route to plan or maint — never straight to build", ROUTABLE == (PLAN, MAINT))
 
     b = new_board()
-    slugs = [c.slug for c in b.pipelines.columns[EXPED]]
-    check(
-        "expedited is scope → plan → build → ready to ship → shipped",
-        slugs == ["scope", "plan", "build", "ready-to-ship", "shipped"],
-    )
-    gated = [c.slug for c in b.pipelines.columns[EXPED] if c.gate]
-    check(
-        "...gated at plan (before a line is written) and ready-to-ship (before it ships), not build",
-        gated == ["plan", "ready-to-ship"],
-    )
-    check("every expedited column has a worker", all(os.path.isfile(b.workers.path(EXPED, s)) for s in slugs))
-
-    build_w = b.workers.ensure(b.pipelines.by_slug(EXPED, "build")).instructions
-    check("the fast builder must still watch the test FAIL first", "fail" in build_w.lower())
-    check("...must run the whole suite", "suite" in build_w.lower())
-    check("...must stay inside the plan's file list", "file list" in build_w.lower())
-    check("...and must NOT ship anything itself", "do NOT commit" in build_w or "not commit" in build_w.lower())
-    ship_w = b.workers.ensure(b.pipelines.by_slug(EXPED, "shipped")).instructions
+    check("build is the shared destination, build → ship", [c.slug for c in b.pipelines.columns[BUILD]] == ["build", "ship"])
+    check("build has NO gate — the plan was approved upstream", not any(c.gate for c in b.pipelines.columns[BUILD]))
+    check("every build column has a worker", all(os.path.isfile(b.workers.path(BUILD, s)) for s in ["build", "ship"]))
+    ship_w = b.workers.ensure(b.pipelines.by_slug(BUILD, "ship")).instructions
     check("only the last column commits/pushes/deploys", all(w in ship_w.lower() for w in ("commit", "push", "deploy")))
 
     # -----------------------------------------------------------------
@@ -114,7 +101,7 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("NO CARD LEAVES THE BACKLOG UNTYPED — enforced, not merely asked")
-    check("routing an untyped card is refused", await b.route_card(c.id, EXPED) is None)
+    check("routing an untyped card is refused", await b.route_card(c.id, PLAN) is None)
     check("...it did not move", b.cards[c.id].pipeline == BACKLOG)
     check("the board can list what it is owed", c.id in b.untyped_cards())
 
@@ -132,12 +119,12 @@ async def main() -> int:
     # -----------------------------------------------------------------
     section("routing: the human's word is final, otherwise the manager chooses")
     m = mgr(b)
-    await m.handle_card_message(typed.id, "build this expedited")
+    await m.handle_card_message(typed.id, "start working on this")
     t = b.cards[typed.id]
-    check("'build this expedited' → the fast lane, no argument", t.pipeline == EXPED)
-    check("...into its FIRST column", col_of(b, t).slug == "scope")
+    check("'start working on this' → a feature goes down the plan pipeline", t.pipeline == PLAN)
+    check("...into its FIRST column", col_of(b, t).slug == "idea")
     check("...and it keeps its type", t.kind == FEATURE)
-    check("...and its folder followed it", "exped" in t.dir and os.path.isdir(b.abs_dir(t)))
+    check("...and its folder followed it", "plan" in t.dir and os.path.isdir(b.abs_dir(t)))
 
     bug = await b.add_card("Event creation is broken", kind=MAINTENANCE)
     await m.handle_card_message(bug.id, "start working on this")
@@ -195,7 +182,7 @@ async def main() -> int:
     )
     check("...with both gates", [x["slug"] for x in after[EXPED] if x["gate"]] == ["plan", "ready-to-ship"])
     check("...and a colour", after["colors"].get(EXPED))
-    check("the other pipelines survived", len(after[PLAN]) == 6 and len(after[MAINT]) == 5)
+    check("the other pipelines survived", len(after[PLAN]) == 2 and len(after[MAINT]) == 2)
     cards = json.load(open(ws.board_path))["cards"]
     check("the card survived, where it was", len(cards) == 1 and cards[0]["pipeline"] == PLAN)
     check("running it twice does nothing", m0006.migrate(ws) == [])
@@ -214,7 +201,7 @@ async def main() -> int:
         for f in FAILED:
             print(f"  - {f}")
         return 1
-    print("backlog + expedited: ALL PASS")
+    print("backlog: ALL PASS")
     return 0
 
 

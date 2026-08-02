@@ -506,6 +506,21 @@ purpose — this list went stale once already by counting.*
 
 Reverse-chronological. Append a dated entry whenever the project meaningfully changes.
 
+- **2026-07-29 — Fix: Mary no longer emits a garbled "translate X into X" reply (card
+  bea6dea5).** `localizeBody` (`server.js`) could hand the cheap `TRANSLATE_MODEL` text
+  already in the target language — a bare "translate into `<lang>`" prompt with no
+  already-in-target clause — and the model ~2/5 answered *about* the contradiction instead of
+  passing the text through. Fix: a new pure rails predicate `translationNeeded()`
+  (`lib/lang.js`) gates the call and returns no-op when the known source equals the target
+  (threaded through `send()`/`sendSay` via an additive `sourceLang`), **deterministically
+  curing the long-tail x→x path**; plus an "if already in that language, return it verbatim"
+  clause added to the translate system prompt, **mitigating** the reproduced router-mislabel
+  case (which can't be caught in plain code — content-based `say` language detection is a
+  follow-up). Rails: additive `translationNeeded` export + additive `sourceLang` opt; no
+  manifest/router change, so no router-selftest. Regression:
+  `scripts/garbled-say-noop-selftest.mjs` (offline). Live acceptance:
+  `scripts/garbled-translate-repro.mjs` should now show 0/5 garbled.
+
 - **2026-07-29 — Feature: native server-side tools in stateful @mary conversations (card
   6c09b8ab).** @mary can now answer a direct question inline — a live-web fact, a URL already in
   the thread, real computation, or general knowledge no skill covers — by searching the web,

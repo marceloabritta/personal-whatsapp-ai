@@ -39,7 +39,6 @@ from .pending import PendingQueue
 from .models import (
     BACKLOG,
     BUILD,
-    EXPED,
     FEATURE,
     KINDS,
     MAINT,
@@ -140,11 +139,28 @@ class ManagerConfig:
         self.permission_mode = permission_mode or os.environ.get(
             "MANAGER_PERMISSION_MODE", "bypassPermissions"
         )
+        # Context recycling: after this many turns on one session, the manager drops it and
+        # starts a fresh one, so a long-lived conversation stops accumulating (and paying for)
+        # an ever-growing context window. He loses nothing that matters — every turn rebuilds
+        # its prompt from the board on disk. 0 disables it. Default ON, at 25 turns.
+        self.recycle_turns = _int_env("MANAGER_CONTEXT_RECYCLE_TURNS", 25)
         if mock is None:
             self.mock, self.mock_reason = _detect_mock()
         else:
             self.mock = mock
             self.mock_reason = "set explicitly"
+
+
+def _int_env(name: str, default: int) -> int:
+    """A non-negative int from the environment, falling back to `default` for anything that
+    isn't one. A misconfigured value never crashes the manager; it just isn't honoured."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return default
 
 
 def _detect_mock() -> tuple[bool, str]:
@@ -212,10 +228,33 @@ class Manager:
         self._driving: set[str] = set()          # a supervision loop owns this card
         self._turn_kind: dict[str, str] = {}     # "drive" | "chat" | "reply"
         self._wound_down: set[str] = set()       # asked to stop early; owed a "carry on" later
+        # Turns run on each session since it was last recycled, keyed "card:<id>" / "mgr:<id>".
+        # When one crosses config.recycle_turns the session is dropped and starts fresh, so a
+        # long conversation stops paying for an ever-growing context window.
+        self._session_turns: dict[str, int] = {}
 
     # ---- helpers -----------------------------------------------------
     def _lock_for(self, key: str) -> asyncio.Lock:
         return self._locks.setdefault(key, asyncio.Lock())
+
+    async def _recycle_if_due(self, kind: str, owner_id: str) -> None:
+        """Count this turn, and if the session has run long enough, drop it so the next run
+        starts a fresh context window. `kind` is "card" or "mgr". A no-op when disabled
+        (recycle_turns=0) or mocked. Never called on a resuming run — that would throw away
+        the very session we are trying to pick back up.
+        """
+        threshold = self.config.recycle_turns
+        if threshold <= 0 or self.config.mock:
+            return
+        key = f"{kind}:{owner_id}"
+        self._session_turns[key] = self._session_turns.get(key, 0) + 1
+        if self._session_turns[key] > threshold:
+            if kind == "card":
+                await self.board.clear_session(owner_id)
+            else:
+                await self.board.clear_manager_session(owner_id)
+            self._session_turns[key] = 1  # this turn opens the fresh session
+            log.info("recycled %s context after %d turns to save tokens", key, threshold)
 
     # ---- draining ----------------------------------------------------
     def inflight(self) -> list[Run]:
@@ -411,6 +450,9 @@ class Manager:
                 card_id, "system", "Manager is still working the previous message; queued."
             )
         async with lock:
+            if not resuming:
+                await self._recycle_if_due("card", card_id)
+                card = self.board.cards.get(card_id) or card
             self._driving.add(card_id)
             await self.board.set_busy(card_id, True)
             col = self.board.pipelines.get(card.column)
@@ -479,6 +521,8 @@ class Manager:
                 manager_id, "system", "Still working the previous message; queued."
             )
         async with lock:
+            if not resuming:
+                await self._recycle_if_due("mgr", manager_id)
             await self.board.set_manager_busy(manager_id, True)
             self.journal.start(MANAGER, manager_id, text, session_id=m.session_id)
             finished = False
@@ -705,8 +749,8 @@ class Manager:
 
         @tool(
             "route_to",
-            "Send this BACKLOG card into a pipeline: 'plan' (a real feature), 'maint' (a bug "
-            "you cannot yet explain) or 'exped' (small, contained, low-risk — the fast lane).",
+            "Send this BACKLOG card into a pipeline: 'plan' (new stuff — a feature to build) "
+            "or 'maint' (the fix — something shipped is behaving wrongly).",
             {"pipeline": str},
         )
         async def route_to(args):
@@ -1614,10 +1658,8 @@ class Manager:
             if text.lstrip().startswith("[AUTOMATIC"):
                 return
             low = text.strip().lower()
-            if "expedit" in low:
-                target = EXPED
-            elif any(w in low for w in ("start", "go", "work on", "build")):
-                target = EXPED if self.board.cards[card_id].kind == FEATURE else MAINT
+            if any(w in low for w in ("start", "go", "work on", "build")):
+                target = PLAN if self.board.cards[card_id].kind == FEATURE else MAINT
             else:
                 return
             routed = await self.board.route_card(card_id, target)

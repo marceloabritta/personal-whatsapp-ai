@@ -25,7 +25,6 @@ from manager.migrations import m0004_pipeline_colors as m0004  # noqa: E402
 from manager.models import (  # noqa: E402
     BUILD,
     DEFAULT_PIPELINE_COLORS,
-    EXPED,
     MAINT,
     PIPELINE_TITLES,
     PLAN,
@@ -52,7 +51,7 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("the pipelines are named and painted as asked")
-    check("plan is the NEW FEATURE plan pipeline", PIPELINE_TITLES[PLAN] == "New Feature Plan")
+    check("plan is the Plan pipeline", PIPELINE_TITLES[PLAN] == "Plan")
     check("maintenance keeps its name", PIPELINE_TITLES[MAINT] == "Maintenance")
 
     def hue(p):
@@ -69,7 +68,7 @@ async def main() -> int:
     b = Board(tempfile.mkdtemp(prefix="km-color-"))
     snap = {p["id"]: p for p in b.snapshot()["pipelines"]}
     check("every pipeline ships its colour to the UI", all(snap[p]["color"] for p in snap))
-    check("...and its title", snap[PLAN]["title"] == "New Feature Plan")
+    check("...and its title", snap[PLAN]["title"] == "Plan")
 
     # -----------------------------------------------------------------
     section("a colour is validated before it reaches the page's CSS")
@@ -90,7 +89,7 @@ async def main() -> int:
     check("the others are untouched", b2.pipelines.colors[BUILD] == DEFAULT_PIPELINE_COLORS[BUILD])
     check(
         "the columns were not disturbed by writing a colour",
-        len(b2.pipelines.columns[MAINT]) == 5,
+        len(b2.pipelines.columns[MAINT]) == 2,
     )
 
     # -----------------------------------------------------------------
@@ -107,9 +106,9 @@ async def main() -> int:
     notes = m0004.migrate(ws)
     after = json.load(open(cfg))
     check("it reports what it did", bool(notes))
-    check("all four are painted", set(after["colors"]) == {PLAN, MAINT, EXPED, BUILD})
+    check("all three are painted", set(after["colors"]) == {PLAN, MAINT, BUILD})
     check("with the defaults", after["colors"][BUILD] == DEFAULT_PIPELINE_COLORS[BUILD])
-    check("the columns survived", len(after[MAINT]) == 5)
+    check("the columns survived", len(after[MAINT]) == 2)
     check("running it twice does nothing", m0004.migrate(ws) == [])
 
     after["colors"][PLAN] = "#123456"  # the human recolours

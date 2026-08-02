@@ -20,12 +20,29 @@ from __future__ import annotations
 
 import os
 
-from ..models import DEFAULT_PIPELINE_COLORS, EXPED, PIPELINES, Column, slugify
-from ..pipelines import DEFAULT_COLUMNS, valid_color
+from ..models import Column, slugify
+from ..pipelines import valid_color
 from ._helpers import read_json, write_json
 
 NUMBER = 6
 DESCRIPTION = "add the Expedited pipeline (the fast lane) and the backlog above the board"
+
+# INLINED, deliberately. A migration is a historical record — it must keep running exactly as
+# it did the day it shipped, even after the live model moves on. Expedited was removed from the
+# model in m0008; this migration still seeds it (m0008, which runs after, then takes it back
+# out), so the constants it needs live here, frozen, rather than being imported from a `models`
+# that no longer has them. (title, slug, gate)
+_EXPED = "exped"
+_EXPED_COLUMNS = [
+    ("Scope", "scope", False),
+    ("Plan", "plan", True),
+    ("Build", "build", False),
+    ("Ready to Ship", "ready-to-ship", True),
+    ("Shipped", "shipped", False),
+]
+_EXPED_COLOR = "#22304d"  # blue — the fast lane
+# The board order as it was when this migration shipped (before m0008 reshaped it).
+_ORDER = ("plan", "maint", _EXPED, "build")
 
 
 def migrate(ws) -> list[str]:
@@ -37,29 +54,29 @@ def migrate(ws) -> list[str]:
 
     dirty = False
 
-    if not data.get(EXPED):
-        data[EXPED] = [
-            Column.new(EXPED, title, slug=slug or slugify(title), gate=gate).to_dict()
-            for title, slug, gate in DEFAULT_COLUMNS[EXPED]
+    if not data.get(_EXPED):
+        data[_EXPED] = [
+            Column.new(_EXPED, title, slug=slug or slugify(title), gate=gate).to_dict()
+            for title, slug, gate in _EXPED_COLUMNS
         ]
-        gates = [t for t, _s, g in DEFAULT_COLUMNS[EXPED] if g]
+        gates = [t for t, _s, g in _EXPED_COLUMNS if g]
         notes.append(
             "seeded the Expedited pipeline: "
-            + " → ".join(t for t, _s, _g in DEFAULT_COLUMNS[EXPED])
+            + " → ".join(t for t, _s, _g in _EXPED_COLUMNS)
             + f" (gated at {' and '.join(gates)} — nothing is built or shipped without you)"
         )
         dirty = True
 
     colors = data.get("colors") or {}
-    if not valid_color(colors.get(EXPED, "")):
-        colors[EXPED] = DEFAULT_PIPELINE_COLORS[EXPED]
+    if not valid_color(colors.get(_EXPED, "")):
+        colors[_EXPED] = _EXPED_COLOR
         data["colors"] = colors
         notes.append("painted it blue — the fast lane")
         dirty = True
 
     if dirty:
         # Keep the file in board order, so it reads the way the board looks.
-        ordered = {p: data.get(p, []) for p in PIPELINES}
+        ordered = {p: data.get(p, []) for p in _ORDER}
         ordered["colors"] = data.get("colors", {})
         write_json(path, ordered)
         notes.append(

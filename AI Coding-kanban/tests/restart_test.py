@@ -138,12 +138,19 @@ def main() -> int:
                                    "pipeline": "plan", "kind": "feature"})["id"]
     asyncio.run(send_ws(port, {"type": "message", "card_id": cid, "text": "start"}))
 
-    # The mock manager walks the columns with a pause at each one, so this lands mid-run.
-    time.sleep(1.4)
+    # Catch the run the instant the first column's artifact lands: the card is still in Idea (a
+    # non-gate column), a few tenths of a second before it advances to the Plan gate. Killing it
+    # here leaves recovery a real column to finish — it re-enters, walks Idea → Plan, and writes
+    # PLAN.md on its own.
     card = get(port, f"/api/card/{cid}")
     card_dir = card["abs_dir"]
+    idea_md = os.path.join(card_dir, "IDEA.md")
+    deadline = time.time() + 10
+    while time.time() < deadline and not os.path.isfile(idea_md):
+        time.sleep(0.01)
+    card = get(port, f"/api/card/{cid}")
     check("the manager is working the card", card["busy"] is True)
-    check("it has already written an artifact", os.path.isfile(os.path.join(card_dir, "IDEA.md")))
+    check("it has already written an artifact", os.path.isfile(idea_md))
 
     section("kill -9 it, mid-run")
     srv.kill_hard()

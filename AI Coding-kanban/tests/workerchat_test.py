@@ -64,7 +64,7 @@ async def main() -> int:
     section("a worker has its own conversation, and it persists")
     b = new_board()
     m = mgr(b)
-    key = b.worker_key(MAINT, "exploring")
+    key = b.worker_key(MAINT, "report")
 
     check("it starts empty", b.worker_chat(key).thread == [])
     await m.handle_prompt_message(key, "this one is too vague")
@@ -74,12 +74,12 @@ async def main() -> int:
     check("it is not left spinning", chat.busy is False)
     check(
         "the reply is about THIS worker",
-        "Exploring" in chat.thread[-1].text,
+        "Report" in chat.thread[-1].text,
     )
 
     check("it survives a reload", len(new_board(b.data_dir).worker_chat(key).thread) == 2)
 
-    other = b.worker_key(PLAN, "scoping")
+    other = b.worker_key(PLAN, "idea")
     check("a different worker is a different conversation", b.worker_chat(other).thread == [])
     check("...and the board chat is untouched by it", all(
         not mm.thread for mm in b.managers.values()
@@ -92,7 +92,7 @@ async def main() -> int:
 
     # -----------------------------------------------------------------
     section("renaming the column carries the conversation with it")
-    col = b.pipelines.by_slug(MAINT, "exploring")
+    col = b.pipelines.by_slug(MAINT, "report")
     await b.rename_column(col.id, "Root Cause")
     new_key = b.worker_key(MAINT, "root-cause")
     check("the conversation moved to the new key", new_key in b.worker_chats)
@@ -105,7 +105,7 @@ async def main() -> int:
     d = tempfile.mkdtemp(prefix="km-wc2-")
     b2 = new_board(d)
     j = Journal(d)
-    key2 = b2.worker_key(PLAN, "scoping")
+    key2 = b2.worker_key(PLAN, "idea")
 
     # Simulate the process dying mid-run: a journal entry left behind, thread marked busy.
     j.start(WORKER, key2, "make the exit criteria falsifiable", session_id=None)
@@ -125,7 +125,7 @@ async def main() -> int:
     # a worker chat left busy with NO journal entry behind it is a lie: clear it
     b3 = new_board(tempfile.mkdtemp(prefix="km-wc3-"))
     j3 = Journal(b3.data_dir)
-    k3 = b3.worker_key(PLAN, "planning")
+    k3 = b3.worker_key(PLAN, "plan")
     await b3.set_worker_busy(k3, True)
     await Recovery(b3, mgr(b3, journal=j3), j3).run(lambda c, l: c.close())
     check("an orphaned 'thinking' spinner is cleared", b3.worker_chat(k3).busy is False)

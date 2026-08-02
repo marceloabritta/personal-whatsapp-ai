@@ -1,0 +1,1095 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The @mary Flow — Guide &amp; Worked Traces</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#11161d; --line:#30363d;
+    --ink:#c9d1d9; --ink2:#8b949e; --head:#e6edf3; --accent:#58a6ff;
+    --cite:#79c0ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header#top{padding:26px 28px;border-bottom:1px solid var(--line);
+       background:linear-gradient(180deg,#161b22,#0d1117)}
+  header#top h1{margin:0 0 6px;font-size:24px;color:var(--head);letter-spacing:.2px}
+  header#top p{margin:2px 0;color:var(--ink2);font-size:13.5px}
+  .stamp{display:inline-block;margin-top:8px;padding:4px 10px;border:1px solid var(--line);
+       border-radius:6px;background:var(--panel2);font-family:var(--mono);font-size:12.5px;color:var(--cite)}
+  #layout{display:grid;grid-template-columns:270px 1fr;gap:0;align-items:start}
+  nav#toc{position:sticky;top:0;height:100vh;overflow-y:auto;padding:18px 14px;
+       border-right:1px solid var(--line);background:var(--panel2);font-size:13px}
+  nav#toc h4{margin:16px 8px 6px;color:var(--ink2);text-transform:uppercase;
+       font-size:11px;letter-spacing:.8px}
+  nav#toc a{display:block;padding:3px 8px;border-radius:5px;color:var(--ink)}
+  nav#toc a:hover{background:#1f2630;text-decoration:none}
+  main{padding:24px 34px 120px;max-width:1180px}
+  section{margin:0 0 30px;padding:18px 20px;border:1px solid var(--line);
+       border-radius:10px;background:var(--panel)}
+  section h2{margin:0 0 4px;color:var(--head);font-size:20px}
+  section h3{margin:22px 0 4px;color:var(--head);font-size:16.5px}
+  section > p{margin:8px 0}
+  .lede{color:var(--ink2);margin-top:2px}
+  .prov{font-size:12.5px;color:var(--ink2);margin:10px 0 2px}
+  .cite{font-family:var(--mono);font-size:12px;color:var(--cite);
+       background:#0b1a2b;border:1px solid #123;border-radius:4px;padding:1px 5px;white-space:nowrap}
+  .pill{display:inline-block;font-size:11px;font-family:var(--mono);padding:1px 7px;
+       border-radius:20px;margin:0 4px 4px 0;border:1px solid var(--line)}
+  .p-read{color:#7ee787;border-color:#1c3a24}
+  .p-write{color:#ff9e64;border-color:#4a2c17}
+  .p-rails{color:var(--purple);border-color:#3a2a55}
+  .p-prompt{color:var(--cite);border-color:#123a5a}
+  .p-cap{color:var(--warn);border-color:#4a3a12}
+  .card{border:1px solid var(--line);border-radius:8px;background:var(--panel2);
+       padding:12px 14px;margin:10px 0}
+  .card h5{margin:0 0 6px;color:var(--head);font-size:13.5px;font-family:var(--mono)}
+  .branch{border-left:3px solid var(--line);padding:4px 0 4px 12px;margin:8px 0}
+  .branch.unhappy{border-left-color:var(--bad)}
+  .branch.cap{border-left-color:var(--warn)}
+  ul{margin:6px 0;padding-left:20px}
+  li{margin:3px 0}
+  code{font-family:var(--mono);font-size:12.5px;background:#0b1017;border:1px solid var(--line);
+       border-radius:4px;padding:1px 4px;color:#e6edf3}
+  pre{font-family:var(--mono);font-size:12px;line-height:1.5;background:#0b1017;
+       border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;
+       white-space:pre;margin:8px 0;color:#cdd9e5}
+  details{border:1px solid var(--line);border-radius:8px;background:var(--panel2);margin:8px 0}
+  details > summary{cursor:pointer;padding:9px 12px;color:var(--head);font-size:13px;
+       font-family:var(--mono);user-select:none}
+  details[open] > summary{border-bottom:1px solid var(--line)}
+  details .body{padding:0 12px 4px}
+  details pre{max-height:440px}
+  .tpl{border-left:3px solid var(--accent)}
+  .ex{border-left:3px solid var(--ok)}
+  /* Diagram */
+  #diagram{border:1px dashed var(--line);border-radius:10px;padding:18px;background:var(--panel2);margin:14px 0}
+  .drow{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px;justify-content:center;margin:8px 0}
+  a.dnode{display:flex;flex-direction:column;min-width:132px;max-width:180px;padding:9px 11px;
+       border:1px solid var(--line);border-radius:9px;background:#11202f;color:var(--ink);
+       font-size:12.5px;text-align:left}
+  a.dnode:hover{border-color:var(--accent);text-decoration:none;background:#12293c}
+  a.dnode b{color:var(--head);font-size:12.5px;display:block;margin-bottom:2px}
+  a.dnode span{color:var(--ink2);font-size:11px;font-family:var(--mono)}
+  a.dnode.star{border-color:#3a5a8a;background:#132a44}
+  a.dnode.infra{background:#1c1730;border-color:#3a2a55}
+  a.dnode.unhappy{background:#2a1414;border-color:#4a2020}
+  .darrow{align-self:center;color:var(--ink2);font-size:18px;padding:0 2px}
+  .dnote{color:var(--ink2);font-size:11.5px;font-family:var(--mono);text-align:center;margin:2px 0 10px}
+  .legend{font-size:12px;color:var(--ink2);margin-top:10px}
+  .legend span{display:inline-block;margin-right:14px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  /* Worked-example hop panels */
+  .trace{border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin:14px 0;background:var(--panel2)}
+  .trace > h4{margin:0 0 2px;color:var(--head);font-size:15px}
+  .tmeta{font-family:var(--mono);font-size:11.5px;color:var(--ink2);margin:0 0 8px}
+  .hop{border:1px solid var(--line);border-left-width:4px;border-radius:7px;padding:9px 12px;margin:8px 0;background:#0e141b}
+  .hop-verbatim{border-left-color:var(--ok)}
+  .hop-reconstructed{border-left-color:var(--warn)}
+  .hoptitle{font-size:12.5px;color:var(--head);font-family:var(--mono);margin:0 0 4px}
+  .tag{display:inline-block;font-size:11px;font-family:var(--mono);padding:1px 7px;border-radius:5px;margin-left:6px}
+  .tag-v{background:#0f2417;color:#7ee787;border:1px solid #1c3a24}
+  .tag-r{background:#241c0f;color:#e3b341;border:1px solid #4a3a12}
+  .hop pre{margin:6px 0 2px;background:#080c11}
+  .redact{color:var(--warn)}
+  .miss{color:var(--bad)}
+  .foot{color:var(--ink2);font-size:12.5px;margin-top:8px}
+  @media(max-width:900px){#layout{grid-template-columns:1fr}nav#toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<header id="top">
+  <h1>The @mary Flow — Guide &amp; Worked Traces</h1>
+  <p>A single-file, offline map of the WhatsApp <code>@mary</code> secretary runtime: every stage of the turn loop as a block, every model-facing prompt as readable text, and eleven end-to-end traces authored from the real self-learning failure reports.</p>
+  <p>Maintainer-facing snapshot. Opens over <code>file://</code> — zero dependencies, zero network. Supersedes <span class="cite">secretary/docs/mary-flow.html</span> in ambition; that page stays in place as prior art.</p>
+  <span class="stamp">verified against commit aca9c96 &nbsp;·&nbsp; 2026-08-01 &nbsp;·&nbsp; branch card/notion-flow-doc</span>
+</header>
+
+<div id="layout">
+<nav id="toc">
+  <h4>Orientation</h4>
+  <a href="#overview">Overview &amp; diagram</a>
+  <h4>Flow nodes</h4>
+  <a href="#s0">0 · Webhook &amp; fast-ACK</a>
+  <a href="#s1">1 · Buffer &amp; extract</a>
+  <a href="#s2">2 · The @ trigger gate</a>
+  <a href="#s3">3 · Context build — ctx</a>
+  <a href="#s4">4 · Media prep</a>
+  <a href="#s5">5 · Marker &amp; turn-loop bounds</a>
+  <a href="#s6">6 · The router call ★</a>
+  <a href="#s7">7 · Branch on <code>next</code></a>
+  <a href="#s7a">7a · Answer pass</a>
+  <a href="#s8">8 · Dispatch &amp; validation</a>
+  <a href="#s9">9 · Skill run</a>
+  <a href="#s10">10 · Read-back turn</a>
+  <a href="#s11">11 · Reply to WhatsApp</a>
+  <h4>Cross-cutting infra</h4>
+  <a href="#infra-confirm">Confirmation</a>
+  <a href="#infra-inputs">Declared-inputs contract</a>
+  <a href="#infra-learn">Self-learning</a>
+  <a href="#infra-log">Log ring</a>
+  <a href="#infra-native">Native tools</a>
+  <a href="#infra-lang">Language</a>
+  <a href="#infra-fmt">Format / Identity</a>
+  <a href="#infra-misc">Sessions · Settings · Google</a>
+  <h4>Skills (pure tasks)</h4>
+  <a href="#skills">All 7 skills</a>
+  <h4>The 11 prompts</h4>
+  <a href="#prompts">Prompt index</a>
+  <h4>Worked examples</h4>
+  <a href="#traces">Real traces (11)</a>
+  <a href="#t1">1 · calendar create</a>
+  <a href="#t2">2 · calendar edit + delete</a>
+  <a href="#t3">3 · transcribe_audio</a>
+  <a href="#t4">4 · task create + list</a>
+  <a href="#t5">5 · feature_request</a>
+  <a href="#t6">6 · feedback</a>
+  <a href="#t7">7 · assistant_settings</a>
+  <a href="#t8">8 · answer pass</a>
+  <a href="#t9">9 · degraded close</a>
+  <a href="#t10">10 · repair loop</a>
+  <a href="#t11">11 · media rejection</a>
+  <h4>Notes</h4>
+  <a href="#drift">Drift &amp; honesty</a>
+</nav>
+
+<main>
+
+<!-- ============================== OVERVIEW ============================== -->
+<section id="overview">
+  <h2>Overview — one message through the whole flow</h2>
+  <p class="lede">A message from the owner's WhatsApp lands on the Evolution webhook. If it summons the secretary (the <code>@mary</code> tag) or continues a live conversation, it runs the orchestrator turn loop: the model makes ONE decision per turn — keep listening, run a skill, answer directly, or close — bounded by hard caps in code. Six of seven skills make zero Claude calls; the router's single merged classify-and-extract call does all the extraction.</p>
+
+  <div id="diagram">
+    <div class="drow">
+      <a class="dnode" href="#s0"><b>0 · Webhook</b><span>POST /webhook · 200 first</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s1"><b>1 · Buffer &amp; extract</b><span>remember() every msg</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s2"><b>2 · @ trigger gate</b><span>START · CONTINUE · IGNORE</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s3"><b>3 · Context — ctx</b><span>history · transcript · lang</span></a>
+    </div>
+    <div class="dnote">↓ &nbsp; unhappy: not tagged &amp; no session → <b>IGNORE</b> (drop) &nbsp;·&nbsp; duplicate messageId → drop</div>
+    <div class="drow">
+      <a class="dnode" href="#s4"><b>4 · Media prep</b><span>caps · notices</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s5"><b>5 · Marker + caps</b><span>turns · dispatches · repairs</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode star" href="#s6"><b>6 · Router call ★</b><span>{say,next,skills,info,lang}</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s7"><b>7 · Branch on next</b><span>listen·answer·done·execute</span></a>
+    </div>
+    <div class="dnote">↓ &nbsp; unhappy: file too big / unreadable → notice + close &nbsp;·&nbsp; turn/dispatch/answer cap → apology + close</div>
+    <div class="drow">
+      <a class="dnode" href="#s7a"><b>7a · Answer pass</b><span>native web tools · hops</span></a>
+      <a class="dnode" href="#s8"><b>8 · Dispatch + validate</b><span>checkPayload · repair</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s9"><b>9 · Skill run</b><span>pure task · provider</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s10"><b>10 · Read-back</b><span>narrate · may not execute</span></a>
+      <span class="darrow">→</span>
+      <a class="dnode" href="#s11"><b>11 · Reply</b><span>frame · header · localize</span></a>
+    </div>
+    <div class="dnote">↺ &nbsp; repair edge: invalid <code>info</code> → <a href="#s8">describeProblems</a> back to <a href="#s6">router</a> (≤ MAX_REPAIRS) &nbsp;·&nbsp; degraded → <a href="#t9">"didn't understand" menu</a></div>
+    <div class="drow">
+      <a class="dnode infra" href="#infra-confirm"><b>Confirmation</b><span>confirm-first writes</span></a>
+      <a class="dnode infra" href="#infra-learn"><b>Self-learning</b><span>captureFailure</span></a>
+      <a class="dnode infra" href="#infra-log"><b>Log ring</b><span>redact · truncate</span></a>
+      <a class="dnode infra" href="#infra-native"><b>Native tools</b><span>web search/fetch</span></a>
+      <a class="dnode infra" href="#infra-lang"><b>Language</b><span>pin / hold</span></a>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#132a44"></span>flow node</span>
+      <span><span class="dot" style="background:#1c1730"></span>cross-cutting infra</span>
+      <span><span class="dot" style="background:#3fb950"></span>verbatim hop (trace)</span>
+      <span><span class="dot" style="background:#d29922"></span>reconstructed hop (trace)</span>
+    </div>
+  </div>
+  <p class="prov">Whole-flow source of truth: <span class="cite">server.js</span>, the router in <span class="cite">router/router.js</span> and <span class="cite">router/prompt.js</span>, and the supporting <span class="cite">lib/inputs.js</span>.</p>
+</section>
+
+<!-- ============================== FLOW NODES ============================== -->
+<section id="s0">
+  <h2>0 · Webhook intake &amp; fast-ACK</h2>
+  <p class="lede">Where a message enters. The webhook acknowledges before it does any work, and drops duplicates.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-read">read</span>
+  <div class="card">
+    <h5>inside</h5>
+    <ul>
+      <li><code>app.post("/webhook")</code> receives the Evolution payload and <b>immediately</b> calls <code>res.sendStatus(200)</code> — before any routing — so Evolution never resends the same message while a turn is running.</li>
+      <li>Dedup by messageId: a <code>seen</code> Set holds the last 500 ids; a repeat id returns early.</li>
+    </ul>
+    <div class="branch unhappy"><b>unhappy · dedup drop:</b> <code>if (id &amp;&amp; seen.has(id)) return;</code> — an id already in <code>seen</code> is a resend and is dropped silently.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:332</span>, <span class="cite">server.js:333</span>, <span class="cite">server.js:386</span>.</p>
+</section>
+
+<section id="s1">
+  <h2>1 · Buffer &amp; extract</h2>
+  <p class="lede">Every inbound message is remembered for context — even the ones that do not summon the secretary.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-read">read</span>
+  <div class="card">
+    <h5>inside</h5>
+    <ul>
+      <li><code>remember(remoteJid, {…})</code> buffers EVERY message with text, so the transcript the router later sees carries the whole conversation, not just tagged lines.</li>
+      <li><code>extractText(data.message)</code> pulls the text; <code>getQuoted(data)</code> returns <code>{ id, hasAudio, mediaType, text, calendarLink }</code> for the replied-to message; <code>inboundMedia(data, quoted)</code> lists attachments (attachment first, then quote).</li>
+      <li>A captioned document has <code>text === ""</code>, so its tag+order ride on the attachment caption, computed at <code>attachmentCaption</code>.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:338</span>, <span class="cite">server.js:342</span>, <span class="cite">server.js:348</span>, and the extractors in <span class="cite">lib/whatsapp.js</span>.</p>
+</section>
+
+<section id="s2">
+  <h2>2 · The @ trigger gate</h2>
+  <p class="lede">Decides whether this message is for the secretary at all: START a flow, CONTINUE an open one, or IGNORE.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-read">read</span>
+  <div class="card">
+    <h5>the three doors</h5>
+    <ul>
+      <li><b>START:</b> the owner (<code>fromMe</code>) used a trigger tag — <code>matchedTagNew(gateText)</code> returns the matched tag (longest-first, must end at a word boundary). Its length is sliced off to form the <code>order</code>.</li>
+      <li><b>CONTINUE:</b> a session is open and this message comes from the awaited party — <code>session.awaitFrom</code> is <code>owner</code> / <code>contact</code> / <code>any</code>. No tag or reply required.</li>
+      <li><b>self-guard:</b> <code>isOwnMessage(text)</code> — the secretary shares the owner's WhatsApp account, so its own replies arrive with <code>fromMe=true</code>; the header check is the only thing telling them apart.</li>
+    </ul>
+    <div class="branch unhappy"><b>unhappy · IGNORE:</b> <code>if (!isTagged &amp;&amp; !isContinuation) return;</code> — not tagged and no session waiting on this sender → the message is buffered (node 1) but no turn runs.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:357</span>, <span class="cite">server.js:367</span>, <span class="cite">server.js:385</span>, <span class="cite">server.js:399</span>, and <span class="cite">lib/identity.js:152</span>.</p>
+</section>
+
+<section id="s3">
+  <h2>3 · Context build — <code>ctx</code></h2>
+  <p class="lede">The rails' public API to the skills: one object carrying the conversation, the send helpers, and the language pin.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-read">read</span>
+  <div class="card">
+    <h5>inside</h5>
+    <ul>
+      <li><code>fetchHistory</code> → <code>combine</code> → <code>buildTranscript</code> (the <code>ME:</code>/<code>OTHER:</code> string the six unconverted skills read) and <code>buildLabeledTranscript</code> (the <code>OWNER</code>/<code>SECRETARY</code>/<code>CONTACT</code> view the model reads).</li>
+      <li><code>ctx.send</code> — an ordinary reply, never scanned; it records the body onto <code>ctx._turn.said</code> for the read-back. <code>ctx.sendFailure</code> — a declared soft failure; it fires a self-learning report. <code>ctx.dmOwner</code> — an additive private note to the owner's own number (no-op if unset).</li>
+      <li><b>language pin:</b> <code>pinnedLang = session?.openingLang</code>; each turn's language is <code>resolveTurnLang(pinnedLang, reply.lang)</code> — an ongoing conversation HOLDS its opening language.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:414</span>, <span class="cite">server.js:421</span>, <span class="cite">server.js:467</span>, <span class="cite">server.js:509</span>, and the pin policy in <span class="cite">lib/lang.js:20</span>.</p>
+</section>
+
+<section id="s4">
+  <h2>4 · Media prep</h2>
+  <p class="lede">Relays inbound images/PDFs to the turn call as Anthropic multimodal blocks — with size caps and a spoken notice for every reason a file cannot be read.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-read">read</span><span class="pill p-cap">caps</span>
+  <div class="card">
+    <h5>caps</h5>
+    <ul>
+      <li><code>IMAGE_MAX_BYTES</code> = 5 MB &nbsp;·&nbsp; <code>PDF_MAX_BYTES</code> = 32 MB &nbsp;·&nbsp; <code>MAX_FILES_PER_TURN</code> = 10.</li>
+      <li>Download with <code>getMediaBase64</code>, check bytes against the per-type cap, build the block with <code>mediaBlockFor</code> (validated against an allow-list — a leaked <code>audio/ogg</code> default can never become an image block).</li>
+      <li>History fallback: an @mary turn with no attachment whose words mention a file (<code>mentionsFile(order)</code>) reaches back for the most-recent relayable file via <code>historyMediaFile</code>.</li>
+    </ul>
+    <div class="branch unhappy"><b>unhappy · per-reason notices:</b> <code>fileTooMany</code> (&gt;10), <code>fileDownloadFailed</code>, <code>fileTooLarge</code>, <code>fileUnsupported</code> — one note per distinct reason; if nothing readable remains, the notes are sent and the turn closes without routing.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:79</span>, <span class="cite">server.js:80</span>, <span class="cite">server.js:621</span>, <span class="cite">server.js:633</span>, <span class="cite">server.js:641</span>.</p>
+</section>
+
+<section id="s5">
+  <h2>5 · Marker &amp; turn-loop bounds</h2>
+  <p class="lede">A model that can call skills in a loop can loop on skills — so the bound is code, never the model. The marker carries the counters across message boundaries.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-cap">caps</span>
+  <div class="card">
+    <h5>the bounds</h5>
+    <ul>
+      <li><code>MAX_TURNS = 10</code> (counts only PRODUCTIVE turns — deliberate silence is free), <code>MAX_DISPATCHES = 3</code> (a dispatch may be a read, not only a write), <code>MAX_REPAIRS = 2</code>, <code>READBACK_CAP = 8192</code> bytes, <code>MARKER_TTL = 15 min</code>, <code>NATIVE_MAX_ANSWERS = 6</code>.</li>
+      <li><code>persistMarker</code> / <code>closeMarker</code> both refuse to touch the key when a dispatched skill has taken it (its <code>skill</code> field) — a skill's pending confirmation outranks the orchestrator marker.</li>
+    </ul>
+    <div class="branch cap"><b>cap · turn cap trip:</b> <code>if (marker.turns &gt; MAX_TURNS)</code> → the deterministic <code>turnCap</code> apology, close, and a report.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:294</span>, <span class="cite">server.js:295</span>, <span class="cite">server.js:305</span>, <span class="cite">server.js:565</span>, <span class="cite">server.js:709</span>.</p>
+</section>
+
+<section id="s6">
+  <h2>6 · The router call — <code>route()</code> ★</h2>
+  <p class="lede">The heart. ONE Claude call classifies intent AND extracts the first skill's declared inputs in the same breath — one round-trip, not two.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-prompt">prompt #1–#4</span>
+  <div class="card">
+    <h5>inside</h5>
+    <ul>
+      <li><code>route(ctx, turn)</code> builds the system prompt from <code>buildRouterSystem(owner, catalog, tags)</code> and one of three user prompts (first-turn / read-back / repair), then makes a single <code>messages.create</code> with <code>max_tokens: 1024</code> and <b>no</b> <code>output_config</code> (deliberate — see the prompt file; it keeps the orchestrator schema-free).</li>
+      <li>The reply is logged as <code>ROUTER RAW: …</code> and parsed by <code>parseJsonReply</code>, a balanced-brace scanner that is load-bearing (~4% of replies leak a line of prose before the JSON).</li>
+      <li>Returns <code>{ say, next, skills, info, lang, awaitFrom, degraded }</code>. <code>next</code> ∈ <code>listen | execute | done | answer</code>.</li>
+    </ul>
+    <div class="branch unhappy"><b>unhappy · degrade:</b> a refusal or unparseable reply returns <code>{ next:"done", skills:[], degraded:true }</code> — the schema-drift alarm that server.js turns into the "didn't understand" menu + an unrouted report.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">router/router.js:85</span>, <span class="cite">router/router.js:155</span>, <span class="cite">router/router.js:32</span>, <span class="cite">router/router.js:177</span>, and the system prompt <span class="cite">router/prompt.js:28</span>.</p>
+</section>
+
+<section id="s7">
+  <h2>7 · Branch on <code>next</code></h2>
+  <p class="lede">The turn-loop switch. Four outcomes, inline in the webhook handler.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><b>listen</b> — send <code>say</code> (if any), record <code>awaitFrom</code>, persist the marker, and wait for the next message. A <code>{say:null, next:"listen"}</code> silence is FREE (does not consume a turn).</li>
+      <li><b>answer</b> — the tool-carrying answer pass (node 7a).</li>
+      <li><b>done</b> — close. A <b>degraded</b> done fires the "didn't understand" menu + unrouted capture; a legitimate empty done closes silently.</li>
+      <li><b>execute</b> — dispatch (node 8). Forbidden on a read-back turn (the write invariant).</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:716</span>, <span class="cite">server.js:728</span>, <span class="cite">server.js:765</span>, <span class="cite">server.js:784</span>.</p>
+</section>
+
+<section id="s7a">
+  <h2>7a · Answer pass — <code>answer()</code></h2>
+  <p class="lede">A SECOND, tool-carrying prose call — distinct from the JSON router call. Because it is downstream of a parsed classification, it can never reach the "didn't understand" menu.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-prompt">prompt #5–#6</span><span class="pill p-cap">caps</span>
+  <div class="card">
+    <ul>
+      <li>Attaches the native toolset from <code>buildNativeTools(env)</code> — web search + web fetch (code execution gated off) — and asks for PROSE, delivered inline in the same WhatsApp reply.</li>
+      <li>Server-side tools run an internal loop; a <code>pause_turn</code> stop is resumed by resending <code>[user, assistant(content)]</code>, bounded by <code>NATIVE_MAX_TOOL_HOPS_DEFAULT = 4</code> and each call by <code>NATIVE_ANSWER_TIMEOUT_MS = 30s</code>.</li>
+      <li>Outcome ∈ <code>ok | timeout | tool_error | empty | refusal</code>. A per-conversation ceiling <code>NATIVE_MAX_ANSWERS = 6</code> is enforced on the marker.</li>
+    </ul>
+    <div class="branch cap"><b>cap · still paused after the hop cap</b> → treated as a timeout (bounded, never runs away). A refusal stays silent.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">router/router.js:243</span>, <span class="cite">router/router.js:273</span>, <span class="cite">router/router.js:280</span>, <span class="cite">lib/nativeTools.js:37</span>, and the marker ceiling at <span class="cite">server.js:737</span>.</p>
+</section>
+
+<section id="s8">
+  <h2>8 · Dispatch &amp; payload validation</h2>
+  <p class="lede">The router's <code>info</code> is never trusted. Plain code — no AI — decides whether the payload is usable before any skill sees it.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-cap">caps</span>
+  <div class="card">
+    <h5>the three tiers &amp; two gates</h5>
+    <ul>
+      <li><code>checkPayload(inputs, info)</code> returns <code>{ shapeOk, ok, problems }</code>: <code>shapeOk</code> = validity only (right fields, right types, no extras); <code>ok</code> = validity + completeness + the skill's own consistency predicates.</li>
+      <li><b>orchestrator tier</b> gates on <code>ok</code> — a failure is the REPAIR loop, not a dispatch: <code>describeProblems(problems)</code> goes back to the model (<code>ORCHESTRATOR repair: …</code> is logged), the write budget untouched.</li>
+      <li><b>skill tier</b> gates on <code>shapeOk</code> — shape-valid is handed over (incomplete or not); shape-invalid is withheld (<code>ROUTER payload withheld: …</code>) and the skill re-extracts for itself.</li>
+    </ul>
+    <div class="branch cap"><b>cap · dispatch ceiling</b> (<code>MAX_DISPATCHES</code>) and <b>repair give-up</b> (<code>MAX_REPAIRS</code>) each end the turn with a deterministic apology + report. A batch is deduped, order preserved.</div>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/inputs.js:212</span>, <span class="cite">lib/inputs.js:271</span>, <span class="cite">server.js:831</span>, <span class="cite">server.js:841</span>, <span class="cite">server.js:793</span>.</p>
+</section>
+
+<section id="s9">
+  <h2>9 · Skill run (pure task)</h2>
+  <p class="lede">The chosen skill runs. Six of seven make zero Claude calls — the router already extracted their inputs. Only the primary's return value drives a read-back.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li>The dispatch loop runs each task's <code>run(ctx)</code>. <code>ctx.info</code> carries the pre-extracted payload to the ONE task it belongs to; every other skill sees <code>null</code> and extracts for itself.</li>
+      <li><code>ctx._turn.skill</code> is set so a soft report names the skill; <code>ctx.session</code> is nulled so a dispatched skill never receives the orchestrator's marker.</li>
+      <li>A non-primary converted skill cannot batch — it is skipped with a <code>dispatchSkipped</code> notice. Per-skill internals are in the <a href="#skills">Skills</a> section.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:854</span>, <span class="cite">server.js:867</span>, <span class="cite">server.js:871</span>.</p>
+</section>
+
+<section id="s10">
+  <h2>10 · Read-back turn</h2>
+  <p class="lede">After a converted skill returns a value, the model gets one more turn to narrate the result — but it may NOT act again.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-prompt">prompt #3</span><span class="pill p-cap">cap</span>
+  <div class="card">
+    <ul>
+      <li>The return value is serialized and truncated at <code>READBACK_CAP</code> (8192 bytes, then <code>…[truncated]</code>), then fed to <code>buildReadbackUser</code> which reuses the router SYSTEM prompt.</li>
+      <li><b>Write invariant:</b> a read-back turn may not <code>execute</code> and may not start a fresh <code>answer</code> pass — a new action needs a new message from the owner first. Both are refused with a report.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:786</span>, <span class="cite">server.js:893</span>, <span class="cite">server.js:903</span>, and the prompt <span class="cite">router/prompt.js:179</span>.</p>
+</section>
+
+<section id="s11">
+  <h2>11 · Reply to WhatsApp</h2>
+  <p class="lede">The send boundary: translate if needed, frame with the bold header + italic body, and hand to Evolution.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>localizeBody</code> is the long-tail translation fallback: <code>en</code>/<code>pt</code> pass through unchanged; any other pinned language is translated by a cheap model (with a no-op guard against "translate X→X"). Markers are added AFTER translation so the model never sees them.</li>
+      <li><code>send()</code> calls <code>frame(headerFor(lang), body)</code> — <code>frame</code> italicizes line-by-line (URLs and marker-bearing lines stay plain) and stamps the language-aware header — then <code>evolution.sendText</code>.</li>
+      <li>A model-authored <code>say</code> in the other maintained language is force-translated first (<code>shouldForceTranslateSay</code>).</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">server.js:170</span>, <span class="cite">server.js:198</span>, <span class="cite">lib/format.js:48</span>, <span class="cite">lib/identity.js:84</span>, <span class="cite">lib/lang.js:38</span>.</p>
+</section>
+
+<!-- ============================== INFRA ============================== -->
+<section id="infra-confirm">
+  <h2>Infra · Confirmation (confirm-first writes)</h2>
+  <p class="lede">The guardrail on every calendar/task WRITE. Before anything is written to the world, the owner must have agreed.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-prompt">prompt #10</span><span class="pill p-write">write-gate</span>
+  <div class="card">
+    <ul>
+      <li><code>classifyConfirmation(ctx, {action, who})</code> classifies the latest message as <code>confirm</code> / <code>decline</code> / <code>unrelated</code>. <code>unrelated</code> is the SAFE default: any doubt, refusal or API error lands there, so an unclear message can never trigger an irreversible write.</li>
+      <li><code>buildConfirmSystem(action)</code> puts a short English description of what is pending into the prompt so a "yes" is unambiguous.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/confirm.js:33</span>, <span class="cite">lib/confirm.js:53</span>, <span class="cite">lib/confirm.js:56</span>.</p>
+</section>
+
+<section id="infra-inputs">
+  <h2>Infra · The declared-inputs contract</h2>
+  <p class="lede">How the router asks for a skill's inputs without the orchestrator ever importing that skill's schema.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>describeInputs(catalog)</code> renders each skill's <code>manifest.inputs</code> as OPAQUE prompt text (the skill menu + each skill's rulebook, incl. the calendar rulebook — <a href="#p7">prompt #7</a>).</li>
+      <li><code>checkPayload</code> validates whatever came back against that declaration; <code>describeProblems</code> renders failures into the repair prose. It names a field of no skill.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/inputs.js:124</span>, <span class="cite">lib/inputs.js:212</span>, <span class="cite">lib/inputs.js:271</span>.</p>
+</section>
+
+<section id="infra-learn">
+  <h2>Infra · Self-learning capture</h2>
+  <p class="lede">A malfunction is exactly three things: a thrown code error, a declared soft failure (<code>ctx.sendFailure</code>), or the owner reporting a defect (the <code>feedback</code> skill). Each writes one Markdown report.</p>
+  <span class="pill p-rails">rails</span><span class="pill p-prompt">prompt #11</span>
+  <div class="card">
+    <ul>
+      <li><code>captureFailure(ctx, info)</code> renders a report (<code>render()</code>) carrying the order, transcript, and the recent redacted ring lines. It is the source of every <a href="#traces">worked trace</a> below.</li>
+      <li><code>analyze()</code> (<a href="#p11">prompt #11</a>) appends a best-effort "likely cause" hunch — its own try/catch, returns <code>null</code> on any error. Marked UNVERIFIED in every report; not a main-path call.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/selflearning.js:248</span>, <span class="cite">lib/selflearning.js:132</span>, <span class="cite">lib/selflearning.js:180</span>.</p>
+</section>
+
+<section id="infra-log">
+  <h2>Infra · The log ring (redact + truncate)</h2>
+  <p class="lede">An in-memory ring so the secretary can read its own recent logs back into a report — with secrets masked and long lines cut BEFORE they enter.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>CAPACITY = 500</code> entries, <code>MAX_LINE_CHARS = 2000</code> — the long <code>TRANSCRIPT&gt;&gt;&gt;</code> line is cut with a <code>«truncated N chars»</code> marker.</li>
+      <li><code>redact()</code> masks keys/tokens/high-entropy blobs → <code>«redacted:anthropic-key»</code>, <code>«redacted:google-key»</code>, <code>«redacted:blob»</code>, … These tokens ride VERBATIM into every trace below; they are never un-redacted.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/logbuffer.js:18</span>, <span class="cite">lib/logbuffer.js:40</span>, <span class="cite">lib/logbuffer.js:62</span>.</p>
+</section>
+
+<section id="infra-native">
+  <h2>Infra · Native tools</h2>
+  <p class="lede">The server-side tool bundle attached to the answer pass. Config-driven; disabled degrades safely to a tool-less answer.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>buildNativeTools(env)</code> ships <code>web_search_20260209</code> + <code>web_fetch_20260209</code> (the dynamic-filtering variants, no beta header on <code>claude-sonnet-5</code>). <code>code_execution</code> is gated behind <code>NATIVE_CODE_EXEC</code> and defaults OFF.</li>
+      <li><code>WEB_SEARCH_MAX_USES</code> defaults to 5. Master switch <code>NATIVE_TOOLS</code>; off/unset → an empty array (answer from context).</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/nativeTools.js:37</span>, <span class="cite">lib/nativeTools.js:42</span>, <span class="cite">lib/nativeTools.js:43</span>.</p>
+</section>
+
+<section id="infra-lang">
+  <h2>Infra · Language (pin / hold)</h2>
+  <p class="lede">The rails decide and carry the conversation language; each skill only supplies its own <code>{en,pt}</code> strings.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>MAINTAINED_LANGS = {en, pt}</code> — the two written natively. Everything else goes through <code>localizeBody</code>.</li>
+      <li><code>resolveTurnLang(pinnedLang, routerLang)</code> — an ongoing conversation HOLDS its opening language; only a new conversation's first turn adopts the router's detected lang. <code>translationNeeded</code> is the no-op guard.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/lang.js:11</span>, <span class="cite">lib/lang.js:20</span>, <span class="cite">lib/lang.js:38</span>.</p>
+</section>
+
+<section id="infra-fmt">
+  <h2>Infra · Format &amp; Identity</h2>
+  <p class="lede">How a secretary message looks, and how it is told apart from the owner's own typing.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li><code>frame(header, body)</code> — bold header, blank line, italic body, applied once at the send boundary. <code>italicizeBody</code> wraps line-by-line (URL/marker lines stay plain).</li>
+      <li><code>headerFor(lang)</code> stamps the language-aware header; <code>isOwnMessage</code> recognizes every header variant (both languages + retired ones) so the bot never reads its own reply; <code>matchedTagNew</code> matches trigger tags longest-first.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/format.js:48</span>, <span class="cite">lib/identity.js:108</span>, <span class="cite">lib/identity.js:152</span>.</p>
+</section>
+
+<section id="infra-misc">
+  <h2>Infra · Sessions · Settings · Google</h2>
+  <p class="lede">The shared services the flow leans on.</p>
+  <span class="pill p-rails">rails</span>
+  <div class="card">
+    <ul>
+      <li>Per-chat conversation state (Redis, or in-memory when <code>REDIS_URL</code> is empty) — the session store the marker lives in.</li>
+      <li>Durable settings on the same Redis (the tag list the owner can change) and Google OAuth for the calendar/tasks skills.</li>
+    </ul>
+  </div>
+  <p class="prov">Provenance: <span class="cite">lib/sessions.js</span>, <span class="cite">lib/settings.js</span>, <span class="cite">lib/google.js</span>.</p>
+</section>
+
+<!-- ============================== SKILLS ============================== -->
+<section id="skills">
+  <h2>The 7 skills (pure tasks)</h2>
+  <p class="lede">The refactor made skills pure tasks. Six of seven make ZERO Claude calls — the router's one merged call did all extraction, so those blocks have no model prompt of their own; their contract is the router rulebook entry (their <code>manifest.inputs</code>). Only <code>feature_request</code> still issues an in-skill Claude call (the doc-gen).</p>
+
+  <div class="card">
+    <h5>calendar_action · Google Calendar · 0 Claude calls · discriminator: action</h5>
+    <p>Pure task, no model prompt. Variants by <code>action</code>: create / edit / delete / find / list. Result shapes (reconstructed from the skill's own returns): create → <code>{ ok:true, link, eventId, reused }</code>; edit → <code>{ ok:true, eventId }</code>; delete → <code>{ ok:true, cancelled:N }</code>; find → <code>{ candidates:[{event_id,title,start,end,attendees,link}], count }</code>; list → <code>{ events:[{event_id,title,start}] }</code>. Failures return <code>{ ok:false, reason }</code> (<code>noDate</code>/<code>noMatch</code>/<code>googleError</code>/<code>listError</code>).</p>
+    <p class="prov">Provenance: <span class="cite">1. Calendar Actions/skill.js:38</span>, <span class="cite">1. Calendar Actions/skill.js:940</span>, <span class="cite">1. Calendar Actions/skill.js:1250</span>, and the rulebook <span class="cite">1. Calendar Actions/prompt.js:19</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>transcribe_audio · AssemblyAI · 0 Claude calls · no declared inputs</h5>
+    <p>Pure task, no model prompt (<code>manifest.inputs = null</code>). Variants: inline vs <code>.txt</code> file (over <code>LONG_AUDIO_SEC</code>). Result: <code>{ ok:true, delivered:"inline"|"file", chars }</code>; failures <code>{ ok:false, reason:"noAudio"|"noKey"|"downloadFailed"|"empty"|"transcribeFailed" }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">2. Audio transcriptions/skill.js:19</span>, <span class="cite">2. Audio transcriptions/skill.js:114</span>, <span class="cite">2. Audio transcriptions/skill.js:159</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>task_action · Google Tasks · 0 Claude calls · discriminator: mode</h5>
+    <p>Pure task, no model prompt. Variants by <code>mode</code>: list / apply (op <code>kind</code>: create/complete/delete/edit). Result: list → <code>{ tasks:[{id,title,due}] }</code>; apply → <code>{ applied:[{kind,id,title,due?}], failed:[{kind,reason}] }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">3. Tasks/skill.js:29</span>, <span class="cite">3. Tasks/skill.js:204</span>, <span class="cite">3. Tasks/skill.js:311</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>feature_request · Anthropic · <b>1</b> Claude call (doc-gen) · no discriminator</h5>
+    <p>The ONLY in-skill Claude call: <code>generateDoc</code> turns the router-supplied brief into a Markdown spec (<a href="#p8">prompt #8</a>), logs <code>FEATURE DOC LEN: &lt;n&gt;</code> (a length, never the return object), and spools the file. Result: <code>{ ok:true, path, title }</code>; failures <code>{ ok:false, reason:"renderError"|"logFailed", path:null }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">4. Feature Requests/skill.js:93</span>, <span class="cite">4. Feature Requests/skill.js:180</span>, <span class="cite">4. Feature Requests/skill.js:192</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>feedback · self-learning · 0 Claude calls (in-skill) · no discriminator</h5>
+    <p>Pure task, no model prompt of its own — it hands the owner's report to <code>captureFailure</code> (the Anthropic call, if any, happens inside <code>selflearning.js</code> <code>analyze</code>, not here). Result: <code>{ ok:true, reportPath, title }</code>; failure <code>{ ok:false, reason:"logFailed" }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">5. Feedback/skill.js:34</span>, <span class="cite">5. Feedback/skill.js:118</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>flight_search · Kiwi MCP · 0 Claude calls · discriminator: intent</h5>
+    <p>Pure task, no model prompt. Variants by <code>intent</code>: search / link / book / other. It only SEARCHES, never buys. Result: search → <code>{ options:[{n,summary,price,bookingUrl}], count }</code>; link → <code>{ ok:true, option:n }</code>; book → <code>{ ok:false, reason:"cannotBook" }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">6. Flight Search/skill.js:32</span>, <span class="cite">6. Flight Search/skill.js:363</span>, <span class="cite">6. Flight Search/skill.js:412</span>.</p>
+  </div>
+
+  <div class="card">
+    <h5>assistant_settings · Redis settings · 0 Claude calls · no discriminator</h5>
+    <p>Pure task, no model prompt. Changes the trigger tag(s) the owner summons her with; proposes the full new list and applies only on a yes. On success it logs a status string <code>settings: tags -&gt; … (persisted: …, retired: …)</code> (never the return object). Result: <code>{ ok:true, persisted, tags:[…], retired:[…] }</code>; failure <code>{ ok:false }</code>.</p>
+    <p class="prov">Provenance: <span class="cite">7. Assistant Settings/skill.js:40</span>, <span class="cite">7. Assistant Settings/skill.js:93</span>, <span class="cite">7. Assistant Settings/skill.js:106</span>.</p>
+  </div>
+</section>
+
+<!-- ============================== PROMPTS ============================== -->
+<section id="prompts">
+  <h2>The 11 model-facing prompts</h2>
+  <p class="lede">Every prompt panel shows the template with interpolation points marked, a rendered example, and its <code>file:line</code> provenance. Long prompts sit in a scrollable panel so they never break the layout.</p>
+  <p><b>Count check.</b> 11 prompts across 7 live <code>messages.create</code> sites: <span class="cite">server.js:174</span> (#9), <span class="cite">lib/confirm.js:56</span> (#10), <span class="cite">router/router.js:155</span> (#1–#4 share it), <span class="cite">router/router.js:273</span> + <span class="cite">router/router.js:280</span> (#5–#6), <span class="cite">lib/selflearning.js:135</span> (#11), <span class="cite">4. Feature Requests/skill.js:180</span> (#8). Prompt #7 has no own call site — it is folded into #1.</p>
+
+  <h3 id="p1">#1 · Router SYSTEM — <code>buildRouterSystem(ownerName, catalog, tags)</code></h3>
+  <p>The router "prompt" is a template PLUS the runtime-assembled catalog: <code>describeInputs(catalog)</code> concatenates each skill's declared inputs AND each skill's own rulebook (including <a href="#p7">#7</a>). It is not one flat string.</p>
+  <details><summary>▶ template (interpolation points: ${ownerName}, ${tasks}, ${tags}, ${rulebooks})</summary>
+  <div class="body"><pre class="tpl">You are ${ownerName}'s secretary, and you HOLD THE CONVERSATION with him. On every
+incoming message you make ONE decision: keep talking, run a skill, or close …
+
+You do THREE things in one pass:
+(1) decide the next state — LISTEN, EXECUTE or DONE;
+(2) when you EXECUTE, pick the skill(s) and EXTRACT the first skill's declared inputs;
+(3) detect the conversation LANGUAGE.
+
+Available tasks:
+${tasks}                 &lt;-- describeInputs(catalog): the skill menu + each skill's INPUTS
+
+## THE FOUR STATES — "next"
+- "listen"  = send me the next message. The conversation stays open …
+- "execute" = run a skill now. Put the skill id(s) in "skills" and the first skill's inputs in "info".
+- "answer"  = a direct QUESTION best answered by you (native web tools) …
+- "done"    = this conversation is over …
+
+## YOUR REPLY FORMAT — READ THIS CAREFULLY
+Reply with a SINGLE JSON object and NOTHING else:
+{"say": "&lt;prose&gt;" | null, "next": "listen"|"execute"|"done"|"answer",
+ "skills": ["&lt;id&gt;", ...], "info": { ... }, "lang": "&lt;iso639-1&gt;",
+ "awaitFrom": "owner"|"contact"|"any"}
+
+## YOUR TRIGGER TAGS (your own state)
+TAGS: ${tags}
+
+${rulebooks}             &lt;-- each skill's EXTRACTION RULES, verbatim (incl. the calendar rulebook, #7)</pre></div>
+  </details>
+  <details><summary>▶ rendered example (ownerName="Marcelo", tags="@mary, @assistente")</summary>
+  <div class="body"><pre class="ex">You are Marcelo's secretary, and you HOLD THE CONVERSATION with him …
+
+Available tasks:
+  - "calendar_action": create, edit/reschedule, or delete/cancel a meeting …
+      INPUTS (fill these into "info" if you pick this skill):
+        action: one of ["create","edit","delete","find","list"]
+        participants: array of {name: string, email: email|null}
+        start_iso: iso|null
+        …
+      CONVERSATION: this skill talks to him ITSELF …
+  - "transcribe_audio": transcribe an audio message …
+        (no inputs — this skill reads the conversation itself)
+  … (5 more skills) …
+
+## YOUR TRIGGER TAGS
+TAGS: @mary, @assistente
+
+============ EXTRACTION RULES for "calendar_action" (that skill's own rulebook) ==========
+Choosing "action": …  (prompt #7, folded in here)</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:28</span>; catalog assembled by <span class="cite">lib/inputs.js:124</span>.</p>
+
+  <h3 id="p2">#2 · Router USER (first turn) — <code>buildRouterUser(...)</code></h3>
+  <details open><summary>▶ template + rendered example</summary>
+  <div class="body">
+  <pre class="tpl">Current date/time: ${nowStr} (America/Sao_Paulo, -03:00).
+Contact of this conversation: ${contact || "(yourself)"}
+Replied-to (quoted) message: ${quotedText || "(none)"}
+Quoted audio in this message (a reply to an audio)? ${hasQuotedAudio ? "YES" : "NO"}
+Replied-to message contains a Google Calendar link? ${hasQuotedCalendarLink ? "YES" : "NO"}
+
+Recent conversation:
+${transcript || "(no history)"}
+
+${ownerName}'s order: ${order}
+${hasMedia ? "One or more files are attached …" : ""}
+Reply with the single JSON object described above, and nothing else.</pre>
+  <pre class="ex">Current date/time: Monday, 07/21/2026, 10:56 (America/Sao_Paulo, -03:00).
+Contact of this conversation: andre
+Replied-to (quoted) message: (none)
+Quoted audio in this message (a reply to an audio)? NO
+Replied-to message contains a Google Calendar link? NO
+
+Recent conversation:
+OTHER: Bora almoçar na terça?
+OTHER: Região de pinheiros
+OTHER: andre@zippi.com.br
+
+Marcelo's order: agendar 12:30
+Reply with the single JSON object described above, and nothing else.</pre>
+  </div></details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:146</span> (call site <span class="cite">router/router.js:125</span>).</p>
+
+  <h3 id="p3">#3 · Read-back USER — <code>buildReadbackUser(...)</code></h3>
+  <p>Reuses the router SYSTEM prompt (#1); only the user message differs. There is no <code>order</code> — the model reads its own dispatch back.</p>
+  <details><summary>▶ template + rendered example</summary>
+  <div class="body">
+  <pre class="tpl">Current date/time: ${nowStr} …
+Contact of this conversation: ${contact}
+
+Recent conversation:
+${transcript}
+
+You just executed a skill. Here is what it returned and what it already told ${ownerName}:
+
+RESULT: ${result || "(nothing)"}
+YOU ALREADY SAID: ${said || "(nothing)"}
+
+Decide what is left to do. Usually nothing … reply {"say": null, "next": "done"}.
+Remember: you may NOT "execute" on this turn.</pre>
+  <pre class="ex">RESULT: {"ok":true,"link":"https://www.google.com/calendar/event?eid=…","eventId":"…","reused":false}
+YOU ALREADY SAID: *[Assistente IA do Marcelo]:*  _Pronto! Convite criado e enviado: …_</pre>
+  </div></details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:179</span>.</p>
+
+  <h3 id="p4">#4 · Repair USER — <code>buildRepairUser(...)</code></h3>
+  <p>Reuses the router SYSTEM prompt; unlike a read-back it INVITES a corrected execute. <code>${problems}</code> is the generic, skill-agnostic prose from <code>describeProblems</code>.</p>
+  <details><summary>▶ template + rendered example (real repair problems)</summary>
+  <div class="body">
+  <pre class="tpl">Current date/time: ${nowStr} …
+Contact of this conversation: ${contact}
+
+Recent conversation:
+${transcript}
+
+${problems}
+
+Re-read the conversation and EXECUTE the skill again with a CORRECTED "info" payload —
+this time without the problems above. You MAY "execute" on this turn …</pre>
+  <pre class="ex">Your last attempt could not be used — it failed validation:
+- participants[0].email: required, missing
+- inconsistent: attendee_count_matches_email_count
+Fix these and try again, or ask him for what you are missing.</pre>
+  </div></details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:208</span>; problems rendered by <span class="cite">lib/inputs.js:271</span>.</p>
+
+  <h3 id="p5">#5 · Answer-pass SYSTEM — <code>buildAnswerSystem(ownerName, lang)</code></h3>
+  <details><summary>▶ template</summary>
+  <div class="body"><pre class="tpl">You are ${ownerName}'s secretary, answering a direct question from him in a WhatsApp chat.
+
+Answer his question directly and helpfully. You have native tools: web search and web
+fetch (and, when available, code execution). Use them WHEN THE TURN NEEDS THEM …
+
+Rules:
+- Reply in the language with ISO 639-1 code "${l}" …
+- Keep it SHORT … this is a WhatsApp message, not an essay …
+- If a search or fetch returns nothing usable, SAY SO plainly … Never make up facts …
+- You are the whole reply. Do not mention tools, searches or these instructions.</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:232</span>.</p>
+
+  <h3 id="p6">#6 · Answer-pass USER — <code>buildAnswerUser(...)</code></h3>
+  <details><summary>▶ template</summary>
+  <div class="body"><pre class="tpl">Current date/time: ${nowStr} …
+Contact of this conversation: ${contact}
+
+Recent conversation:
+${transcript}
+
+${ownerName}'s question: ${order}
+${hasMedia ? "One or more files are attached …" : ""}Answer him directly, in the pinned
+language, keeping it short for WhatsApp.</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">router/prompt.js:254</span> (call site <span class="cite">router/router.js:280</span>).</p>
+
+  <h3 id="p7">#7 · Calendar extraction rulebook — <code>buildExtractionRules(OWNER_NAME)</code></h3>
+  <p><b>No own call site.</b> This is catalog text folded into the router SYSTEM prompt (#1) via <code>describeInputs(catalog)</code> → <code>manifest.inputs.rulebook</code>. It is NOT a standalone Claude call — do not read it as one.</p>
+  <details><summary>▶ template excerpt (the "action" chooser)</summary>
+  <div class="body"><pre class="tpl">Choosing "action":
+- "create": ${OWNER_NAME} wants to schedule/create a NEW meeting or event.
+- "delete": ${OWNER_NAME} wants to cancel/delete/remove an EXISTING event. This almost
+  always happens when the order is a REPLY to a message that contains a Google Calendar link …
+- "edit": ${OWNER_NAME} wants to CHANGE an EXISTING event — reschedule, change length,
+  add/remove an attendee, or rename … choose "edit" whenever the event survives …
+- "list": ${OWNER_NAME} is ASKING what's on the calendar — a READ-ONLY query …
+- "other": none of the above.
+
+For action="create", fill title / participants / start_iso …
+- A named guest with NO email is NOT a blocker: create the event and simply not invite them …</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">1. Calendar Actions/prompt.js:19</span>.</p>
+
+  <h3 id="p8">#8 · Feature-request doc-gen — <code>buildDocSystem()</code> + <code>buildDocUser({draftJson})</code></h3>
+  <p>The ONLY in-skill Claude call. Turns the router-supplied brief (JSON) into a Markdown spec, ALWAYS in English.</p>
+  <details><summary>▶ template</summary>
+  <div class="body"><pre class="tpl">SYSTEM: You are a product writer. Turn the feature DRAFT (JSON) into a clean Markdown
+feature-spec document, written from the POINT OF VIEW OF THE USER.
+Output ONLY the Markdown document … Use exactly this skeleton …
+# &lt;Feature title&gt;
+## Summary
+## Problem / motivation
+## User flow (from the user's point of view)
+## Actors
+## Data &amp; services touched
+## Edge cases &amp; open questions
+
+USER: Feature DRAFT (JSON):
+${draftJson}</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">4. Feature Requests/prompt.js:14</span>, <span class="cite">4. Feature Requests/prompt.js:52</span>; call <span class="cite">4. Feature Requests/skill.js:180</span>.</p>
+
+  <h3 id="p9">#9 · Translation fallback SYSTEM — inline in <code>localizeBody</code></h3>
+  <details><summary>▶ the system string (rendered, ${l} = the target ISO code)</summary>
+  <div class="body"><pre class="tpl">Translate the user's message into the language with ISO 639-1 code "${l}". Output ONLY the
+translation — no preamble, no quotes, no notes. Preserve EXACTLY, unchanged: URLs, email
+addresses, numbers, dates, times, and every line break and bullet/dash character. Do NOT
+translate proper nouns (people's names, event titles). Translate the prose only and keep the
+original layout and formatting. If the message is ALREADY written entirely in that language,
+output it EXACTLY as received, verbatim …</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">server.js:170</span> (system string at <span class="cite">server.js:174</span>). en/pt pass through untranslated.</p>
+
+  <h3 id="p10">#10 · Confirm-first classifier — <code>buildConfirmSystem(action)</code> + <code>buildConfirmUser({transcript,latest})</code></h3>
+  <p>The WRITE guardrail. Linked from every write branch (calendar create/edit/delete, tasks apply). Uses <code>output_config</code> (a real JSON schema — unlike the router).</p>
+  <details><summary>▶ template + rendered example</summary>
+  <div class="body">
+  <pre class="tpl">SYSTEM: You decide whether the LATEST message is a response to a pending confirmation.
+The assistant asked to confirm: ${action}.
+Judge ONLY the latest message. Decide one "decision" value — "confirm", "decline", or
+"unrelated" (if unsure, "unrelated").
+
+USER: Recent conversation:
+${transcript}
+Latest message: ${latest}</pre>
+  <pre class="ex">SYSTEM: … The assistant asked to confirm: cancel the event "Pato e Debrito".
+USER: Latest message: sim
+→ {"decision":"confirm"}</pre>
+  </div></details>
+  <p class="prov">Provenance: <span class="cite">lib/confirm.js:33</span>, <span class="cite">lib/confirm.js:43</span>; call <span class="cite">lib/confirm.js:56</span>.</p>
+
+  <h3 id="p11">#11 · Self-learning <code>analyze</code> — inline system in <code>selflearning.js</code></h3>
+  <p>A best-effort, discardable "likely cause" hunch appended to a failure report. Own try/catch, returns <code>null</code> on error. Marked UNVERIFIED — not a main-path call.</p>
+  <details><summary>▶ the system string</summary>
+  <div class="body"><pre class="tpl">You are a senior engineer triaging a failure in a Node.js WhatsApp assistant (an Express
+webhook -&gt; LLM router -&gt; skills). Given the failure and recent logs, reply with 3-5 short
+lines: the LIKELY CAUSE and the SUSPECTED file/area. Be concrete, flag uncertainty plainly,
+and never invent file names you cannot infer from the evidence. Plain text, no preamble …</pre></div>
+  </details>
+  <p class="prov">Provenance: <span class="cite">lib/selflearning.js:132</span>; call <span class="cite">lib/selflearning.js:135</span>.</p>
+</section>
+
+<!-- ============================== WORKED TRACES ============================== -->
+<section id="traces">
+  <h2>Worked examples — real traces</h2>
+  <p class="lede">One end-to-end trace per use case, authored from the real self-learning failure reports on disk (<span class="cite">Bugs and Malfunctions/inbox/2026-07-16T18-32-20-soft-calendar-action.md</span> and siblings). Each hop is labelled <span class="tag tag-v">verbatim</span> (copied character-for-character from a named report line, redaction/truncation tokens preserved) or <span class="tag tag-r">reconstructed</span> (rebuilt from the real code shape). The two hops NO log ever captures — the skill's RESULT object and the framed reply SENT — are ALWAYS reconstructed. Each trace stamps its own capture date + shape, distinct from the page's build stamp, because log examples drift too.</p>
+
+  <!-- TRACE 1 -->
+  <div class="trace" id="t1">
+    <h4>1 · calendar_action — create</h4>
+    <p class="tmeta">capture 2026-07-16 13:56Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-16T18-32-20-soft-calendar-action.md:50</span> · PRE-MERGE router shape <code>{tasks,lang,info}</code></p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① inbound + transcript/ctx <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:36–49</span></p>
+      <pre>ME: @assistente transcrever
+ME: *[Assistente IA do Marcelo]:*
+_Aqui está o áudio transcrito: …_
+OTHER: Opa
+OTHER: Claro bora
+OTHER: Bora almoçar na terça?
+OTHER: Região de pinheiros
+OTHER: andre@zippi.com.br
+ME: @assistente agendar 12:30      &lt;-- the order (tag sliced off -&gt; "agendar 12:30")</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">② @ gate <span class="tag tag-r">reconstructed from real shape — server.js:367</span></p>
+      <pre>START: fromMe &amp;&amp; matchedTagNew("@assistente agendar 12:30") = "@assistente"
+order = "agendar 12:30"   ·   awaitFrom default "owner"</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:50 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["calendar_action"], "lang": "pt", "info": {"action": "create", "title": null,
+ "participants": [{"name": "andre", "email": "andre@zippi.com.br"}],
+ "start_iso": "2026-07-21T12:30:00-03:00", "duration_min": null, "all_day": false,
+ "all_day_end_iso": null, "summary": "Almoço na região de Pinheiros", "list_mode": null,
+ "range_start_iso": null, "range_end_iso": null, "recurrence": null}}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">④ dispatch <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:51</span></p>
+      <pre>ROUTER -&gt; tasks: ["calendar_action"] lang: pt      (dispatch to the calendar skill)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ skill RESULT object <span class="tag tag-r">reconstructed from real shape — 1. Calendar Actions/skill.js:940</span></p>
+      <pre>{ "ok": true, "link": "https://www.google.com/calendar/event?eid=…",
+  "eventId": "…", "reused": false }        &lt;-- NEVER logged; skill logs only on failure</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑥ read-back narration <span class="tag tag-r">reconstructed from real shape — router/prompt.js:179</span></p>
+      <pre>{"say": null, "next": "done"}    &lt;-- the skill already told him, so the model closes silently</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑦ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+
+_Pronto! Convite criado e enviado:_
+- _Almoço na região de Pinheiros_
+- _andre@zippi.com.br_
+- _21 de jul. de 2026, 12:30_</pre></div>
+  </div>
+
+  <!-- TRACE 2 -->
+  <div class="trace" id="t2">
+    <h4>2 · calendar_action — write variants (edit + delete)</h4>
+    <p class="tmeta">capture 2026-07-19 18:04Z / 2026-07-21 18:30Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-23T13-25-30-soft-calendar-action.md:459</span> &amp; <span class="cite">Bugs and Malfunctions/inbox/2026-07-23T13-25-30-soft-calendar-action.md:1133</span> · PRE-MERGE shape</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① order (edit) <span class="tag tag-v">verbatim — inbox/…2026-07-23…md:457</span></p>
+      <pre>ME: @assistente mude o titulo para Sosia em SJC     (reply to an event-link message)</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out (edit) <span class="tag tag-v">verbatim — inbox/…2026-07-23…md:459 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["calendar_action"], "lang": "pt", "info": {"action": "edit", "title": "Sosia em SJC",
+ "participants": [{"name": "Matheus", "email": null}], "start_iso": "2026-07-25T00:00:00-03:00",
+ "duration_min": null, "all_day": true, "all_day_end_iso": null, "summary": "", "list_mode": null,
+ "range_start_iso": null, "range_end_iso": null, "recurrence": null, "location": "SJC", "virtual": null}}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ skill intermediate (edit) <span class="tag tag-v">verbatim — inbox/…2026-07-23…md:461</span></p>
+      <pre>EDIT RAW: {"new_start_iso":null,"new_duration_min":null,"new_title":"Sosia em SJC",
+ "new_summary":null,"new_all_day":null,"add_emails":[],"remove_emails":[],"clarify":null,
+ "new_location":null,"new_virtual":null,"remove_location":false,"notify_guests":null}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ confirm-first classifier (write guardrail, prompt #10) <span class="tag tag-r">reconstructed from real shape — lib/confirm.js:53</span></p>
+      <pre>classifyConfirmation({action:"edit the event → 'Sosia em SJC'"})  →  latest "sim"  →  {"decision":"confirm"}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ skill RESULT (edit) <span class="tag tag-r">reconstructed from real shape — 1. Calendar Actions/skill.js:1130</span></p>
+      <pre>{ "ok": true, "eventId": "…" }</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">⑥ order + router JSON out (delete) <span class="tag tag-v">verbatim — inbox/…2026-07-23…md:1131 &amp; :1133</span></p>
+      <pre>ME: @assistente cancelar
+ROUTER RAW: {"tasks": ["calendar_action"], "lang": "pt", "info": {"action": "delete",
+ "title": "Pato e Debrito", "participants": [{"name": "Marcelo DBR", "email": "marcelodbr@gmail.com"}],
+ "start_iso": "2026-07-22T15:30:00-03:00", "duration_min": 30, "all_day": null, "all_day_end_iso": null,
+ "summary": "Cancelamento do evento Pato e Debrito", "list_mode": null, "range_start_iso": null,
+ "range_end_iso": null, "recurrence": null, "location": null, "virtual": null}}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑦ skill RESULT (delete) + reply SENT <span class="tag tag-r">reconstructed from real shape — 1. Calendar Actions/skill.js:1250</span></p>
+      <pre>{ "ok": true, "cancelled": 1 }
+→ *[Assistente IA do Marcelo]:*  _Evento cancelado: Pato e Debrito, 22 de jul. de 2026, 15:30._</pre></div>
+  </div>
+
+  <!-- TRACE 3 -->
+  <div class="trace" id="t3">
+    <h4>3 · transcribe_audio</h4>
+    <p class="tmeta">capture 2026-07-16 13:49Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-16T18-32-20-soft-calendar-action.md:33</span> · PRE-MERGE shape · no declared inputs</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① order + transcript <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:31</span></p>
+      <pre>ME: @assistente transcrever      (a reply to an audio message)</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:33 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["transcribe_audio"], "lang": "pt", "info": {}}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ payload withheld <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:34</span></p>
+      <pre>ROUTER payload withheld: no declared inputs for this task
+       &lt;-- transcribe_audio has manifest.inputs=null → dispatched directly, extracts for itself</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ skill RESULT object <span class="tag tag-r">reconstructed from real shape — 2. Audio transcriptions/skill.js:161</span></p>
+      <pre>{ "ok": true, "delivered": "inline", "chars": 487 }     (over LONG_AUDIO_SEC → "file" instead)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+
+_Aqui está o áudio transcrito:_
+_Fala aí, Doutor Urbão! …_</pre></div>
+  </div>
+
+  <!-- TRACE 4 -->
+  <div class="trace" id="t4">
+    <h4>4 · task_action — create + list</h4>
+    <p class="tmeta">capture 2026-07-16 14:15Z / 14:21Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-16T18-32-20-soft-calendar-action.md:120</span> (create, pre-merge) &amp; <span class="cite">Bugs and Malfunctions/inbox/2026-07-16T18-32-20-soft-calendar-action.md:234</span> (list, MERGED shape)</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① router JSON out (create) <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:120 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["task_action"], "lang": "pt", "info": {"list_requested": false, "owner_done": false,
+ "ops": [{"kind": "create", "title": "Assinar documento na Buser",
+ "due_iso": "2026-07-17T00:00:00-03:00", "assignee": null,
+ "ref_text": "rubricar e assinar documento na portaria da Buser"}]}}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② skill intermediate (create) <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:122</span></p>
+      <pre>TASK PLAN RAW: {"list_requested":false,"owner_done":false,"ops":[{"kind":"create","target_index":null,
+ "candidate_indices":[],"ref_text":null,"title":"Rubricar todas as páginas (menos a última) e assinar
+ a última do documento na portaria da Buser","due_iso":"2026-07-17T09:00:00-03:00","assignee":null}]}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ router JSON out (list, MERGED shape) <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:234 (ROUTER RAW)</span></p>
+      <pre>{"say": null, "next": "execute", "skills": ["task_action"], "info": {"list_requested": true,
+ "owner_done": false, "ops": []}, "lang": "pt", "awaitFrom": "owner"}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">④ dispatch <span class="tag tag-v">verbatim — inbox/…2026-07-16…md:235</span></p>
+      <pre>TURN -&gt; {"next":"execute","skills":["task_action"],"hasSay":false}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ skill RESULT (create → apply, then list) <span class="tag tag-r">reconstructed from real shape — 3. Tasks/skill.js:311 &amp; :204</span></p>
+      <pre>apply: { "applied": [{"kind":"create","id":"…","title":"Rubricar … Buser","due":"2026-07-17"}], "failed": [] }
+list:  { "tasks": [{"id":"…","title":"Assinar documento na Buser","due":"2026-07-17"}] }</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑥ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+_Adicionei à sua lista:_
+_17/jul - Assinar documento na Buser_</pre></div>
+  </div>
+
+  <!-- TRACE 5 -->
+  <div class="trace" id="t5">
+    <h4>5 · feature_request (the one in-skill Claude call)</h4>
+    <p class="tmeta">capture 2026-07-28 21:48Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-28T18-51-42-reported-feedback.md:163</span> · MERGED shape</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:163 (ROUTER RAW, truncated in the ring)</span></p>
+      <pre>{"say": null, "next": "execute", "skills": ["feature_request"], "info": {"title": "Google Contacts
+ CRUD Integration", "one_liner": "Assistant reads and writes Google Contacts to find and save
+ contact emails linked to WhatsApp phone numbers.", "problem": "The assistant often needs a
+ contact's email … but only has their WhatsApp phone number …", "trigger": "Runs automatically …",
+ "actors": ["Marcelo (owner)", "Assistant/orchestrator", "Google Contacts", "WhatsApp contacts …"],
+ "steps": ["Orchestrator determines it needs a contact's email …", … ],
+ "data_touched": "Google Contacts (CRUD), WhatsApp conversation content …",
+ "edge_cases": ["No contact found for the phone number — a new contact is created.",
+ "Contact has multiple emails saved — assistant asks Marcelo which one <span class="redact">… «truncated 483 chars»</span></pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② dispatch + doc-gen length <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:176 &amp; :177</span></p>
+      <pre>TURN -&gt; {"next":"execute","skills":["feature_request"],"hasSay":false}
+FEATURE DOC LEN: 2765        &lt;-- the ONLY logged trace of the doc-gen call (a length, not the object)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">③ skill RESULT object <span class="tag tag-r">reconstructed from real shape — 4. Feature Requests/skill.js:174</span></p>
+      <pre>{ "ok": true, "path": "New Features Plans/feature-google-contacts-crud-integration-….md",
+  "title": "Google Contacts CRUD Integration" }</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">④ read-back narration <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:178 (second ROUTER RAW)</span></p>
+      <pre>{"say":"_Spec salva! Feature 'Google Contacts CRUD Integration' documentada com trigger, fluxo,
+ edge cases e as respostas que você deu._","next":"listen","skills":[],"info":{},"lang":"pt","awaitFrom":"owner"}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+
+_Spec salva! Feature 'Google Contacts CRUD Integration' documentada com trigger, fluxo, edge cases
+e as respostas que você deu._</pre></div>
+  </div>
+
+  <!-- TRACE 6 -->
+  <div class="trace" id="t6">
+    <h4>6 · feedback (a reported failure IS this flow)</h4>
+    <p class="tmeta">capture 2026-07-28 21:51Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-28T18-51-42-reported-feedback.md:226</span> · MERGED shape · trigger=reported (human-verified)</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① report metadata + the owner's note <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:9 &amp; :13</span></p>
+      <pre>| Failed task | feedback |
+What the user asked: anote erro: eu comecei o chat em ingles e vc migrou pra português.
+ vc deve sempre falar na língua que a conversa começa</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:226 (ROUTER RAW)</span></p>
+      <pre>{"say": null, "next": "execute", "skills": ["feedback"], "info": {"note": "The owner started this
+ chat in English but the secretary switched to responding in Portuguese partway through the
+ conversation", "what_went_wrong": "The secretary replied in Portuguese even though the conversation
+ was originally started in English, switching languages mid-conversation", "expected": "The secretary
+ should always reply in the language the conversation started in, and never switch languages
+ mid-conversation", "suspected_skill": null}, "lang": "en", "awaitFrom": "owner"}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ dispatch <span class="tag tag-v">verbatim — inbox/…2026-07-28T18-51-42…md:227</span></p>
+      <pre>TURN -&gt; {"next":"execute","skills":["feedback"],"hasSay":false}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ skill RESULT object <span class="tag tag-r">reconstructed from real shape — 5. Feedback/skill.js:118</span></p>
+      <pre>{ "ok": true, "reportPath": "Bugs and Malfunctions/inbox/2026-07-28T…-reported-feedback.md",
+  "title": "language switched mid-conversation" }        (this very report is the artifact)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Marcelo's AI Assistant]:*
+
+_Logged it — thanks. I'll keep the whole conversation in the language it started in._</pre></div>
+  </div>
+
+  <!-- TRACE 7 -->
+  <div class="trace" id="t7">
+    <h4>7 · assistant_settings</h4>
+    <p class="tmeta">capture 2026-07-27 20:07Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-27T22-55-49-unrouted-router.md:295</span> · PRE-MERGE shape</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① order <span class="tag tag-v">verbatim — inbox/…2026-07-27T22-55-49…md:293</span></p>
+      <pre>ME: @assistant change your name to Judith</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-27T22-55-49…md:295 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["assistant_settings"], "lang": "en", "info": {}}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ skill intermediate (proposed tags) <span class="tag tag-v">verbatim — inbox/…2026-07-27T22-55-49…md:298</span></p>
+      <pre>SETTINGS PROPOSE RAW: {"tags":["@assistente","@judith"],"reasoning":"Você pediu pra trocar o nome
+ pra Judith usando o gatilho em inglês @assistant, então troco esse por @judith. …"}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ skill RESULT object (after a yes) <span class="tag tag-r">reconstructed from real shape — 7. Assistant Settings/skill.js:106</span></p>
+      <pre>{ "ok": true, "persisted": true, "tags": ["@assistente","@judith"], "retired": ["@assistant"] }
+       (on success the skill logs the status string  settings: tags -&gt; …  at skill.js:93 — never this object)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT <span class="tag tag-r">reconstructed from real shape — lib/format.js:48</span></p>
+      <pre>*[Marcelo's AI Assistant]:*
+_Done — you can now call me @judith or @assistente._</pre></div>
+  </div>
+
+  <!-- TRACE 8 -->
+  <div class="trace" id="t8">
+    <h4>8 · the answer pass (native tools)</h4>
+    <p class="tmeta">no verbatim happy-path report on disk — reconstructed from the real code shape of <code>answer()</code></p>
+    <div class="hop hop-reconstructed"><p class="hoptitle">① order <span class="tag tag-r">reconstructed from real shape — router/router.js:243</span></p>
+      <pre>ME: @mary what's the current USD→BRL rate?      (a direct question no skill owns)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">② router JSON out <span class="tag tag-r">reconstructed from real shape — router/router.js:179</span></p>
+      <pre>{"say": null, "next": "answer", "skills": [], "info": {}, "lang": "en", "awaitFrom": "owner"}</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">③ answer pass with native tools <span class="tag tag-r">reconstructed from real shape — router/router.js:273</span></p>
+      <pre>tools = [web_search_20260209, web_fetch_20260209]      (buildNativeTools, nativeTools.js:37)
+first create() → stop_reason "pause_turn" → resume [user, assistant(content)] (hop 1 of ≤4)
+second create() → text answer</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ answer() return <span class="tag tag-r">reconstructed from real shape — router/router.js:307</span></p>
+      <pre>{ "text": "About R$5.43 to the dollar right now.", "lang": "en", "hops": 1, "outcome": "ok" }</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT (inline, same message) <span class="tag tag-r">reconstructed from real shape — server.js:746</span></p>
+      <pre>*[Marcelo's AI Assistant]:*
+_About R$5.43 to the dollar right now._</pre></div>
+  </div>
+
+  <!-- TRACE 9 -->
+  <div class="trace" id="t9">
+    <h4>9 · the degraded "didn't understand" close</h4>
+    <p class="tmeta">capture 2026-07-15 16:23Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-15T13-23-35-unrouted-router.md:237</span> · PRE-MERGE shape (merged equivalent: <code>next:"done"</code> degraded)</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① order <span class="tag tag-v">verbatim — inbox/…2026-07-15…md:235</span></p>
+      <pre>ME: @assistente conte uma piada       ("tell a joke" — nothing any skill owns)</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out <span class="tag tag-v">verbatim — inbox/…2026-07-15…md:237 (ROUTER RAW)</span></p>
+      <pre>{"tasks": ["other"], "lang": "pt", "info": {}}      &lt;-- routed to "other" → the degraded menu</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ dispatch decision <span class="tag tag-v">verbatim — inbox/…2026-07-15…md:239</span></p>
+      <pre>ROUTER -&gt; tasks: ["other"] lang: pt</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">④ reply SENT — the "didn't understand" menu <span class="tag tag-r">reconstructed from real shape — server.js:774</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+
+Não entendi o que você quer que eu faça. Habilidades disponíveis: calendar_action,
+transcribe_audio, task_action, feature_request, feedback, flight_search, assistant_settings.</pre>
+      <p class="foot">The menu string is cross-checked verbatim inside a later turn's transcript at <span class="cite">Bugs and Malfunctions/inbox/2026-07-28T18-51-42-reported-feedback.md:192</span>. An unrouted report also fires the self-learning capture (server.js:776).</p></div>
+  </div>
+
+  <!-- TRACE 10 -->
+  <div class="trace" id="t10">
+    <h4>10 · the repair loop (repair give-up)</h4>
+    <p class="tmeta">capture 2026-07-28 13:23Z · report <span class="cite">Bugs and Malfunctions/inbox/2026-07-28T10-23-43-repair-giveup-calendar-action.md:1118</span> · MERGED shape</p>
+    <div class="hop hop-verbatim"><p class="hoptitle">① order <span class="tag tag-v">verbatim — inbox/…2026-07-28T10-23-43…md:1111</span></p>
+      <pre>ME: @mary agende virtual mas nao precisa criar link.
+    <span class="redact">… «truncated 540 chars»</span>   (long transcript line, cut by the ring at 2000 chars)</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">② router JSON out (email missing) <span class="tag tag-v">verbatim — inbox/…2026-07-28T10-23-43…md:1116 (ROUTER RAW)</span></p>
+      <pre>{"say": null, "next": "execute", "skills": ["calendar_action"], "info": {"action": "create",
+ "query": null, "event_id": null, "title": "Marcelo e Laura X British",
+ "participants": [{"name": "Laura", "email": null}], "start_iso": "2026-08-26T15:30:00-03:00",
+ "duration_min": null, "all_day": false, "all_day_end_iso": null, "summary": "", "list_mode": null,
+ "range_start_iso": null, "range_end_iso": null, "recurrence": null, "location": null,
+ "virtual": true}, "lang": "pt", "awaitFrom": "owner"}</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">③ orchestrator repair (validation failed) <span class="tag tag-v">verbatim — inbox/…2026-07-28T10-23-43…md:1118</span></p>
+      <pre>ORCHESTRATOR repair: participants[0].email: required, missing; inconsistent: attendee_count_matches_email_count</pre></div>
+    <div class="hop hop-verbatim"><p class="hoptitle">④ repair re-route (model re-emits same payload) <span class="tag tag-v">verbatim — inbox/…2026-07-28T10-23-43…md:1119 (second ROUTER RAW)</span></p>
+      <pre>{"say": null, "next": "execute", "skills": ["calendar_action"], "info": {"action": "create", …
+ "participants": [{"name": "Laura", "email": null}], … "virtual": true}, "lang": "pt", "awaitFrom": "owner"}
+       &lt;-- unchanged: repairs hit MAX_REPAIRS (2) → repair_giveup (report trigger)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">⑤ reply SENT (repair give-up apology) <span class="tag tag-r">reconstructed from real shape — server.js:835</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+_Não consegui acertar isso depois de algumas tentativas. Pode me dizer de novo, de forma mais simples?_</pre></div>
+  </div>
+
+  <!-- TRACE 11 -->
+  <div class="trace" id="t11">
+    <h4>11 · a media-prep rejection (size cap)</h4>
+    <p class="tmeta">no verbatim report on disk — reconstructed from the real caps in <code>server.js</code></p>
+    <div class="hop hop-reconstructed"><p class="hoptitle">① inbound (a 40 MB PDF, captioned) <span class="tag tag-r">reconstructed from real shape — server.js:348</span></p>
+      <pre>attachment: application/pdf, 41.9 MB   ·   caption: "@mary qual o cnpj do pdf?"</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">② media prep — cap check <span class="tag tag-r">reconstructed from real shape — server.js:633</span></p>
+      <pre>bytes = 41,943,040 &gt; PDF_MAX_BYTES (32 MB)  →  problems.add("fileTooLarge")
+relayedBlocks.length === 0  →  notes sent, closeMarker(), return (no routing)</pre></div>
+    <div class="hop hop-reconstructed"><p class="hoptitle">③ reply SENT (per-reason notice) <span class="tag tag-r">reconstructed from real shape — server.js:652</span></p>
+      <pre>*[Assistente IA do Marcelo]:*
+_Esse arquivo é grande demais para eu ler. Pode mandar um menor, ou um print?_</pre></div>
+  </div>
+</section>
+
+<section id="drift">
+  <h2>Drift &amp; honesty</h2>
+  <p>This is a hand-authored snapshot; it rots as the code changes. Mitigations baked in: a <code>file:line</code> citation on every block, prompt and hop, and the build-time commit stamp at the top (<code>aca9c96</code>). A maintainer who suspects drift can jump straight to the cited source.</p>
+  <p>Two honesty rules govern the traces, and both are load-bearing:</p>
+  <ul>
+    <li><b>Two hops are NEVER logged</b> — the skill's successful RESULT object and the framed reply actually SENT to WhatsApp. Both are always labelled <span class="tag tag-r">reconstructed</span>, rebuilt from the skill's own <code>skill.js</code> return shape and from <code>frame()</code>. Two skills DO log on success, but only a status string / a length (<span class="cite">7. Assistant Settings/skill.js:93</span>, <span class="cite">4. Feature Requests/skill.js:192</span>), never the return object.</li>
+    <li><b>Redaction and truncation are preserved verbatim.</b> A <code>«redacted:…»</code> secret or a <code>«truncated N chars»</code> cut is never "completed" to make a trace look whole (<span class="cite">lib/logbuffer.js:40</span>). Reports are also partial — the ring holds 500 entries and cuts lines at 2000 chars — so a missing hop is shown as a gap, never invented.</li>
+  </ul>
+  <p>Router-shape drift is its own axis: older captures carry the pre-merge <code>{tasks,lang,info}</code> shape and newer ones the merged <code>{say,next,skills,info,lang,awaitFrom}</code> shape. Both appear on disk, so every trace stamps its own capture date + shape above.</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>

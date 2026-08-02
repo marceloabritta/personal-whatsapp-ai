@@ -145,7 +145,11 @@ def main() -> int:
     cid = post(port, "/api/card", {"title": "Pause me", "description": "mid-flight",
                                    "pipeline": "plan", "kind": "feature"})["id"]
     asyncio.run(send_ws(port, {"type": "message", "card_id": cid, "text": "start"}))
-    time.sleep(1.4)  # the mock walks the columns with a pause at each: this lands mid-run
+    # Wait until the card is genuinely mid-run (busy), so the pause lands while work is in
+    # flight — it finishes the Idea column it is in, then winds down before the Plan gate.
+    deadline = time.time() + 10
+    while time.time() < deadline and not get(port, f"/api/card/{cid}")["busy"]:
+        time.sleep(0.05)
     check("the card is being worked", get(port, f"/api/card/{cid}")["busy"] is True)
 
     section("pause it")
@@ -159,7 +163,9 @@ def main() -> int:
     paused_card = get(port, f"/api/card/{cid}")
     paused_col = paused_card["column"]
     check("the card is no longer busy", paused_card["busy"] is False)
-    check("it stopped short of the gate", paused_card["gate"] is False)
+    # It wound down before the Plan worker ever ran — the plan was never written, so this is a
+    # genuine mid-flight stop, not a card that quietly finished on its way down.
+    check("it stopped before finishing the plan", not os.path.exists(os.path.join(paused_card["abs_dir"], "PLAN.md")))
     check("and it is owed a carry-on when work resumes", st["pending"] >= 1)
 
     # The point of a pause: it does not creep on. Give it long enough to walk several more

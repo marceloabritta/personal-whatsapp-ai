@@ -113,7 +113,7 @@ async def main() -> int:
         "the artifact inside the card folder survived",
         os.path.isfile(os.path.join(reloaded.abs_dir(survivor), "IDEA.md")),
     )
-    check("the columns survived", len(reloaded.pipelines.columns[PLAN]) == 6)
+    check("the columns survived", len(reloaded.pipelines.columns[PLAN]) == 2)
 
     # -----------------------------------------------------------------
     section("migrations are idempotent")
@@ -158,33 +158,33 @@ async def main() -> int:
     pboard = update.board_for(p)  # scaffolds every worker from the defaults
     store = pboard.workers
 
-    untouched = store.path("plan", "scoping")
-    customized = store.path("plan", "planning")
+    untouched = store.path("plan", "idea")
+    customized = store.path("plan", "plan")
     mine = read(customized) + "\n- ALSO: always list the competitors. (my own rule)\n"
     with open(customized, "w", encoding="utf-8") as fh:
         fh.write(mine)
 
-    check("a scaffolded worker has a baseline snapshot", os.path.isfile(store.baseline_path("plan", "scoping")))
+    check("a scaffolded worker has a baseline snapshot", os.path.isfile(store.baseline_path("plan", "idea")))
 
     # upstream improves BOTH prompts
     defaults = all_defaults()
-    defaults["plan/scoping"] += "\n- NEW UPSTREAM RULE: name the prior art.\n"
-    defaults["plan/planning"] += "\n- NEW UPSTREAM RULE: record the commit SHA.\n"
+    defaults["plan/idea"] += "\n- NEW UPSTREAM RULE: name the prior art.\n"
+    defaults["plan/plan"] += "\n- NEW UPSTREAM RULE: record the commit SHA.\n"
 
     result = prompts.sync(store, defaults=defaults)
     actions = {c.key: c.action for c in result.changes}
 
-    check("the prompt I never touched took the improvement", actions["plan/scoping"] == prompts.UPDATED)
+    check("the prompt I never touched took the improvement", actions["plan/idea"] == prompts.UPDATED)
     check("...and the new rule is really in my file now", "NEW UPSTREAM RULE" in read(untouched))
-    check("the prompt I edited was KEPT", actions["plan/planning"] == prompts.KEPT)
+    check("the prompt I edited was KEPT", actions["plan/plan"] == prompts.KEPT)
     check("...my edit is still there", "my own rule" in read(customized))
     check("...and upstream's change did NOT overwrite it", "NEW UPSTREAM RULE" not in read(customized))
-    check("...but I am told about it, with a diff", bool([c for c in result.kept if c.key == "plan/planning"][0].diff))
-    check("an unchanged prompt is reported as such", actions["plan/ideas"] == prompts.UNCHANGED)
+    check("...but I am told about it, with a diff", bool([c for c in result.kept if c.key == "plan/plan"][0].diff))
+    check("an unchanged prompt is reported as such", actions["maint/report"] == prompts.UNCHANGED)
 
     report = prompts.write_report(os.path.join(p.path, "PROMPT_CHANGES.md"), result, "9.9.9")
     check("the diffs I have not taken are written where I can read them", os.path.isfile(report))
-    check("the report names the prompt", "plan/planning" in read(report))
+    check("the report names the prompt", "plan/plan" in read(report))
 
     # -----------------------------------------------------------------
     section("two projects cannot silently share one working folder")
@@ -244,15 +244,19 @@ async def main() -> int:
     ids = [c["id"] for c in adopted_board["cards"]]
     check("the old install's cards came across", ids == ["oldcard1", "oldcard2"])
     check("their threads came across", adopted_board["cards"][0]["thread"][0]["text"] == "the human said this")
+    # m0008 re-homes every card off a now-deleted column: (plan, scoping) collapses to
+    # (plan, plan), and the folder moves on disk with it.
     check(
         "their card FOLDERS came across, with the work in them",
-        os.path.isfile(os.path.join(target.path, "cards", "plan", "scoping", "oldcard1-legacy-card", "SCOPE.md")),
+        os.path.isfile(os.path.join(target.path, "cards", "plan", "plan", "oldcard1-legacy-card", "SCOPE.md")),
     )
     check(
         "the human's hand-tuned prompt came across, unmodified",
         "MY OWN RULE" in read(os.path.join(target.workers_dir, "plan", "scoping.md")),
     )
-    check("their custom column came across", len(json.load(open(os.path.join(target.path, "pipelines.json")))["plan"]) == 7)
+    # The old install's review columns are collapsed into the new two-column plan by m0008;
+    # what must survive is the cards and their work, not the extinct column list.
+    check("the board was reshaped to the new plan columns", len(json.load(open(os.path.join(target.path, "pipelines.json")))["plan"]) == 2)
     check("it was migrated forward to the current schema", target.schema_version() == migrations.LATEST)
     check("the board is now servable", update.preflight(target) == [])
     check("the OLD INSTALL WAS NOT TOUCHED", os.path.isfile(os.path.join(old_install, "data", "board.json")))
@@ -266,7 +270,9 @@ async def main() -> int:
         not os.path.isfile(adopted_store.baseline_path("plan", "scoping")),
     )
     newer = all_defaults()
-    newer["plan/scoping"] += "\n- an upstream improvement, two versions later\n"
+    # Upstream ships a later version of the same prompt they hand-tuned. Because their file has
+    # no baseline (we could not prove they didn't write it), their version must still win.
+    newer["plan/scoping"] = read(adopted_store.path("plan", "scoping")) + "\n- an upstream improvement, two versions later\n"
     later = prompts.sync(adopted_store, defaults=newer)
     check(
         "so a LATER upgrade still keeps their version",
