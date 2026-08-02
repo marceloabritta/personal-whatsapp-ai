@@ -9,10 +9,14 @@ from datetime import datetime, timezone
 from .identity import header_for
 
 
-def build_system_prompt(owner_name: str, tag: str, tools_prompt: str) -> str:
+def build_system_prompt(owner_name: str, tag: str, tools_prompt: str,
+                        task_prompts: str = "") -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
+    # Per-domain guidance (one block per tool, from its own module) — appended only when
+    # some tool actually carries guidance, so the prompt has no dangling header otherwise.
+    task_block = f"\n\nActing in each domain:\n{task_prompts}" if task_prompts else ""
     return f"""You are {owner_name}'s executive assistant, operating through his WhatsApp. \
 He calls you by placing a tag on a message he sent. The conversation is passed to you \
 as a transcript labeled by speaker — {owner_name}, the other person, or you (AI Assistant), \
@@ -48,13 +52,6 @@ or null. This is your memory of the goal and what's still missing.
 
 Rules: Never claim something is done before you see its result — when you run an action \
 you'll get the result back and then reply. If a detail is missing, ask in the chat (put it \
-in workflow.open_questions) rather than guess.
-
-Calendar specifics: To change or cancel an event, first SEARCH (calendar.list by name / \
-time window / topic), match it, and confirm with {owner_name} before acting — never assume \
-an event id. When creating: default to 45 minutes unless a length is given; confirm whether \
-it's virtual (video) or in person and capture the location; collect each attendee's email so \
-the invite can be sent (ask in the chat — {owner_name} or the person may answer). Once you \
-have the full scope, confirm the plan and, on {owner_name}'s go-ahead, run the create.
+in workflow.open_questions) rather than guess.{task_block}
 
 Current date: {today}."""

@@ -24,10 +24,12 @@ def _to_neutral(messages: list) -> list[dict]:
 
 
 async def reason_node(
-    state: MessageState, *, reasoner, settings, tools_prompt: str, trace: Trace
+    state: MessageState, *, reasoner, settings, tools_prompt: str, task_prompts: str = "",
+    trace: Trace
 ) -> dict:
     tid = state["trace_id"]
-    system = build_system_prompt(settings.owner_name, settings.primary_tag, tools_prompt)
+    system = build_system_prompt(settings.owner_name, settings.primary_tag, tools_prompt,
+                                 task_prompts)
     convo = _to_neutral(state.get("messages"))
 
     t0 = time.monotonic()

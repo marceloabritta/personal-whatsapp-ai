@@ -31,7 +31,8 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node("context", partial(context_node, evolution=deps.evolution,
                                   settings=deps.settings, trace=deps.trace))
     g.add_node("reason", partial(reason_node, reasoner=deps.reasoner, settings=deps.settings,
-                                 tools_prompt=deps.tools_prompt, trace=deps.trace))
+                                 tools_prompt=deps.tools_prompt, task_prompts=deps.task_prompts,
+                                 trace=deps.trace))
     g.add_node("execute", partial(execute_node, tools=deps.tools, settings=deps.settings,
                                   trace=deps.trace))
     g.add_node("act", partial(act_node, evolution=deps.evolution, sessions=deps.sessions,
