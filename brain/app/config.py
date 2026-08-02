@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 8192
     web_search_max_uses: int = 5
 
-    prompt_version: str = "2026-08-02.1"
+    prompt_version: str = "2026-08-02.2"
 
     @property
     def tags(self) -> list[str]:

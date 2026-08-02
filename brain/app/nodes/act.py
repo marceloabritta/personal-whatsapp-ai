@@ -9,7 +9,6 @@ The sign-off is appended HERE (never by the model) so it's always verbatim."""
 from __future__ import annotations
 
 from ..identity import frame
-from ..prompt import signoff_for, strip_trailing_signoff
 from ..state import MessageState
 from ..trace import Trace
 
@@ -28,18 +27,9 @@ async def act_node(
     delivery = "silent"
 
     if body:
+        # Send the model's message exactly as it decided — no programmatic trailer.
+        # If it wrote a farewell on close, fine; if not, also fine.
         text = body.rstrip()
-        if llm_state == "close":
-            # Deterministic single sign-off: drop any farewell the model added
-            # (it references the tag), then append the canonical line exactly once.
-            canonical = signoff_for(settings.primary_tag)
-            core = strip_trailing_signoff(body, settings.tags)
-            if canonical.lower() in core.lower():
-                text = core
-            elif core:
-                text = f"{core}\n\n{canonical}"
-            else:
-                text = canonical
         reply = frame(text, settings.owner_name)
         sent = await evolution.send_text(number, reply)
         delivery = "ok" if sent else "failed"

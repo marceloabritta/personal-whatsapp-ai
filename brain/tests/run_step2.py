@@ -19,7 +19,6 @@ from app.config import Settings  # noqa: E402
 from app.deps import Deps  # noqa: E402
 from app.graph import build_graph  # noqa: E402
 from app.identity import frame  # noqa: E402
-from app.prompt import signoff_for  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
 from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
@@ -125,18 +124,16 @@ async def main() -> None:
     check("memory carried prior turns", any(
         m["role"] == "assistant" and "On it" in m["content"] for m in stub.calls[-1]["messages"]))
 
-    print("4. model closes AND writes its own @mary farewell → single sign-off")
+    print("4. model closes with a message → sent AS-IS (no programmatic trailer)")
     stub.script = [{"state": "close",
-                    "message": "Glad I could help!\n\nJust tag me with @mary anytime you need me.",
+                    "message": "Glad I could help! Talk soon 👋",
                     "usage": {}, "provider_request_id": "req_4", "stop_reason": "end_turn",
                     "tool_calls": [], "error_category": "none"}]
     await invoke(graph, upsert("@mary thanks", mid="a4"))
     sent = evo.sent[-1][1]
     check("closing reply sent", len(evo.sent) == 3)
-    check("canonical sign-off present", signoff_for("@mary") in sent)
-    check("sign-off NOT doubled", sent.count("signing off here") == 1)
-    check("model's own farewell stripped", "Just tag me with" not in sent)
-    check("kept the real content", "Glad I could help!" in sent)
+    check("message sent verbatim", "Glad I could help! Talk soon 👋" in sent)
+    check("no programmatic trailer added", "signing off here" not in sent)
     check("window closed", not deps.sessions.is_open(OWNER_JID))
     rc = [e for e in deps.trace.events if e.get("node") == "record"][-1]
     check("record close_reason == model", rc.get("close_reason") == "model")
