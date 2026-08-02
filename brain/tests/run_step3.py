@@ -33,6 +33,22 @@ def check(name, cond):
     _c["pass" if cond else "fail"] += 1
 
 
+def _count_unions(node):
+    """Params with anyOf or type:array — Anthropic structured outputs cap this at 16."""
+    n = 0
+    if isinstance(node, dict):
+        if "anyOf" in node:
+            n += 1
+        if node.get("type") == "array":
+            n += 1
+        for v in node.values():
+            n += _count_unions(v)
+    elif isinstance(node, list):
+        for v in node:
+            n += _count_unions(v)
+    return n
+
+
 class StubReasoner:
     def __init__(self):
         self.calls = 0
@@ -187,6 +203,17 @@ async def main():
     tasks = {b["properties"]["task"]["const"] for b in sch["properties"]["actions"]["items"]["anyOf"]}
     check("schema exposes all 4 calendar tasks",
           tasks == {"calendar.create", "calendar.list", "calendar.update", "calendar.delete"})
+    per_verb = {b["properties"]["task"]["const"]: set(b["properties"]["inputs"]["required"])
+                for b in sch["properties"]["actions"]["items"]["anyOf"]}
+    check("create requires title+start", per_verb["calendar.create"] == {"title", "start"})
+    check("update/delete require event_id",
+          per_verb["calendar.update"] == {"event_id"} and per_verb["calendar.delete"] == {"event_id"})
+    check("list requires nothing", per_verb["calendar.list"] == set())
+
+    print("9. schema stays under Anthropic's 16 union/array-param cap (the outage guard)")
+    n_unions = _count_unions(sch)
+    print(f"     union/array-typed params: {n_unions}")
+    check("<= 16 union/array params", n_unions <= 16)
 
     print(f"\n{_c['pass']} passed, {_c['fail']} failed")
     sys.exit(1 if _c["fail"] else 0)
