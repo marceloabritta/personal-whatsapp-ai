@@ -324,6 +324,198 @@ async def graph_checks() -> None:
     check("[bound] read-back stopped at max_tool_actions", cal.n("find") == 2)
 
 
+# ===================== P3 — the Google Calendar handler (fake service) =====================
+
+class _GErr(Exception):
+    """Mimic a googleapiclient HttpError carrying resp.status."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"http {status}")
+        self.resp = type("R", (), {"status": status})()
+
+
+class _Req:
+    def __init__(self, result=None, raises=None) -> None:
+        self._r, self._e = result, raises
+
+    def execute(self):
+        if self._e:
+            raise self._e
+        return self._r
+
+
+class _Events:
+    def __init__(self, store: dict, raise_on: dict | None = None) -> None:
+        self.store = store
+        self.raise_on = raise_on or {}
+        self.calls: list = []
+
+    def list(self, **kw):
+        self.calls.append(("list", kw))
+        items = list(self.store["items"])
+        q = kw.get("q")
+        if q:
+            def hay(e):
+                return (e.get("summary", "") + " " + (e.get("location") or "") + " "
+                        + " ".join(a.get("email", "") for a in e.get("attendees") or [])).lower()
+            items = [e for e in items if q.lower() in hay(e)]
+        return _Req({"items": items})
+
+    def insert(self, **kw):
+        self.calls.append(("insert", kw))
+        if "insert" in self.raise_on:
+            return _Req(raises=self.raise_on["insert"])
+        ev = dict(kw["body"])
+        ev["id"] = "NEW1"
+        ev["htmlLink"] = "http://cal/NEW1"
+        if kw.get("conferenceDataVersion"):
+            ev["hangoutLink"] = "http://meet.google.com/abc-defg-hij"
+        self.store["items"].append(ev)
+        return _Req(ev)
+
+    def get(self, **kw):
+        self.calls.append(("get", kw))
+        if "get" in self.raise_on:
+            return _Req(raises=self.raise_on["get"])
+        for e in self.store["items"]:
+            if e.get("id") == kw["eventId"]:
+                return _Req(e)
+        return _Req(raises=_GErr(404))
+
+    def patch(self, **kw):
+        self.calls.append(("patch", kw))
+        for e in self.store["items"]:
+            if e.get("id") == kw["eventId"]:
+                e.update(kw["body"])
+                return _Req(e)
+        return _Req(raises=_GErr(404))
+
+    def delete(self, **kw):
+        self.calls.append(("delete", kw))
+        self.store["items"] = [e for e in self.store["items"] if e.get("id") != kw["eventId"]]
+        return _Req({})
+
+
+class FakeGoogle:
+    def __init__(self, items=None, raise_on=None) -> None:
+        self.store = {"items": list(items or [])}
+        self._events = _Events(self.store, raise_on)
+
+    def events(self):
+        return self._events
+
+
+def _ev(eid, summary, start, end, attendees=None, location=None):
+    return {"id": eid, "summary": summary,
+            "start": {"dateTime": start}, "end": {"dateTime": end},
+            "attendees": [{"email": a} for a in attendees or []],
+            "location": location}
+
+
+def _cal_handler(items=None, raise_on=None):
+    from app.tools.calendar import GoogleCalendarService
+    h = GoogleCalendarService(Settings())
+    h._svc = FakeGoogle(items, raise_on)
+    return h
+
+
+async def calendar_checks() -> None:
+    print("\nStep-3 P3 — Google Calendar handler (fake service)")
+    tz = Settings().calendar_timezone
+
+    # create: end defaults to start + 45; tz set; returns id.
+    h = _cal_handler()
+    r = await h.run("create", {"title": "Call Ana", "start": "2026-08-05T15:00:00-03:00",
+                               "confirmed": True})
+    body = next(kw["body"] for v, kw in h._svc.events().calls if v == "insert")
+    check("[create] ok + event_id", r.get("ok") and r["data"]["event_id"] == "NEW1")
+    check("[create] summary == 'Call Ana', tz stamped",
+          body["summary"] == "Call Ana" and body["start"]["timeZone"] == tz)
+    check("[create] end defaulted to start + 45min",
+          body["end"]["dateTime"] == "2026-08-05T15:45:00-03:00")
+
+    # create virtual: video wins (no location) + Meet link attached.
+    h = _cal_handler()
+    r = await h.run("create", {"title": "Sync", "start": "2026-08-05T09:00:00-03:00",
+                               "virtual": True, "location": "ignored", "confirmed": True})
+    ins = next(kw for v, kw in h._svc.events().calls if v == "insert")
+    check("[create] virtual drops location + requests Meet",
+          ins["body"]["location"] is None and "conferenceData" in ins["body"]
+          and ins.get("conferenceDataVersion") == 1)
+    check("[create] Meet link surfaced in result", "meet.google.com" in (r["data"]["meet_link"] or ""))
+
+    # create with attendees + send_invites False -> sendUpdates none.
+    h = _cal_handler()
+    r = await h.run("create", {"title": "1:1", "start": "2026-08-05T11:00:00-03:00",
+                               "attendees": ["ana@x.com"], "send_invites": False,
+                               "confirmed": True})
+    ins = next(kw for v, kw in h._svc.events().calls if v == "insert")
+    check("[create] attendees set + invites suppressed",
+          ins["body"]["attendees"] == [{"email": "ana@x.com"}] and ins["sendUpdates"] == "none")
+    check("[create] summary notes the invite count", "invited 1" in r["summary"])
+
+    # create validation.
+    r = await _cal_handler().run("create", {"start": "2026-08-05T15:00:00-03:00"})
+    check("[create] missing title -> validation error", r["ok"] is False and r["error"] == "validation")
+
+    # list: tz-aware timeMin (never naive -> Google 400).
+    import datetime as _dt
+    h = _cal_handler([_ev("L1", "Standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00")])
+    r = await h.run("list", {})
+    lm = next(kw["timeMin"] for v, kw in h._svc.events().calls if v == "list")
+    check("[list] timeMin is tz-aware", _dt.datetime.fromisoformat(lm).tzinfo is not None)
+    check("[list] returns items with ids in the summary",
+          r["data"]["items"][0]["event_id"] == "L1" and "[id=L1]" in r["summary"])
+
+    # find: full-text resolves the right event.
+    seed = [
+        _ev("D1", "Dentist appointment", "2026-08-07T15:00:00-03:00", "2026-08-07T16:00:00-03:00"),
+        _ev("T1", "Team standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00"),
+        _ev("P1", "Lunch", "2026-08-06T12:00:00-03:00", "2026-08-06T13:00:00-03:00",
+            attendees=["paulo@x.com"]),
+    ]
+    r = await _cal_handler(seed).run("find", {"query": "dentist"})
+    check("[find] full-text resolves the dentist event",
+          r["ok"] and r["data"]["items"][0]["event_id"] == "D1")
+    r = await _cal_handler(seed).run("find", {"query": "lunch", "attendee": "paulo@x.com"})
+    check("[find] person-anchored resolves the lunch", r["data"]["items"][0]["event_id"] == "P1")
+    # fuzzy fallback: a typo the substring pass misses, ranking still surfaces it.
+    r = await _cal_handler(seed).run("find", {"query": "dentst"})
+    check("[find] fuzzy fallback tolerates a typo",
+          r["ok"] and r["data"]["items"][0]["event_id"] == "D1")
+    r = await _cal_handler(seed).run("find", {"query": "nonexistent-zzz"})
+    check("[find] no match -> empty, still ok", r["ok"] and r["data"]["items"] == [])
+
+    # update: reschedule with only a new start preserves the original 60min duration.
+    h = _cal_handler([_ev("E1", "Review", "2026-08-06T15:00:00-03:00", "2026-08-06T16:00:00-03:00")])
+    r = await h.run("update", {"event_id": "E1", "start": "2026-08-06T18:00:00-03:00",
+                               "confirmed": True})
+    patch = next(kw["body"] for v, kw in h._svc.events().calls if v == "patch")
+    check("[update] get-then-patch ran", any(v == "get" for v, _ in h._svc.events().calls)
+          and r["ok"])
+    check("[update] original duration preserved (end = start + 60)",
+          patch["end"]["dateTime"] == "2026-08-06T19:00:00-03:00")
+    r = await _cal_handler().run("update", {"start": "2026-08-06T18:00:00-03:00"})
+    check("[update] missing event_id -> validation", r["ok"] is False and r["error"] == "validation")
+
+    # delete: removes the event, notifies attendees.
+    h = _cal_handler([_ev("E1", "Review", "2026-08-06T15:00:00-03:00", "2026-08-06T16:00:00-03:00")])
+    r = await h.run("delete", {"event_id": "E1", "confirmed": True})
+    dkw = next(kw for v, kw in h._svc.events().calls if v == "delete")
+    check("[delete] event removed", r["ok"] and h._svc.store["items"] == [])
+    check("[delete] attendees notified (sendUpdates=all)", dkw["sendUpdates"] == "all")
+
+    # error classification.
+    r = await _cal_handler(raise_on={"insert": _GErr(403)}).run(
+        "create", {"title": "X", "start": "2026-08-05T15:00:00-03:00", "confirmed": True})
+    check("[error] 403 -> auth", r["ok"] is False and r["error"] == "auth")
+    r = await _cal_handler(raise_on={"get": _GErr(404)}).run(
+        "update", {"event_id": "GONE", "start": "2026-08-05T15:00:00-03:00", "confirmed": True})
+    check("[error] 404 -> not_found", r["ok"] is False and r["error"] == "not_found")
+    r = await _cal_handler().run("teleport", {})
+    check("[error] unknown verb handled", r["ok"] is False and r["error"] == "unknown_verb")
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -332,4 +524,5 @@ def _finish() -> None:
 if __name__ == "__main__":
     unit_checks()
     asyncio.run(graph_checks())
+    asyncio.run(calendar_checks())
     _finish()
