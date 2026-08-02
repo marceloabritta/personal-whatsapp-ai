@@ -10,7 +10,7 @@ no `langgraph-api` server, no third-party MCP for transport.
 
 > 📖 **Full technical documentation** — architecture maps, call flow, JSON contracts, the
 > system prompt, logging, and the graph logic in plain language — lives in
-> [`docs/documentation.html`](docs/documentation.html) (open it in a browser).
+> [`Documentation/documentation.html`](../Documentation/documentation.html) (open it in a browser).
 
 ---
 
