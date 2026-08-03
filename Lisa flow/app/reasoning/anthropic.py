@@ -38,13 +38,9 @@ class AnthropicReasoner:
         return self._client
 
     def _tools(self) -> list[dict]:
-        # The model's server-side web tools. The _20260209 variants carry dynamic filtering,
-        # so we do NOT also declare code_execution (a second execution env would confuse it).
-        n = self.s.web_search_max_uses
-        return [
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": n},
-            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": n},
-        ]
+        # TESTING SPEED IMPROVEMENT: web tools removed from standard calls. They cost
+        # ~6.4k input tokens on every request even on turns that never touch the web.
+        return []
 
     async def respond(self, *, system: str, messages: list) -> ReasonResult:
         client = self._client_or_make()
@@ -60,13 +56,17 @@ class AnthropicReasoner:
                     max_tokens=self.s.claude_max_tokens,
                     system=system,
                     messages=convo,
-                    tools=self._tools(),
-                    thinking={"type": "adaptive"},
+                    # TESTING SPEED IMPROVEMENT: no adaptive thinking (Sonnet 5 default run).
+                    thinking={"type": "disabled"},
                     output_config={
                         "effort": self.s.claude_effort,
                         "format": {"type": "json_schema", "schema": self.output_schema},
                     },
                 )
+                # Only attach tools when there are any (web tools removed for the speed test).
+                tools = self._tools()
+                if tools:
+                    kwargs["tools"] = tools
                 # MCP tools (if any registered) ride the beta connector API. Empty today,
                 # so the normal path runs; the branch activates when an MCP tool is added.
                 if self.mcp_servers:
