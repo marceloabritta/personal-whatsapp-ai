@@ -38,6 +38,12 @@ def _msg(lang: str | None) -> dict:
     return _MSG["pt"] if (lang or "").lower().startswith("pt") else _MSG["en"]
 
 
+def _italic(text: str) -> str:
+    """Render the transcript in WhatsApp italic. Italic (`_..._`) does not span line breaks,
+    so wrap each non-empty line on its own; blank lines pass through."""
+    return "\n".join(f"_{ln.strip()}_" if ln.strip() else "" for ln in text.split("\n"))
+
+
 async def transcribe_node(
     state: MessageState, *, evolution, transcription, echoes, settings, trace: Trace
 ) -> dict:
@@ -74,10 +80,10 @@ async def transcribe_node(
         if ok:
             delivery = "file"
         else:  # a text wall beats losing the transcript the owner asked for
-            sent_id = await evolution.send_text(number, frame(f"{m['prefix']}\n\n{text}", owner, lang))
+            sent_id = await evolution.send_text(number, frame(f"{m['prefix']}\n\n{_italic(text)}", owner, lang))
             delivery = "inline_fallback"
     else:
-        sent_id = await evolution.send_text(number, frame(f"{m['prefix']}\n\n{text}", owner, lang))
+        sent_id = await evolution.send_text(number, frame(f"{m['prefix']}\n\n{_italic(text)}", owner, lang))
         delivery = "inline"
 
     if sent_id:

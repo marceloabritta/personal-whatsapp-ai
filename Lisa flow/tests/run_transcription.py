@@ -163,8 +163,8 @@ async def main() -> None:
     sent = evo.sent[-1][1]
     check("framed with PT header (detected language)",
           sent.startswith("*[Assistente IA do Marcelo]:*"))
-    check("carries the transcript", "confirma a reunião de quinta" in sent)
-    check("carries the transcribe prefix", "Aqui está o áudio transcrito:" in sent)
+    check("carries the transcript in italic", "_confirma a reunião de quinta_" in sent)
+    check("carries the transcribe prefix (plain)", "Aqui está o áudio transcrito:" in sent)
     check("reasoner was NEVER called", len(reasoner.calls) == 0)
     check("no media (short → inline)", len(evo.media) == 0)
     check("reply recorded as an echo", deps.echoes.is_ours(OWNER_JID, "echo0"))
