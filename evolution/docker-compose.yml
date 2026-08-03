@@ -1,7 +1,13 @@
 # ============================================================================
 #  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis +
-#  dispatcher + Lisa (@lisa). Runs on a single droplet. Everything talks over
-#  the internal "evolution-net".
+#  dispatcher + Lisa (@lisa) + Mary (@mary). Runs on a single droplet.
+#  Everything talks over the internal "evolution-net".
+#
+#  NB: this file is the canonical record of what runs in production. The droplet
+#  deploys it as a base compose (api/redis/postgres) + a docker-compose.override.yml
+#  (dispatcher/lisa/mary) whose only intentional difference is ABSOLUTE build
+#  contexts under /opt/personal-whatsapp-ai (this file uses repo-relative paths).
+#  Env, models, ports and versions here mirror the live override — keep them in sync.
 # ============================================================================
 services:
   api:
@@ -49,6 +55,7 @@ services:
   # is that single target; it reads the summon @tag (and per-chat window
   # ownership) and forwards the raw payload to the flow that owns the turn:
   #   @lisa → lisa  (LangGraph brain — the core flow)
+  #   @mary → mary  (experimental programmatic orchestrator)
   # To add a new experimental flow, add its service below, then wire a new
   # @tag → its URL in the dispatcher env — the core @lisa flow stays untouched.
   # The retired Node "secretary"/"Mary" flow is preserved on archive/secretary-v1.
@@ -64,7 +71,7 @@ services:
       - lisa
       - mary
     ports:
-      - "8090:8090"          # the ONE webhook Evolution posts to
+      - "127.0.0.1:8090:8090" # the ONE webhook Evolution posts to (localhost-bound; reached in-net via DNS)
     environment:
       OWNER_NAME: "Marcelo"
       # Window TTL for untagged continuations. Keep >= each flow's own window so a
@@ -93,6 +100,10 @@ services:
       - api
       - redis
       - postgres
+    ports:
+      # Debug only (dispatcher reaches lisa via service DNS on :8000 internally).
+      # 8001 on the host to avoid clashing with the old mary_brain on 8000.
+      - "127.0.0.1:8001:8000"
     environment:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
@@ -108,15 +119,23 @@ services:
       CONTEXT_WINDOW_MESSAGES: "30"
       DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution
       LOG_SCHEMA: lisa_log
+      # Media context (images & PDFs as inline base64) — on in production.
+      MEDIA_ENABLED: "true"
       # Reasoning (provider-neutral; Anthropic today).
       LLM_PROVIDER: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      CLAUDE_MODEL: claude-opus-4-8
+      CLAUDE_MODEL: claude-sonnet-5
       CLAUDE_EFFORT: high
+      CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-03.3-calendar"
+      PROMPT_VERSION: "2026-08-03.4-no-web-claim"
+      # Transcription (AssemblyAI).
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
+      ASSEMBLYAI_LANGUAGE: auto
       # Tools
       MAX_TOOL_ACTIONS: "4"
+      # Durable loop-log HTTP token.
+      LOG_API_TOKEN: ${LOG_API_TOKEN}
       # Google calendar tool (owner's account)
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
@@ -153,17 +172,22 @@ services:
       LOOP_TTL_SECONDS: "60"
       CONTEXT_WINDOW_MESSAGES: "30"
       # NB: DATABASE_URL intentionally unset → in-memory checkpointer (isolation, see above).
+      MEDIA_ENABLED: "true"
       # Reasoning (provider-neutral; Anthropic today).
       LLM_PROVIDER: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      CLAUDE_MODEL: claude-opus-4-8
+      CLAUDE_MODEL: claude-sonnet-5
       CLAUDE_EFFORT: high
+      CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
       PROMPT_VERSION: "2026-08-03-orchestrator"
       # Programmatic domain orchestrator.
       DEFAULT_DOMAIN: web
       ROUTER_EFFORT: low
       MAX_TOOL_ACTIONS: "4"
+      # Transcription (AssemblyAI).
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
+      ASSEMBLYAI_LANGUAGE: auto
       # Google calendar tool (owner's account — same as Lisa; confirmation-gated).
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
