@@ -21,12 +21,13 @@ class AnthropicReasoner:
                  mcp_servers: list[dict] | None = None) -> None:
         self.s = settings
         self.mcp_servers = mcp_servers or []
-        # The enforced-JSON schema is built from the tool registry and injected here. Fall
-        # back to building it directly so the reasoner is usable without going through deps.
+        # Default enforced-JSON schema, used only when respond() is called without a per-call
+        # schema. The reason node always passes the routed skill's schema, so this is a fallback;
+        # build the calendar (local) schema so the reasoner is usable standalone.
         if output_schema is None:
-            from ..tools.registry import build_output_schema
+            from ..skills import output_schema_for
 
-            output_schema = build_output_schema()
+            output_schema = output_schema_for("calendar")
         self.output_schema = output_schema
         self._client = None  # lazy — so importing this module never needs a key
 
@@ -37,37 +38,44 @@ class AnthropicReasoner:
             self._client = anthropic.AsyncAnthropic(api_key=self.s.anthropic_api_key)
         return self._client
 
-    def _tools(self) -> list[dict]:
-        # Web tools OFF. On Sonnet 5 with thinking disabled they get invoked on every
-        # calendar turn (code_execution hops) — ~4x input tokens, ~2x latency. Winning
-        # config = lean, no web tools. Re-add on demand via a declared action, not upfront.
-        return []
-
-    async def respond(self, *, system: str, messages: list) -> ReasonResult:
+    async def respond(
+        self, *, system: str, messages: list,
+        output_schema: dict | None = None, server_tools: list | None = None,
+        model: str | None = None, effort: str | None = None, think: bool = False,
+    ) -> ReasonResult:
         client = self._client_or_make()
         convo = [{"role": m["role"], "content": m["content"]} for m in messages]
+        schema = output_schema or self.output_schema
         tool_names: list[str] = []
         usage = {"input": 0, "output": 0}
         resp = None
 
+        # Per-skill runtime (resolved by the caller, settings defaults already applied). A skill sets
+        # think=True to get a real thinking channel — the web path uses it because its long
+        # server-tool turns were degenerating the forced-JSON output into silence. Under a forced
+        # output_config Sonnet 5 only accepts ADAPTIVE thinking, whose depth is set by effort (the
+        # "enabled" + budget_tokens form is rejected for this model); off stays disabled for speed.
+        model = model or self.s.claude_model
+        effort = effort or self.s.claude_effort
+        thinking = {"type": "adaptive"} if think else {"type": "disabled"}
+
         try:
             for _ in range(_MAX_TOOL_HOPS):
                 kwargs = dict(
-                    model=self.s.claude_model,
+                    model=model,
                     max_tokens=self.s.claude_max_tokens,
                     system=system,
                     messages=convo,
-                    # TESTING SPEED IMPROVEMENT: no adaptive thinking (Sonnet 5 default run).
-                    thinking={"type": "disabled"},
+                    thinking=thinking,
                     output_config={
-                        "effort": self.s.claude_effort,
-                        "format": {"type": "json_schema", "schema": self.output_schema},
+                        "effort": effort,
+                        "format": {"type": "json_schema", "schema": schema},
                     },
                 )
-                # Only attach tools when there are any (web tools removed for the speed test).
-                tools = self._tools()
-                if tools:
-                    kwargs["tools"] = tools
+                # Native server tools are attached PER CALL by the routed skill (web loads
+                # web_search/web_fetch; calendar loads none — saving the ~6.4k-token overhead).
+                if server_tools:
+                    kwargs["tools"] = server_tools
                 # MCP tools (if any registered) ride the beta connector API. Empty today,
                 # so the normal path runs; the branch activates when an MCP tool is added.
                 if self.mcp_servers:
@@ -130,3 +138,26 @@ class AnthropicReasoner:
             provider_request_id=request_id, stop_reason=stop_reason,
             tool_calls=tool_names, error_category="none",
         )
+
+    async def classify(
+        self, *, system: str, text: str, schema: dict,
+        max_tokens: int = 32, effort: str = "low",
+    ) -> dict:
+        """One cheap enforced-JSON call, no tools, returning the raw parsed object. Used by the
+        router's domain classifier; raises on failure so the caller falls back to a default."""
+        client = self._client_or_make()
+        resp = await client.messages.create(
+            model=self.s.claude_model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": text}],
+            thinking={"type": "disabled"},
+            output_config={
+                "effort": effort,
+                "format": {"type": "json_schema", "schema": schema},
+            },
+        )
+        out = "".join(
+            getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text"
+        )
+        return json.loads(out)

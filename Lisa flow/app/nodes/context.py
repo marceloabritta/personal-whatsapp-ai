@@ -263,7 +263,8 @@ async def context_node(
         # Per-activation tool-loop scratch — always fresh so a bound/log never carries over.
         "tool_hops": 0,
         "action_results": [],
-        "needs_readback": False,
+        "last_ran": 0,
+        "last_results": [],
     }
     if reset:
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous

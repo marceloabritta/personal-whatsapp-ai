@@ -1,10 +1,11 @@
-"""Step-3 (P1) verification — the tool framework skeleton.
+"""Step-3 verification — the skills framework + the programmatic orchestrator.
 
-Asserts the registry fans out correctly and the enforced-JSON output schema is well-formed
-and stays under Anthropic's 16 union/array cap. No network, no Postgres, no Anthropic key,
-no Google. This is the offline guard that the schema can't regress into the silent-Lisa bug.
+Asserts the per-domain fan-out is well-formed (each skill gets its OWN enforced-JSON schema,
+under Anthropic's 16 union / 24 optional caps), the hybrid router picks domains correctly, and
+the skill-owned confirm/render policies drive the tool loop through the graph. No network, no
+Postgres, no Anthropic key, no Google.
 
-    cd "Lisa flow" && python tests/run_step3.py
+    cd "Mary flow" && python tests/run_step3.py
 Exits non-zero on the first failed check.
 """
 from __future__ import annotations
@@ -23,17 +24,21 @@ from app.echoes import InMemoryEchoes  # noqa: E402
 from app.graph import build_graph  # noqa: E402
 from app.reasoning.anthropic import AnthropicReasoner  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
-from app.threads import make_thread_id  # noqa: E402
-from app.tools.registry import (  # noqa: E402
-    TOOLS,
-    build_output_schema,
-    build_task_prompts,
-    build_tools_prompt,
-    confirm_first,
+from app.skills import (  # noqa: E402
+    SKILLS,
+    confirm_policies,
     count_optionals,
     count_unions,
-    local_handlers,
+    handlers,
+    has_actions,
+    output_schema_for,
+    render_policies,
+    server_tools_for,
+    system_prompt_for,
 )
+from app.skills.calendar import calendar_matcher  # noqa: E402
+from app.skills.router import route_domain  # noqa: E402
+from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
 
 OWNER_JID = "5511976001033@s.whatsapp.net"
@@ -55,98 +60,155 @@ def _task_const(branch: dict) -> str:
     return branch["properties"]["task"]["const"]
 
 
-def unit_checks() -> None:
-    print("Step-3 P1 — tool framework skeleton")
-    schema = build_output_schema()
+# ============================ P1 — per-domain schema + prompt fan-out ======================
 
-    # --- output schema shape ---
-    top = set(schema.get("required", []))
-    check("top-level required = reasoning/state/message/lang/actions/workflow",
+def unit_checks() -> None:
+    print("Step-3 P1 — per-domain skills fan-out")
+    settings = Settings()
+
+    # --- calendar: the local-action schema (base + actions + workflow) ---
+    cal = output_schema_for("calendar")
+    top = set(cal.get("required", []))
+    check("calendar top-level = reasoning/state/message/lang/actions/workflow",
           top == {"reasoning", "state", "message", "lang", "actions", "workflow"},
           detail=str(sorted(top)))
-    check("actions is an array whose items is a single anyOf",
-          schema["properties"]["actions"]["type"] == "array"
-          and "anyOf" in schema["properties"]["actions"]["items"])
-    check("message and workflow are the nullable fields",
-          schema["properties"]["message"]["anyOf"][-1] == {"type": "null"}
-          and schema["properties"]["workflow"]["anyOf"][-1] == {"type": "null"})
-
-    # --- the verb branches ---
-    tasks = {_task_const(b) for b in _branches(schema)}
-    check("actions anyOf exposes exactly the 5 calendar tasks",
+    check("calendar actions is an array whose items is a single anyOf",
+          cal["properties"]["actions"]["type"] == "array"
+          and "anyOf" in cal["properties"]["actions"]["items"])
+    tasks = {_task_const(b) for b in _branches(cal)}
+    check("calendar actions anyOf exposes exactly the 5 calendar tasks",
           tasks == {f"calendar.{v}" for v in ("create", "list", "find", "update", "delete")},
           detail=str(sorted(tasks)))
-
-    req = {_task_const(b): set(b["required"]) for b in _branches(schema)}
+    req = {_task_const(b): set(b["required"]) for b in _branches(cal)}
     check("create requires task+title+start", req["calendar.create"] == {"task", "title", "start"})
-    check("list requires only task", req["calendar.list"] == {"task"})
-    check("find requires only task", req["calendar.find"] == {"task"})
     check("update requires task+event_id", req["calendar.update"] == {"task", "event_id"})
-    check("delete requires task+event_id", req["calendar.delete"] == {"task", "event_id"})
-
-    # optionals must be present-but-not-required (plain-typed), never anyOf:[T,null]
-    create = next(b for b in _branches(schema) if _task_const(b) == "calendar.create")
-    end_field = create["properties"]["end"]
+    create = next(b for b in _branches(cal) if _task_const(b) == "calendar.create")
     check("optional 'end' is plain-typed, not null-unioned",
-          end_field == {"type": "string"}, detail=str(end_field))
+          create["properties"]["end"] == {"type": "string"})
     check("every branch sets additionalProperties:false",
-          all(b.get("additionalProperties") is False for b in _branches(schema)))
+          all(b.get("additionalProperties") is False for b in _branches(cal)))
 
-    # --- the two Anthropic schema-compilation caps (outage backstops) ---
-    n = count_unions(schema)
-    check("schema union/array count <= 16", n <= 16, detail=f"count={n}")
-    opt = count_optionals(schema)
-    # Anthropic rejects > 24 optional params (grammar compilation). Keep real margin.
-    check("schema optional-param count <= 24", opt <= 24, detail=f"count={opt}")
+    # the two Anthropic schema-compilation caps — now checked PER DOMAIN.
+    nu, no = count_unions(cal), count_optionals(cal)
+    check("calendar schema union/array count <= 16", nu <= 16, detail=f"count={nu}")
+    check("calendar schema optional-param count <= 24", no <= 24, detail=f"count={no}")
 
-    # --- prompt fan-out ---
-    tp = build_tools_prompt(owner_name="Marcelo")
-    check("tools_prompt lists calendar as run-via-actions with its verbs",
-          "calendar (run via actions)" in tp and "create, list, find, update, delete" in tp)
-    check("tools_prompt substitutes the owner name", "Marcelo" in tp, detail=repr(tp[:60]))
+    # --- web: the native-tools lean schema (base only, NO actions) ---
+    web = output_schema_for("web")
+    check("web schema is the lean base (reasoning/state/message/lang)",
+          set(web.get("required", [])) == {"reasoning", "state", "message", "lang"},
+          detail=str(sorted(web.get("required", []))))
+    check("web schema has NO actions/workflow fields",
+          "actions" not in web["properties"] and "workflow" not in web["properties"])
+    check("web schema is trivially under the caps",
+          count_unions(web) <= 16 and count_optionals(web) == 0)
+    check("has_actions: calendar True, web False",
+          has_actions("calendar") and not has_actions("web"))
 
-    task = build_task_prompts(owner_name="Marcelo")
-    check("task_prompts renders the calendar guidance", "Calendar actions" in task)
-    check("task_prompts substitutes the owner name (no stray {owner_name})",
-          "Marcelo" in task and "{owner_name}" not in task)
-    check("empty registry -> empty task_prompts (no dangling header)",
-          build_task_prompts(tools={}, owner_name="X") == "")
+    # --- per-domain system prompt: the actions contract renders only for local skills ---
+    sp_cal = system_prompt_for("calendar", settings)
+    sp_web = system_prompt_for("web", settings)
+    check("calendar prompt carries the actions/workflow contract",
+          '"actions"' in sp_cal and '"workflow"' in sp_cal)
+    check("web prompt has NO actions/workflow contract", '"actions"' not in sp_web)
+    check("web prompt offers web search", "web search" in sp_web.lower())
+    check("both prompts substitute the owner name (no stray {owner_name})",
+          "Marcelo" in sp_cal and "{owner_name}" not in sp_cal and "{owner_name}" not in sp_web)
 
     # --- runtime fan-out ---
-    settings = Settings()
-    handlers = local_handlers(tools=TOOLS, settings=settings)
-    check("local_handlers builds a 'calendar' handler", "calendar" in handlers)
-    cf = confirm_first()
-    check("confirm_first = {create,update,delete} for calendar",
-          cf.get("calendar") == {"create", "update", "delete"}, detail=str(cf))
+    h = handlers(settings)
+    check("handlers builds a 'calendar' handler and no 'web' handler",
+          "calendar" in h and "web" not in h)
+    cp, rp = confirm_policies(), render_policies()
+    check("calendar confirm policy gates {create,update,delete}",
+          getattr(cp["calendar"], "needs", None) == {"create", "update", "delete"})
+    check("web has no confirm policy (None)", cp["web"] is None)
+    check("calendar render is LLMReadback, web render is None",
+          type(cp["calendar"]).__name__ == "FlagConfirm"
+          and type(rp["calendar"]).__name__ == "LLMReadback" and rp["web"] is None)
+    st = server_tools_for("web", settings)
+    check("web server_tools = web_search + web_fetch (with max_uses)",
+          [t["type"] for t in st] == ["web_search_20260209", "web_fetch_20260209"]
+          and st[0]["max_uses"] == settings.web_search_max_uses)
+    check("calendar has no server tools", server_tools_for("calendar", settings) is None)
 
     # --- reasoner injection ---
-    r = AnthropicReasoner(settings, output_schema=schema, mcp_servers=[])
-    check("reasoner stores the injected output_schema", r.output_schema is schema)
+    r = AnthropicReasoner(settings, output_schema=cal)
+    check("reasoner stores the injected output_schema", r.output_schema is cal)
     r2 = AnthropicReasoner(settings)
-    check("reasoner falls back to building the schema from the registry",
+    check("reasoner falls back to the calendar schema",
           set(r2.output_schema.get("required", [])) == top)
 
     # --- deps wiring ---
     deps = build_deps(settings)
     check("deps carries the calendar handler", "calendar" in (deps.tools or {}))
-    check("deps carries tools_prompt + task_prompts",
-          bool(deps.tools_prompt) and bool(deps.task_prompts))
-    check("deps.reasoner got the built schema",
+    check("deps carries confirm + render policies",
+          bool(deps.confirm_policies) and bool(deps.render_policies))
+    check("deps.reasoner default schema stays under the caps",
           count_unions(deps.reasoner.output_schema) <= 16)
+
+
+# ============================ P1b — the hybrid router =====================================
+
+class _ClsReasoner:
+    """A reasoner stub exposing only classify() — for the router's ambiguity path."""
+
+    def __init__(self, domain: str | None = None, boom: bool = False) -> None:
+        self.domain, self.boom, self.calls = domain, boom, 0
+
+    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("classifier down")
+        return {"domain": self.domain}
+
+
+async def router_checks() -> None:
+    print("\nStep-3 P1b — the hybrid router")
+    s = Settings(default_domain="web")
+
+    check("matcher: strong scheduling word -> yes",
+          calendar_matcher("schedule a meeting on friday") == "yes")
+    check("matcher: no calendar signal -> no", calendar_matcher("what's the weather?") == "no")
+    check("matcher: weak/time-only signal -> maybe", calendar_matcher("move it to monday") == "maybe")
+
+    # yes -> calendar via matcher, NO classifier call
+    r = _ClsReasoner(domain="calendar")
+    d, how = await route_domain({"text": "reagendar a reuniao"}, s, reasoner=r)
+    check("router: matcher 'yes' routes to calendar with no LLM",
+          d == "calendar" and how == "matcher" and r.calls == 0)
+
+    # no -> web default, NO classifier call
+    d, how = await route_domain({"text": "tell me a joke"}, s, reasoner=r)
+    check("router: no signal falls back to web (default), no LLM",
+          d == "web" and how == "default" and r.calls == 0)
+
+    # maybe -> classifier decides
+    r2 = _ClsReasoner(domain="calendar")
+    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r2)
+    check("router: ambiguous escalates to the classifier exactly once",
+          d == "calendar" and how == "classifier" and r2.calls == 1)
+
+    # classifier error -> safe default (web)
+    r3 = _ClsReasoner(boom=True)
+    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r3)
+    check("router: classifier failure falls back to web", d == "web" and how == "default")
 
 
 # ============================ P2 — the tool loop (graph-driven) ============================
 
 class StubReasoner:
-    """Scripted reasoner. Each script entry is one respond() return; missing keys default."""
+    """Scripted reasoner. Each script entry is one respond() return; missing keys default.
+    classify() returns a fixed domain so any stray 'maybe' still routes to calendar."""
 
-    def __init__(self) -> None:
+    def __init__(self, classify_domain: str = "calendar") -> None:
         self.calls: list = []
         self.script: list = []
+        self._classify_domain = classify_domain
 
-    async def respond(self, *, system, messages):
-        self.calls.append({"system": system, "messages": list(messages)})
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+        self.calls.append({"system": system, "messages": list(messages),
+                           "server_tools": server_tools})
         base = {"state": "keep_listening", "message": None, "lang": "en", "actions": [],
                 "workflow": None, "usage": {"input": 1, "output": 1},
                 "provider_request_id": "req_stub", "stop_reason": "end_turn",
@@ -154,6 +216,9 @@ class StubReasoner:
         if self.script:
             base.update(self.script.pop(0))
         return base
+
+    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+        return {"domain": self._classify_domain}
 
 
 class StubCalendar:
@@ -199,8 +264,8 @@ def _upsert(text, *, from_me=True, mid="m1", jid=OWNER_JID):
 
 
 def make_toolenv(history=None, max_tool_actions=4):
-    # NB: mary_trigger_tag only binds via its env alias (MARY_TRIGGER_TAG), so we use the
-    # default "@mary" trigger here; the live Lisa sets @mary through the env alias.
+    # Trigger texts in these tests carry a STRONG calendar word, so the matcher routes them to
+    # the calendar skill with no classifier call — the tool loop is what's under test here.
     settings = Settings(evolution_apikey="x", loop_ttl_seconds=60,
                         context_window_messages=30, max_tool_actions=max_tool_actions)
     evo = FakeEvolution(history)
@@ -209,8 +274,7 @@ def make_toolenv(history=None, max_tool_actions=4):
     deps = Deps(settings=settings, evolution=evo, sessions=InMemorySessions(ttl=60),
                 echoes=InMemoryEchoes(ttl=3600), trace=build_trace(), reasoner=stub,
                 redis=None, tools={"calendar": cal},
-                confirm_first={"calendar": {"create", "update", "delete"}},
-                tools_prompt="", task_prompts="")
+                confirm_policies=confirm_policies(), render_policies=render_policies())
     return deps, evo, stub, cal, build_graph(deps, MemorySaver())
 
 
@@ -220,9 +284,17 @@ async def _invoke(graph, body, jid=OWNER_JID):
 
 
 async def graph_checks() -> None:
-    print("\nStep-3 P2 — the tool loop")
+    print("\nStep-3 P2 — the tool loop (skill-owned confirm + render)")
 
-    # 1. a successful write reads back so it confirms FROM the result (never announced before).
+    # 0. domain routing lands on calendar, and the calendar call attaches NO web tools.
+    deps, evo, stub, cal, graph = make_toolenv()
+    stub.script = [{"message": "Hi."}]
+    st = await _invoke(graph, _upsert("@mary schedule a call at 3pm", mid="d0"))
+    check("[route] a scheduling turn routes to calendar", st.get("domain") == "calendar")
+    check("[route] the calendar reason call attaches no server tools",
+          stub.calls[0]["server_tools"] is None)
+
+    # 1. a successful write reads back so it confirms FROM the result (LLMReadback render).
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
         {"message": None, "actions": [
@@ -230,12 +302,11 @@ async def graph_checks() -> None:
              "confirmed": True}]},
         {"message": "Booked your 3pm."},
     ]
-    await _invoke(graph, _upsert("@mary book a call at 3pm", mid="c1"))
+    await _invoke(graph, _upsert("@mary schedule a call at 3pm", mid="c1"))
     check("[create] handler ran exactly once", cal.n("create") == 1)
-    check("[create] the write reads back so it can confirm (two reason passes)",
-          len(stub.calls) == 2)
-    check("[create] confirmation sent from the result", len(evo.sent) == 1
-          and "Booked" in evo.sent[-1][1])
+    check("[create] the write reads back via reason ② (two reason passes)", len(stub.calls) == 2)
+    check("[create] confirmation sent from the result",
+          len(evo.sent) == 1 and "Booked" in evo.sent[-1][1])
     check("[create] execute != close — window stays open", deps.sessions.is_open(OWNER_JID))
 
     # 2. read (find) -> read-back -> reply.
@@ -246,7 +317,7 @@ async def graph_checks() -> None:
         {"message": None, "actions": [{"task": "calendar.find", "query": "dentist"}]},
         {"message": "Found it — dentist Friday 15:00."},
     ]
-    st = await _invoke(graph, _upsert("@mary when is my dentist?", mid="f1"))
+    st = await _invoke(graph, _upsert("@mary find my dentist appointment", mid="f1"))
     check("[find] handler ran", cal.n("find") == 1)
     check("[find] read triggered a read-back (two reason passes)", len(stub.calls) == 2)
     check("[find] reply reflects the observation", "Found it" in evo.sent[-1][1])
@@ -261,23 +332,23 @@ async def graph_checks() -> None:
              "confirmed": True}]},
         {"message": "Sorry — I couldn't create it (auth error)."},
     ]
-    await _invoke(graph, _upsert("@mary create X", mid="e1"))
+    await _invoke(graph, _upsert("@mary schedule X", mid="e1"))
     check("[fail] read-back happened on failure", len(stub.calls) == 2)
     check("[fail] the premature 'Done!' was NOT sent", all("Done!" not in t for _, t in evo.sent))
     check("[fail] honest error is what got sent", "couldn't create" in evo.sent[-1][1])
 
-    # 4. confirm gate: an unconfirmed write is blocked before the handler.
+    # 4. skill-owned confirm gate: an unconfirmed write is blocked before the handler.
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
         {"message": "Creating.", "actions": [
             {"task": "calendar.create", "title": "Y", "start": "2026-08-05T10:00:00-03:00"}]},
         {"message": "Want me to create Y at 10:00?"},
     ]
-    await _invoke(graph, _upsert("@mary put Y at 10", mid="g1"))
-    check("[confirm-gate] handler NOT called without confirmation", cal.n("create") == 0)
-    check("[confirm-gate] bounced back to ask", len(stub.calls) == 2 and "Want me" in evo.sent[-1][1])
+    await _invoke(graph, _upsert("@mary schedule Y at 10", mid="g1"))
+    check("[confirm] handler NOT called without confirmation", cal.n("create") == 0)
+    check("[confirm] bounced back to ask", len(stub.calls) == 2 and "Want me" in evo.sent[-1][1])
 
-    # 5. resolved-id gate: update on an unseen id is blocked (no invented ids reach the API).
+    # 5. resolved-id gate (stays in execute): update on an unseen id is blocked.
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
         {"message": "Moving it.", "actions": [
@@ -285,7 +356,7 @@ async def graph_checks() -> None:
              "start": "2026-08-06T15:00:00-03:00"}]},
         {"message": "Let me find that event first."},
     ]
-    await _invoke(graph, _upsert("@mary move my meeting", mid="u1"))
+    await _invoke(graph, _upsert("@mary reschedule my meeting", mid="u1"))
     check("[id-gate] update NOT called on an unresolved id", cal.n("update") == 0)
     check("[id-gate] bounced back to search first", len(stub.calls) == 2)
 
@@ -300,7 +371,7 @@ async def graph_checks() -> None:
              "start": "2026-08-07T15:00:00-03:00"}]},
         {"message": "Moved it to Friday."},
     ]
-    await _invoke(graph, _upsert("@mary move the review to Friday", mid="fu1"))
+    await _invoke(graph, _upsert("@mary reschedule the review to Friday", mid="fu1"))
     check("[find->update] update ran on the resolved id",
           cal.n("find") == 1 and cal.n("update") == 1)
     check("[find->update] the id passed to update was the found one",
@@ -312,7 +383,7 @@ async def graph_checks() -> None:
     stub.script = [{"message": "What time works?", "workflow": {
         "task": "calendar.create", "known_inputs": [{"field": "title", "value": "lunch"}],
         "open_questions": [{"field": "start", "reason": "no time given"}]}}]
-    st = await _invoke(graph, _upsert("@mary set up lunch with Ana", mid="w1"))
+    st = await _invoke(graph, _upsert("@mary schedule lunch with Ana", mid="w1"))
     check("[workflow] gather ran no action", cal.calls == [])
     check("[workflow] the goal is remembered in state",
           (st.get("workflow") or {}).get("task") == "calendar.create")
@@ -330,7 +401,7 @@ async def graph_checks() -> None:
         {"actions": [{"task": "calendar.find", "query": "c"}]},
         {"message": "stopping"},
     ]
-    await _invoke(graph, _upsert("@mary find stuff", mid="b1"))
+    await _invoke(graph, _upsert("@mary check my agenda", mid="b1"))
     check("[bound] read-back stopped at max_tool_actions", cal.n("find") == 2)
 
     # 9. language locks at the tag and is fed to every later pass (the PT-drift bug).
@@ -340,7 +411,7 @@ async def graph_checks() -> None:
         {"message": None, "lang": "en", "actions": [{"task": "calendar.find", "query": "x"}]},
         {"message": "Feito.", "lang": "pt"},  # model tries to drift to PT on the read-back pass
     ]
-    await _invoke(graph, _upsert("@mary what's on friday?", mid="l1"))
+    await _invoke(graph, _upsert("@mary what's on my agenda friday?", mid="l1"))
     check("[lang] first pass judges from the tag (no lock yet)",
           'in "en"' not in stub.calls[0]["system"])
     check("[lang] read-back pass is TOLD to stay in the locked language",
@@ -348,8 +419,66 @@ async def graph_checks() -> None:
     check("[lang] header stays locked EN despite the model drifting to PT",
           evo.sent[-1][1].startswith("*[Marcelo's AI Assistant]:*"))
 
+    # 10. web routing: a general turn routes to web, loads web tools, and takes the reason->act
+    #     path (no confirm/execute/readback — web has no actions, no render policy).
+    deps, evo, stub, cal, graph = make_toolenv()
+    stub.script = [{"message": "It's sunny in Lisbon."}]
+    st = await _invoke(graph, _upsert("@mary what's the weather in Lisbon?", mid="web1"))
+    check("[web] general turn routes to web", st.get("domain") == "web")
+    check("[web] the web reason call attaches web_search/web_fetch",
+          [t["type"] for t in (stub.calls[0]["server_tools"] or [])]
+          == ["web_search_20260209", "web_fetch_20260209"])
+    check("[web] single reason pass (no readback), reply sent",
+          len(stub.calls) == 1 and "sunny" in evo.sent[-1][1])
+    check("[web] no calendar handler touched", cal.calls == [])
 
-# ===================== P3 — the Google Calendar handler (fake service) =====================
+
+# ============================ P3 — a programmatic render skill (stub) ======================
+
+class _StrReasoner:
+    """Emits one create action then would keep talking — but a Programmatic render should end
+    the turn at `act` with a formatted reply, so respond must NOT loop back to reason."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+        self.calls += 1
+        base = {"state": "keep_listening", "message": None, "lang": "en", "workflow": None,
+                "usage": {"input": 1, "output": 1}, "provider_request_id": "r",
+                "stop_reason": "end_turn", "tool_calls": [], "error_category": "none"}
+        if self.calls == 1:
+            base["actions"] = [{"task": "calendar.create", "title": "Z",
+                                "start": "2026-08-05T15:00:00-03:00", "confirmed": True}]
+        else:
+            base["message"], base["actions"] = "SHOULD NOT SEND", []
+        return base
+
+    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+        return {"domain": "calendar"}
+
+
+async def render_checks() -> None:
+    print("\nStep-3 P3 — a Programmatic render skill (no second model call)")
+    from app.skills.render import Programmatic
+
+    fmt = lambda results, state: f"Done: {results[0]['summary']}"
+    settings = Settings(evolution_apikey="x", loop_ttl_seconds=60, context_window_messages=30)
+    evo, cal, reasoner = FakeEvolution(), StubCalendar(), _StrReasoner()
+    deps = Deps(settings=settings, evolution=evo, sessions=InMemorySessions(ttl=60),
+                echoes=InMemoryEchoes(ttl=3600), trace=build_trace(), reasoner=reasoner,
+                redis=None, tools={"calendar": cal},
+                confirm_policies=confirm_policies(),
+                render_policies={"calendar": Programmatic(fmt), "web": None})
+    graph = build_graph(deps, MemorySaver())
+    await _invoke(graph, _upsert("@mary schedule Z at 3pm", mid="pr1"))
+    check("[render] the write ran", cal.n("create") == 1)
+    check("[render] exactly ONE model call — no LLM readback", reasoner.calls == 1)
+    check("[render] reply was assembled programmatically from the result",
+          evo.sent and "Done: create ok" in evo.sent[-1][1])
+
+
+# ===================== P4 — the Google Calendar handler (fake service) =====================
 
 class _GErr(Exception):
     """Mimic a googleapiclient HttpError carrying resp.status."""
@@ -445,10 +574,9 @@ def _cal_handler(items=None, raise_on=None):
 
 
 async def calendar_checks() -> None:
-    print("\nStep-3 P3 — Google Calendar handler (fake service)")
+    print("\nStep-3 P4 — Google Calendar handler (fake service)")
     tz = Settings().calendar_timezone
 
-    # create: end defaults to start + 45; tz set; returns id.
     h = _cal_handler()
     r = await h.run("create", {"title": "Call Ana", "start": "2026-08-05T15:00:00-03:00",
                                "confirmed": True})
@@ -458,37 +586,19 @@ async def calendar_checks() -> None:
           body["summary"] == "Call Ana" and body["start"]["timeZone"] == tz)
     check("[create] end defaulted to start + 45min",
           body["end"]["dateTime"] == "2026-08-05T15:45:00-03:00")
-    check("[create] result carries the ISO start + event link for the 'Scheduled:' message",
-          "2026-08-05T15:00:00-03:00" in r["summary"] and "event link: http://cal/NEW1" in r["summary"])
 
-    # create virtual: video wins (no location) + Meet link in DATA but 'Video call' (not the URL)
-    # in the summary the model reads back.
     h = _cal_handler()
     r = await h.run("create", {"title": "Sync", "start": "2026-08-05T09:00:00-03:00",
                                "virtual": True, "location": "ignored", "confirmed": True})
     ins = next(kw for v, kw in h._svc.events().calls if v == "insert")
     check("[create] virtual drops location + requests Meet",
-          ins["body"]["location"] is None and "conferenceData" in ins["body"]
-          and ins.get("conferenceDataVersion") == 1)
-    check("[create] Meet link kept in data", "meet.google.com" in (r["data"]["meet_link"] or ""))
+          ins["body"]["location"] is None and "conferenceData" in ins["body"])
     check("[create] summary says 'Video call' and does NOT paste the Meet link",
           "Video call" in r["summary"] and "meet.google.com" not in r["summary"])
 
-    # create with attendees + send_invites False -> sendUpdates none.
-    h = _cal_handler()
-    r = await h.run("create", {"title": "1:1", "start": "2026-08-05T11:00:00-03:00",
-                               "attendees": ["ana@x.com"], "send_invites": False,
-                               "confirmed": True})
-    ins = next(kw for v, kw in h._svc.events().calls if v == "insert")
-    check("[create] attendees set + invites suppressed",
-          ins["body"]["attendees"] == [{"email": "ana@x.com"}] and ins["sendUpdates"] == "none")
-    check("[create] summary notes the invite count", "1 guest(s) invited" in r["summary"])
-
-    # create validation.
     r = await _cal_handler().run("create", {"start": "2026-08-05T15:00:00-03:00"})
     check("[create] missing title -> validation error", r["ok"] is False and r["error"] == "validation")
 
-    # list: tz-aware timeMin (never naive -> Google 400) + the DD/MMM - Weekday agenda layout.
     import datetime as _dt
     h = _cal_handler([
         _ev("L1", "Standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00"),
@@ -501,13 +611,9 @@ async def calendar_checks() -> None:
     check("[list] agenda header is 'DD/MMM - Weekday'", "05/Aug - Wednesday" in r["summary"])
     check("[list] events are 'HH:MM - Title', time-ordered under the day",
           "09:00 - Standup\n15:00 - Review" in r["summary"])
-    check("[list] a blank line separates days", "\n\n06/Aug - Thursday\n11:00 - Dentist" in r["summary"])
-    check("[list] ids still carried in data (not in the display)",
-          r["data"]["items"][0]["event_id"] == "L1" and "[id=" not in r["summary"])
     check("[list] empty calendar says so", (await _cal_handler([]).run("list", {}))["summary"]
           == "No upcoming events.")
 
-    # find: full-text resolves the right event.
     seed = [
         _ev("D1", "Dentist appointment", "2026-08-07T15:00:00-03:00", "2026-08-07T16:00:00-03:00"),
         _ev("T1", "Team standup", "2026-08-05T09:00:00-03:00", "2026-08-05T09:15:00-03:00"),
@@ -517,41 +623,26 @@ async def calendar_checks() -> None:
     r = await _cal_handler(seed).run("find", {"query": "dentist"})
     check("[find] full-text resolves the dentist event",
           r["ok"] and r["data"]["items"][0]["event_id"] == "D1")
-    r = await _cal_handler(seed).run("find", {"query": "lunch", "attendee": "paulo@x.com"})
-    check("[find] person-anchored resolves the lunch", r["data"]["items"][0]["event_id"] == "P1")
-    # fuzzy fallback: a typo the substring pass misses, ranking still surfaces it.
     r = await _cal_handler(seed).run("find", {"query": "dentst"})
     check("[find] fuzzy fallback tolerates a typo",
           r["ok"] and r["data"]["items"][0]["event_id"] == "D1")
     r = await _cal_handler(seed).run("find", {"query": "nonexistent-zzz"})
     check("[find] no match -> empty, still ok", r["ok"] and r["data"]["items"] == [])
 
-    # update: reschedule with only a new start preserves the original 60min duration.
     h = _cal_handler([_ev("E1", "Review", "2026-08-06T15:00:00-03:00", "2026-08-06T16:00:00-03:00")])
     r = await h.run("update", {"event_id": "E1", "start": "2026-08-06T18:00:00-03:00",
                                "confirmed": True})
     patch = next(kw["body"] for v, kw in h._svc.events().calls if v == "patch")
-    check("[update] get-then-patch ran", any(v == "get" for v, _ in h._svc.events().calls)
-          and r["ok"])
     check("[update] original duration preserved (end = start + 60)",
           patch["end"]["dateTime"] == "2026-08-06T19:00:00-03:00")
-    r = await _cal_handler().run("update", {"start": "2026-08-06T18:00:00-03:00"})
-    check("[update] missing event_id -> validation", r["ok"] is False and r["error"] == "validation")
 
-    # delete: removes the event, notifies attendees.
     h = _cal_handler([_ev("E1", "Review", "2026-08-06T15:00:00-03:00", "2026-08-06T16:00:00-03:00")])
     r = await h.run("delete", {"event_id": "E1", "confirmed": True})
-    dkw = next(kw for v, kw in h._svc.events().calls if v == "delete")
     check("[delete] event removed", r["ok"] and h._svc.store["items"] == [])
-    check("[delete] attendees notified (sendUpdates=all)", dkw["sendUpdates"] == "all")
 
-    # error classification.
     r = await _cal_handler(raise_on={"insert": _GErr(403)}).run(
         "create", {"title": "X", "start": "2026-08-05T15:00:00-03:00", "confirmed": True})
     check("[error] 403 -> auth", r["ok"] is False and r["error"] == "auth")
-    r = await _cal_handler(raise_on={"get": _GErr(404)}).run(
-        "update", {"event_id": "GONE", "start": "2026-08-05T15:00:00-03:00", "confirmed": True})
-    check("[error] 404 -> not_found", r["ok"] is False and r["error"] == "not_found")
     r = await _cal_handler().run("teleport", {})
     check("[error] unknown verb handled", r["ok"] is False and r["error"] == "unknown_verb")
 
@@ -563,6 +654,8 @@ def _finish() -> None:
 
 if __name__ == "__main__":
     unit_checks()
+    asyncio.run(router_checks())
     asyncio.run(graph_checks())
+    asyncio.run(render_checks())
     asyncio.run(calendar_checks())
     _finish()

@@ -11,15 +11,8 @@ from .config import Settings, load_settings
 from .echoes import InMemoryEchoes, RedisEchoes
 from .reasoning import build_reasoner
 from .sessions import InMemorySessions, RedisSessions
+from .skills import confirm_policies, handlers, render_policies
 from .transcription import build_transcriber
-from .tools.registry import (
-    build_mcp_servers,
-    build_output_schema,
-    build_task_prompts,
-    build_tools_prompt,
-    confirm_first,
-    local_handlers,
-)
 from .trace import Trace, build_trace
 
 
@@ -33,11 +26,10 @@ class Deps:
     reasoner: Any
     transcription: Any = None  # TranscriptionService (download + transcribe + cache)
     redis: Any = None
-    # Tool framework — the registry fanned out (see tools/registry.py).
-    tools: dict = None            # {domain: handler_instance} for the execute node
-    tools_prompt: str = ""        # the tool list injected into the system prompt
-    task_prompts: str = ""        # per-tool guidance blocks appended to the prompt
-    confirm_first: dict = None    # {domain: {verbs needing a go-ahead}}
+    # Skills framework — the registry fanned out (see skills/__init__.py).
+    tools: dict = None              # {domain: handler_instance} for the execute node
+    confirm_policies: dict = None   # {domain: ConfirmPolicy|None} for the confirm node
+    render_policies: dict = None    # {domain: RenderPolicy|None} for the respond node
 
 
 def build_deps(settings: Settings | None = None) -> Deps:
@@ -56,10 +48,6 @@ def build_deps(settings: Settings | None = None) -> Deps:
         echoes = RedisEchoes(redis_client, ttl=settings.echo_ttl_seconds)
         store = redis_client
 
-    # Fan the tool registry out into every seam, once.
-    output_schema = build_output_schema()
-    mcp_servers = build_mcp_servers(settings=settings)
-
     evolution = Evolution(
         settings.evolution_url,
         settings.evolution_apikey,
@@ -71,17 +59,18 @@ def build_deps(settings: Settings | None = None) -> Deps:
         evolution, build_transcriber(settings), settings
     )
 
+    # The reasoner builds its default (calendar) schema itself; the reason node passes the
+    # routed skill's per-call schema each turn. No merged schema, no MCP tools in v1.
     return Deps(
         settings=settings,
         evolution=evolution,
         sessions=sessions,
         echoes=echoes,
         trace=build_trace(store=store),
-        reasoner=build_reasoner(settings, output_schema=output_schema, mcp_servers=mcp_servers),
+        reasoner=build_reasoner(settings),
         transcription=transcription,
         redis=redis_client,
-        tools=local_handlers(settings=settings),
-        tools_prompt=build_tools_prompt(owner_name=settings.owner_name),
-        task_prompts=build_task_prompts(owner_name=settings.owner_name),
-        confirm_first=confirm_first(),
+        tools=handlers(settings),
+        confirm_policies=confirm_policies(),
+        render_policies=render_policies(),
     )

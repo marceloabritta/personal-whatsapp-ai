@@ -1,8 +1,8 @@
 """Per-verb input schemas for the calendar tool.
 
-These compose into the enforced-JSON output as the single `actions.items` anyOf — one flat
-object per verb (see registry.build_output_schema). Each entry is (required, properties)
-WITHOUT the `task` discriminator; the registry injects `task: {const: "calendar.<verb>"}`.
+These compose into the calendar skill's enforced-JSON output as the `actions.items` anyOf — one
+flat object per verb (see skills.output_schema_for). Each entry is (required, properties)
+WITHOUT the `task` discriminator; the fan-out injects `task: {const: "calendar.<verb>"}`.
 
 UNION-CAP RULE (hard): Anthropic structured outputs reject a schema with more than 16
 union/array-typed params (`anyOf` or `type:array`). So optional fields are simply LEFT OUT
@@ -23,7 +23,7 @@ def _verb(required: list[str], properties: dict) -> dict:
 
 
 # A mutating verb carries `confirmed`: the model sets it true only after the owner has given
-# a go-ahead. The execute node refuses to run a confirm_first verb without it (structural
+# a go-ahead. The calendar skill's FlagConfirm policy refuses a gated verb without it (structural
 # gate, not prompt-alone). Plain-typed boolean — no union cost.
 _CONFIRMED = {"type": "boolean"}
 

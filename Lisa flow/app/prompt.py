@@ -1,7 +1,11 @@
-"""The system prompt (frozen, versioned via settings.prompt_version).
+"""The system prompt, assembled per skill.
 
-The header text shown to the model is rendered from identity.header_for — the same
-function that stamps the real header — so the prompt and the wire can never drift."""
+A shared base (identity, how the system works, focus, language, WhatsApp style) is stable across
+domains; the routed skill contributes its own block (what it can do + its guidance) and decides
+whether the enforced-JSON contract carries the `actions`/`workflow` fields. Local-action skills
+(calendar) get them; native skills (web) get the lean base. The header text shown to the model is
+rendered from identity.header_for — the same function that stamps the real header — so the prompt
+and the wire can never drift."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,17 +14,15 @@ from .identity import header_for
 
 
 def build_system_prompt(
-    owner_name: str, tag: str, tools_prompt: str = "", task_prompts: str = "",
-    session_lang: str | None = None,
+    owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
+    has_actions: bool = False, session_lang: str | None = None,
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
-    tools_block = f"\n\nTOOLS available to you:\n{tools_prompt}" if tools_prompt else ""
-    task_block = f"\n\nActing in each domain:\n{task_prompts}" if task_prompts else ""
-    # Language is LOCKED to the tag that opened the conversation. Once locked, tell the model
-    # exactly which language to use so a read-back pass (or a PT-heavy history) can't make it
-    # drift; on the very first pass (not yet locked) it judges from the tagged order itself.
+
+    # Language is LOCKED to the tag that opened the conversation (see reason node). Once locked,
+    # tell the model exactly which language to use; on the first pass it judges from the order.
     if session_lang:
         lang_rule = (
             f'This conversation is in "{session_lang}" (ISO 639-1) — the language {owner_name} '
@@ -34,7 +36,8 @@ def build_system_prompt(
             f"message that opened this conversation (the tagged order) — judge it from THAT "
             f"message, not from other messages in the history."
         )
-    return f"""You are {owner_name}'s executive assistant, and you take part in his WhatsApp \
+
+    base = f"""You are {owner_name}'s executive assistant, and you take part in his WhatsApp \
 conversations on his behalf. {owner_name} brings you into a chat by placing the tag {tag} on a \
 message. From that moment you are an active participant in that conversation: you can speak into \
 it, and the people in the chat see and reply to what you say.
@@ -82,33 +85,48 @@ You are talking inside WhatsApp, so write the way people do there. Keep messages
 and polite. Do not use emoji. Break your text into short lines instead of long, dense \
 sentences. Answer only what was asked — do not expand the topic, add background, or volunteer \
 extra information beyond the question in front of you. On open-ended requests, do not tack on \
-suggested next steps or follow-up questions; give the answer and stop.
+suggested next steps or follow-up questions; give the answer and stop."""
 
-You cannot browse or search the web, and you have no access to live or real-time \
-information (news, scores, prices, weather, anything that changes). Do not say you will look \
-something up, check, or confirm it — you have no way to. When a request needs current or \
-external information you don't have, say plainly that you can't look it up, and stop.{tools_block}
+    # --- the routed skill's block ---
+    skill_block = ""
+    if describe:
+        skill_block += f"\n\nIn this conversation:\n{describe}"
+    if guidance:
+        skill_block += f"\n\n{guidance}"
 
-Performing an action: to actually do something with a tool, put it in the "actions" list — \
-each entry is one task (e.g. "calendar.create") with its fields. The system runs your actions \
-and shows you the result before you reply, so you can tell {owner_name} what truly happened. \
-Never say something is done before you have seen its result come back. If you only need to \
-talk, leave "actions" empty.
+    # --- the enforced-JSON contract (actions/workflow only for local-action skills) ---
+    action_para = ""
+    if has_actions:
+        action_para = (
+            f"\n\nPerforming an action: to actually do something with a tool, put it in the "
+            f'"actions" list — each entry is one task (e.g. "calendar.create") with its fields. '
+            f"The system runs your actions and shows you the result before you reply, so you can "
+            f"tell {owner_name} what truly happened. Never say something is done before you have "
+            f'seen its result come back. If you only need to talk, leave "actions" empty.'
+        )
 
-Respond ONLY as JSON, with these fields in this order:
-- "reasoning": one or two sentences, in English, on why you are deciding what you are deciding \
-this turn — whether the latest message is for you, what (if anything) you are saying or doing, \
-and why you keep the conversation open or close it. This is a private note for {owner_name}'s \
-records; it is never sent to the chat. Write it first, then decide.
-- "state": "keep_listening" to stay in the conversation, or "close" to step out.
-- "message": the WhatsApp text to send (message only — no analysis, labels, or header), or null \
-to stay silent.
-- "lang": the ISO 639-1 code of the language you are writing in (e.g. "en", "pt", "es") — the \
-language of the tagged message that opened this conversation.
-- "actions": a list of tool tasks to run this turn, or [] for none. Each is an object with a \
-"task" (like "calendar.find") and its fields.
-- "workflow": when you are working toward something across several turns (gathering details \
-before you act), keep the goal here — {{"task": ..., "known_inputs": [...], "open_questions": \
-[...]}} — so you remember it next turn; otherwise null.
+    fields = [
+        '- "reasoning": one or two sentences, in English, on why you are deciding what you are '
+        f"deciding this turn — whether the latest message is for you, what (if anything) you are "
+        f"saying or doing, and why you keep the conversation open or close it. This is a private "
+        f"note for {owner_name}'s records; it is never sent to the chat. Write it first, then decide.",
+        '- "state": "keep_listening" to stay in the conversation, or "close" to step out.',
+        '- "message": the WhatsApp text to send (message only — no analysis, labels, or header), '
+        "or null to stay silent.",
+        '- "lang": the ISO 639-1 code of the language you are writing in (e.g. "en", "pt", "es") '
+        "— the language of the tagged message that opened this conversation.",
+    ]
+    if has_actions:
+        fields.append(
+            '- "actions": a list of tool tasks to run this turn, or [] for none. Each is an '
+            'object with a "task" (like "calendar.find") and its fields.'
+        )
+        fields.append(
+            '- "workflow": when you are working toward something across several turns (gathering '
+            'details before you act), keep the goal here — {"task": ..., "known_inputs": [...], '
+            '"open_questions": [...]} — so you remember it next turn; otherwise null.'
+        )
 
-Current date: {today}.{task_block}"""
+    contract = "Respond ONLY as JSON, with these fields in this order:\n" + "\n".join(fields)
+
+    return f"{base}{skill_block}{action_para}\n\n{contract}\n\nCurrent date: {today}."

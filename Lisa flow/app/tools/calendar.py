@@ -38,8 +38,8 @@ DESCRIBE = (
     "Create, find, reschedule or cancel events on {owner_name}'s Google Calendar."
 )
 
-# Per-task guidance, appended to the system prompt (registry.build_task_prompts). Templated
-# with {owner_name}. Co-located with the handler so prompt and behaviour never drift.
+# Per-task guidance, appended to the system prompt by the calendar skill (skills/calendar.py).
+# Templated with {owner_name}. Co-located with the handler so prompt and behaviour never drift.
 GUIDANCE = """Calendar actions — you manage {owner_name}'s Google Calendar: create an event, list the agenda, find an event, reschedule it (update), or cancel it (delete). General rules first, then each verb.
 
 ALWAYS

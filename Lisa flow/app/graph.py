@@ -1,8 +1,15 @@
-"""The graph: parse -> gate -> (context -> reason -> {execute -> (reason|act) | act} | stop).
+"""The graph: parse -> gate -> (context -> route -> reason -> ... | stop).
 
-`reason` decides; if it wants tools it emits `actions` and routes to `execute`, which runs
-them and either loops back to `reason` (a read, a failure, or a blocked gate — so the model
-reads the result and replies truthfully) or goes on to `act` (a clean write). Compiled WITH a
+A programmatic `route` node picks the skill (state["domain"]) in code; `reason` runs that one
+skill's prompt + schema (+ native tools). If it emits actions the skill's confirm/execute/respond
+path runs; otherwise it goes straight to act.
+
+  reason  -> confirm (has actions)          | act (none)
+  confirm -> execute (approved)             | reason (blocked, ask) | act
+  execute -> respond
+  respond -> reason (LLM readback, reason ②) | act (programmatic render / nothing to read)
+
+Confirmation and reply-assembly are the skill's policies, not graph defaults. Compiled WITH a
 checkpointer so each chat's thread state persists per thread_id. LangGraph OSS library."""
 from __future__ import annotations
 
@@ -12,11 +19,14 @@ from langgraph.graph import END, StateGraph
 
 from .deps import Deps
 from .nodes.act import act_node
+from .nodes.confirm import confirm_node, route_after_confirm
 from .nodes.context import context_node
-from .nodes.execute import execute_node, route_after_execute
+from .nodes.execute import execute_node
 from .nodes.gate import gate_node, route_after_gate
 from .nodes.parse import parse_node
 from .nodes.reason import reason_node, route_after_reason
+from .nodes.respond import respond_node, route_after_respond
+from .nodes.route import route_node
 from .nodes.transcribe import transcribe_node
 from .state import MessageState
 
@@ -41,16 +51,26 @@ def build_graph(deps: Deps, checkpointer=None):
                 settings=deps.settings, trace=deps.trace, transcription=deps.transcription),
     )
     g.add_node(
+        "route",
+        partial(route_node, settings=deps.settings, reasoner=deps.reasoner, trace=deps.trace),
+    )
+    g.add_node(
         "reason",
-        partial(reason_node, reasoner=deps.reasoner, settings=deps.settings,
-                trace=deps.trace, tools_prompt=deps.tools_prompt,
-                task_prompts=deps.task_prompts),
+        partial(reason_node, reasoner=deps.reasoner, settings=deps.settings, trace=deps.trace),
+    )
+    g.add_node(
+        "confirm",
+        partial(confirm_node, confirm_policies=deps.confirm_policies or {},
+                settings=deps.settings, reasoner=deps.reasoner, trace=deps.trace),
     )
     g.add_node(
         "execute",
-        partial(execute_node, tools=deps.tools or {},
-                confirm_first=deps.confirm_first or {}, settings=deps.settings,
-                trace=deps.trace),
+        partial(execute_node, tools=deps.tools or {}, settings=deps.settings, trace=deps.trace),
+    )
+    g.add_node(
+        "respond",
+        partial(respond_node, render_policies=deps.render_policies or {},
+                settings=deps.settings, trace=deps.trace),
     )
     g.add_node(
         "act",
@@ -65,9 +85,15 @@ def build_graph(deps: Deps, checkpointer=None):
         {"run": "context", "transcribe": "transcribe", "stop": END},
     )
     g.add_edge("transcribe", END)
-    g.add_edge("context", "reason")
-    g.add_conditional_edges("reason", route_after_reason, {"execute": "execute", "act": "act"})
-    g.add_conditional_edges("execute", route_after_execute, {"reason": "reason", "act": "act"})
+    g.add_edge("context", "route")
+    g.add_edge("route", "reason")
+    g.add_conditional_edges("reason", route_after_reason, {"confirm": "confirm", "act": "act"})
+    g.add_conditional_edges(
+        "confirm", route_after_confirm,
+        {"execute": "execute", "reason": "reason", "act": "act"},
+    )
+    g.add_edge("execute", "respond")
+    g.add_conditional_edges("respond", route_after_respond, {"reason": "reason", "act": "act"})
     g.add_edge("act", END)
 
     return g.compile(checkpointer=checkpointer)

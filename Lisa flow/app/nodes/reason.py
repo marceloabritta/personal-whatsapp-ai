@@ -1,12 +1,17 @@
 """reason — call the provider-neutral Reasoner over the thread, get enforced JSON.
 
-Converts the checkpointed messages to the neutral [{role, content}] shape, calls the
-reasoner, and (only if she spoke) appends her reply as an assistant turn."""
+Skill-scoped: `state["domain"]` (set by `route`) picks the skill, and everything is that one
+skill's — the system prompt, the enforced-output schema, and the native server tools attached to
+the call (calendar attaches none; web loads web_search/web_fetch). Converts the checkpointed
+messages to the neutral [{role, content}] shape and calls the reasoner. On a calendar readback
+this is `reason ②`, writing the reply from the tool result (see the respond node)."""
 from __future__ import annotations
 
 import time
 
-from ..prompt import build_system_prompt
+from ..skills import (
+    output_schema_for, reason_runtime_for, server_tools_for, system_prompt_for,
+)
 from ..state import MessageState
 from ..trace import Trace
 
@@ -22,20 +27,22 @@ def _to_neutral(messages: list) -> list[dict]:
     return out
 
 
-async def reason_node(
-    state: MessageState, *, reasoner, settings, trace: Trace,
-    tools_prompt: str = "", task_prompts: str = "",
-) -> dict:
+async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) -> dict:
     tid = state["trace_id"]
+    domain = state.get("domain") or settings.default_domain
     locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
-    system = build_system_prompt(
-        settings.owner_name, settings.primary_tag,
-        tools_prompt=tools_prompt, task_prompts=task_prompts, session_lang=locked_lang,
-    )
+
+    system = system_prompt_for(domain, settings, session_lang=locked_lang)
+    schema = output_schema_for(domain)
+    server_tools = server_tools_for(domain, settings)
+    runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
     convo = _to_neutral(state.get("messages"))
 
     t0 = time.monotonic()
-    result = await reasoner.respond(system=system, messages=convo)
+    result = await reasoner.respond(
+        system=system, messages=convo, output_schema=schema, server_tools=server_tools,
+        model=runtime["model"], effort=runtime["effort"], think=runtime["think"],
+    )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     llm_state = result.get("state") or "keep_listening"
@@ -45,11 +52,11 @@ async def reason_node(
     actions = result.get("actions") or []
     workflow = result.get("workflow")
 
-    # Reasoning stream: the model's own turn — its stated rationale, the enforced-JSON
-    # decision it reached, and the metadata for the record.
+    # Reasoning stream: the model's own turn — its stated rationale, the enforced-JSON decision,
+    # and the metadata for the record.
     trace.code(
-        tid, node="reason", loop_id=state.get("loop_id"),
-        provider=settings.llm_provider, model=settings.claude_model,
+        tid, node="reason", loop_id=state.get("loop_id"), domain=domain,
+        provider=settings.llm_provider, model=runtime["model"],
         state=llm_state, message=message, lang=result.get("lang"),
         reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
@@ -65,7 +72,7 @@ async def reason_node(
         "actions": actions,
         "workflow": workflow,
         "provider": settings.llm_provider,
-        "model": settings.claude_model,
+        "model": runtime["model"],
         "provider_request_id": result.get("provider_request_id"),
         "usage": usage,
         "latency_ms": latency_ms,
@@ -81,5 +88,5 @@ async def reason_node(
 
 
 def route_after_reason(state: MessageState) -> str:
-    """Actions to run → execute; otherwise straight to act (send/close)."""
-    return "execute" if state.get("actions") else "act"
+    """Actions to run → confirm (the skill gates them); otherwise straight to act (send/close)."""
+    return "confirm" if state.get("actions") else "act"

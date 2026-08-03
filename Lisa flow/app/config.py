@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # Tools. The read-back loop (list/find/failure -> reason) is bounded so it can't spin.
     max_tool_actions: int = 4
 
+    # Programmatic domain orchestrator. `default_domain` is the router's fallback skill (web is
+    # read-only, so it is the safe default on a classifier miss). `router_effort` is the cheap
+    # reasoning effort for the ambiguity-only domain classifier.
+    default_domain: str = "web"
+    router_effort: str = "low"
+
     # Transcription — provider-neutral seam (app/transcription/), AssemblyAI first.
     transcription_enabled: bool = True
     transcription_provider: str = "assemblyai"
@@ -90,7 +96,7 @@ class Settings(BaseSettings):
     default_meeting_minutes: int = 45
     calendar_timezone: str = "America/Sao_Paulo"
 
-    prompt_version: str = "2026-08-03.4-no-web-claim"
+    prompt_version: str = "2026-08-03.3"
 
     @property
     def tags(self) -> list[str]:

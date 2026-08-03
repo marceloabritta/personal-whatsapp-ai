@@ -1,17 +1,15 @@
-"""execute — run the model's actions, then route.
+"""execute — run the (already-confirmed) actions, then hand off to `respond`.
 
-Runs each action in state["actions"] in order through its local handler, appends every result
-to the thread as an observation the model reads back, and enforces two structural gates that
-do not depend on the prompt behaving:
+Runs each action in state["actions"] in order through its skill's handler and appends every result
+to the thread as an observation. Confirmation is no longer here — it ran at the `confirm` node,
+owned by the skill. One structural gate remains, because it is tool safety rather than user
+confirmation:
 
-  1. resolved-id gate  — update/delete only run if their event_id was surfaced by a find/list
-                         earlier in THIS loop (seen_event_ids). No invented ids reach Google.
-  2. confirm gate      — a confirm_first verb (create/update/delete) only runs when the model
-                         has set inputs.confirmed=true (a go-ahead this loop).
+  resolved-id gate — update/delete only run if their event_id was surfaced by a find/list earlier
+                     in THIS loop (seen_event_ids). No invented ids reach Google.
 
-Read-back rule: a read (list/find), a failure, or a blocked gate routes back to `reason` so
-the model reads the observation and speaks truthfully — bounded by settings.max_tool_actions
-so the loop can never spin. A clean write goes straight to `act`."""
+Whether the result reads back through a second reason call, or is formatted programmatically, is
+the skill's `render` policy — decided next, at the `respond` node."""
 from __future__ import annotations
 
 from ..state import MessageState
@@ -33,9 +31,7 @@ def _collect_ids(result: dict) -> list[str]:
     return ids
 
 
-async def execute_node(
-    state: MessageState, *, tools: dict, confirm_first: dict, settings, trace: Trace
-) -> dict:
+async def execute_node(state: MessageState, *, tools: dict, settings, trace: Trace) -> dict:
     tid = state["trace_id"]
     actions = state.get("actions") or []
     seen: list[str] = list(state.get("seen_event_ids") or [])
@@ -51,16 +47,11 @@ async def execute_node(
         domain, _, verb = task.partition(".")
         inputs = {k: v for k, v in (action or {}).items() if k != "task"}
 
-        # gate 1 — resolved-id (update/delete must target an event surfaced by a prior search)
+        # resolved-id gate — update/delete must target an event surfaced by a prior search
         if verb in ("update", "delete") and inputs.get("event_id") not in seen:
             res = {"ok": False, "error": "unresolved_id",
                    "summary": f"Cannot {verb}: that event was not found via a prior search — "
                               f"run find first, then {verb} the id it returns."}
-        # gate 2 — confirm before write
-        elif verb in confirm_first.get(domain, set()) and not inputs.get("confirmed"):
-            res = {"ok": False, "error": "unconfirmed",
-                   "summary": f"Not executed — {task} needs the owner's go-ahead first. "
-                              f"Restate the plan and wait for confirmation."}
         else:
             handler = tools.get(domain)
             if handler is None:
@@ -82,17 +73,11 @@ async def execute_node(
             "content": f"[{task} result] {res.get('summary', '')}".rstrip(),
         })
 
-    # Any executed action reads back so the model reports the real outcome (a successful
-    # write must be confirmed FROM its result, never announced before it — the prompt promises
-    # "the system shows you the result before you reply"). Bounded so it can never spin. Only a
-    # turn that ran no actions at all skips straight past (it already spoke).
-    readback = bool(results) and hops < settings.max_tool_actions
-
     trace.code(
         tid, node="execute", loop_id=state.get("loop_id"),
         hops=hops, ran=len(results), any_read=any_read, any_fail=any_fail,
-        readback=readback, results=[{"task": r.get("task"), "ok": r.get("ok"),
-                                     "error": r.get("error")} for r in results],
+        results=[{"task": r.get("task"), "ok": r.get("ok"), "error": r.get("error")}
+                 for r in results],
     )
 
     return {
@@ -100,11 +85,8 @@ async def execute_node(
         "action_results": (state.get("action_results") or []) + results,
         "seen_event_ids": seen,
         "tool_hops": hops,
-        "needs_readback": readback,
+        "last_ran": len(results),
+        "last_results": results,
         # Clear the directives so a read-back reason pass starts from a clean slate.
         "actions": [],
     }
-
-
-def route_after_execute(state: MessageState) -> str:
-    return "reason" if state.get("needs_readback") else "act"

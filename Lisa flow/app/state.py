@@ -45,6 +45,9 @@ class MessageState(TypedDict, total=False):
 
     context_message_ids: list  # WhatsApp ids ingested this run
 
+    # routing (route node) — which skill serves this turn; set programmatically
+    domain: Optional[str]  # "calendar" | "web" | ...
+
     # reasoning output + metadata (for the record)
     llm_state: str  # "keep_listening" | "close"
     reply_body: Optional[str]  # the model's message, or None (silence)
@@ -58,11 +61,14 @@ class MessageState(TypedDict, total=False):
     tool_calls: list
     error_category: str
 
-    # tool loop (execute node)
-    actions: list  # calendar actions the model wants run this turn; [] if none
+    # tool loop (confirm -> execute -> respond nodes)
+    actions: list  # actions the model wants run this turn; [] if none
     action_results: list  # ActionResults from this loop's executions (for the record)
-    needs_readback: bool  # execute -> reason again (a read happened, or something failed/blocked)
     tool_hops: int  # execute passes taken this loop; bounds the read-back loop
+    last_ran: int  # actions executed in the latest execute pass (respond reads this)
+    last_results: list  # results of the latest execute pass (for a Programmatic render)
+    confirm_route: str  # confirm node's routing verdict: "execute" | "reason" | "act"
+    respond_route: str  # respond node's routing verdict: "reason" | "act"
 
     # act output
     reply: Optional[str]  # framed text actually sent
