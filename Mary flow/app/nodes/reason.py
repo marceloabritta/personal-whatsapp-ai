@@ -35,13 +35,13 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     system = system_prompt_for(domain, settings, session_lang=locked_lang)
     schema = output_schema_for(domain)
     server_tools = server_tools_for(domain, settings)
-    runtime = reason_runtime_for(domain, settings)  # {model, effort, think_budget}, per skill
+    runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
     convo = _to_neutral(state.get("messages"))
 
     t0 = time.monotonic()
     result = await reasoner.respond(
         system=system, messages=convo, output_schema=schema, server_tools=server_tools,
-        model=runtime["model"], effort=runtime["effort"], think_budget=runtime["think_budget"],
+        model=runtime["model"], effort=runtime["effort"], think=runtime["think"],
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
 

@@ -41,7 +41,7 @@ class AnthropicReasoner:
     async def respond(
         self, *, system: str, messages: list,
         output_schema: dict | None = None, server_tools: list | None = None,
-        model: str | None = None, effort: str | None = None, think_budget: int = 0,
+        model: str | None = None, effort: str | None = None, think: bool = False,
     ) -> ReasonResult:
         client = self._client_or_make()
         convo = [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -50,17 +50,14 @@ class AnthropicReasoner:
         usage = {"input": 0, "output": 0}
         resp = None
 
-        # Per-skill runtime (resolved by the caller, settings defaults already applied). A skill
-        # sets think_budget > 0 to get a real thinking channel — the web path uses it because its
-        # long server-tool turns were degenerating the forced-JSON output into silence. Budget must
-        # sit under max_tokens.
+        # Per-skill runtime (resolved by the caller, settings defaults already applied). A skill sets
+        # think=True to get a real thinking channel — the web path uses it because its long
+        # server-tool turns were degenerating the forced-JSON output into silence. Under a forced
+        # output_config Sonnet 5 only accepts ADAPTIVE thinking, whose depth is set by effort (the
+        # "enabled" + budget_tokens form is rejected for this model); off stays disabled for speed.
         model = model or self.s.claude_model
         effort = effort or self.s.claude_effort
-        if think_budget and think_budget > 0:
-            thinking = {"type": "enabled",
-                        "budget_tokens": min(think_budget, self.s.claude_max_tokens - 1024)}
-        else:
-            thinking = {"type": "disabled"}
+        thinking = {"type": "adaptive"} if think else {"type": "disabled"}
 
         try:
             for _ in range(_MAX_TOOL_HOPS):

@@ -31,12 +31,13 @@ class Skill:
     server_tools: Any = None                         # native tool defs, or a builder(settings) -> list
     matcher: Optional[Callable[[str], str]] = None   # text -> "yes" | "no" | "maybe" for this domain
 
-    # Per-skill reason-call runtime. Each falls back to the settings default when None/0, so a skill
-    # only names what it wants to differ. `think_budget` > 0 turns extended thinking on for this
-    # skill's reason call (budget in tokens, clamped under max_tokens); 0 keeps it off.
+    # Per-skill reason-call runtime. model/effort fall back to the settings default when None, so a
+    # skill only names what it wants to differ. `think` turns on adaptive thinking for this skill's
+    # reason call — its depth is governed by `effort` (this is how Sonnet 5 exposes thinking under a
+    # forced-JSON output_config; there is no separate token budget).
     model: Optional[str] = None                       # override settings.claude_model
     effort: Optional[str] = None                      # override settings.claude_effort
-    think_budget: int = 0                             # 0 = thinking off; >0 = enabled with this budget
+    think: bool = False                               # True = adaptive thinking on; False = off
 
 
 # --- the enforced-schema guards (moved verbatim from the old tools/registry.py) -------------

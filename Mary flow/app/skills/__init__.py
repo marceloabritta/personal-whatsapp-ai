@@ -142,13 +142,14 @@ def server_tools_for(domain: str, settings, skills: dict = SKILLS):
 
 
 def reason_runtime_for(domain: str, settings, skills: dict = SKILLS) -> dict:
-    """The resolved reason-call runtime for a domain — {model, effort, think_budget}. Each field
-    is the skill's override when set, else the settings default (think_budget defaults to off)."""
+    """The resolved reason-call runtime for a domain — {model, effort, think}. model/effort are the
+    skill's override when set, else the settings default; think is the skill's adaptive-thinking
+    flag (off by default)."""
     skill = skills[domain]
     return {
         "model": skill.model or settings.claude_model,
         "effort": skill.effort or settings.claude_effort,
-        "think_budget": skill.think_budget or 0,
+        "think": bool(skill.think),
     }
 
 
