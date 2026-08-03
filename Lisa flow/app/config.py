@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     transcribe_fuzzy_threshold: float = 0.82     # difflib ratio a token must clear
     transcribe_on_empty_reply: bool = True       # bare @mary on a voice note → transcribe
 
+    # Media context — images & PDFs passed to the model as inline base64 blocks (the twin of the
+    # transcription pass; reuses transcription_concurrency for the download gather).
+    media_enabled: bool = False                  # master switch; ships off until verified
+    max_context_media: int = 8                   # per-turn image/PDF cap in the context pass
+    media_max_item_bytes: int = 15_000_000       # per-file ceiling before a marker fallback
+    media_request_budget_bytes: int = 28_000_000 # total media/turn — headroom under Claude's 32MB
+
     # Google Calendar tool — OAuth2 refresh-token client on the owner's own account.
     google_client_id: str = ""
     google_client_secret: str = ""

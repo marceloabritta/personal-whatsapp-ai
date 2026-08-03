@@ -72,6 +72,93 @@ async def _transcribe_audio(records: list[dict], transcription, settings, trace:
     await asyncio.gather(*(fill(r) for r in todo))
 
 
+def _media_marker(r: dict, status: str = "ok") -> str:
+    """Transcript marker for an image/PDF row: "[image]" / "[PDF: report.pdf]", or a status
+    variant ("— unavailable" / "— too large" / "— omitted") when no block was attached."""
+    kind = "PDF" if r.get("media_type") == "document" else "image"
+    name = r.get("media_filename") if kind == "PDF" else None
+    label = f"{kind}: {name}" if name else kind
+    return f"[{label}]" if status == "ok" else f"[{label} — {status}]"
+
+
+def _mark(r: dict, status: str) -> None:
+    """Write the marker into the row's text so the labeled transcript emits a line — but never
+    clobber a real caption (an image/PDF sent with text keeps its words)."""
+    if not (r.get("text") or "").strip():
+        r["text"] = _media_marker(r, status)
+
+
+def _in_media_scope(r: dict) -> bool:
+    """Images always; documents only when the declared mimetype is application/pdf."""
+    mt = r.get("media_type")
+    if mt == "image":
+        return True
+    if mt == "document":
+        return (r.get("media_mimetype") or "").lower() == "application/pdf"
+    return False
+
+
+def _media_block(r: dict, res: dict, b64: str) -> dict:
+    if r.get("media_type") == "document":
+        blk = {"type": "document",
+               "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
+        if r.get("media_filename"):
+            blk["title"] = r["media_filename"]
+        return blk
+    mimetype = res.get("mimetype") or r.get("media_mimetype") or "image/jpeg"
+    return {"type": "image",
+            "source": {"type": "base64", "media_type": mimetype, "data": b64}}
+
+
+async def _attach_media(records: list[dict], evolution, settings, trace: Trace,
+                        tid: str, loop_id: str | None) -> list[dict]:
+    """Download the window's images/PDFs and return Anthropic content blocks — the twin of
+    `_transcribe_audio`, but media can't fold into text so it travels as blocks. Each media row
+    is marked IN PLACE so `build_labeled_transcript` emits a line even for a caption-less file.
+    Bounded-concurrency gather; capped at settings.max_context_media; a failed/oversized download
+    degrades to a marker with no block, and a per-turn byte budget stays under Anthropic's 32MB
+    request ceiling — so a pathological file never breaks the turn."""
+    if not settings.media_enabled:
+        return []
+    media = [r for r in records if _in_media_scope(r)]
+    if not media:
+        return []
+
+    cap = settings.max_context_media
+    todo, overflow = media[:cap], media[cap:]
+    for r in overflow:
+        _mark(r, "omitted")
+    if overflow and loop_id:
+        trace.code(tid, node="context", loop_id=loop_id, media_dropped=len(overflow))
+
+    sem = asyncio.Semaphore(settings.transcription_concurrency)
+
+    async def download(r: dict) -> tuple[dict, dict | None]:
+        async with sem:
+            return r, await evolution.get_media_base64(r["id"])
+
+    fetched = await asyncio.gather(*(download(r) for r in todo))
+
+    # Build blocks sequentially so the per-turn byte budget is honoured deterministically
+    # (drop the rows that would overflow to markers), preserving chronological order.
+    blocks: list[dict] = []
+    used = 0
+    budget = settings.media_request_budget_bytes
+    for r, res in fetched:
+        b64 = (res or {}).get("base64")
+        if not b64:
+            _mark(r, "unavailable")
+            continue
+        approx = (len(b64) * 3) // 4  # decoded bytes ≈ 3/4 of the base64 length
+        if approx > settings.media_max_item_bytes or used + approx > budget:
+            _mark(r, "too large")
+            continue
+        used += approx
+        blocks.append(_media_block(r, res, b64))
+        _mark(r, "ok")
+    return blocks
+
+
 def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[dict]:
     if cursor:
         for i, r in enumerate(records):
@@ -125,6 +212,9 @@ async def context_node(
     # see the transcripts. Language follows the locked session language when set, else auto.
     lang = state.get("session_lang")
     await _transcribe_audio(new, transcription, settings, trace, tid, loop_id)
+    # See images & PDFs: download the window's media and build inline base64 blocks. Runs after
+    # transcription so both passes have marked their rows before the transcript string is built.
+    media_blocks = await _attach_media(new, evolution, settings, trace, tid, loop_id)
 
     transcript = build_labeled_transcript(new, owner)
     ids = [r["id"] for r in new if r.get("id")]
@@ -177,8 +267,17 @@ async def context_node(
             if mid:
                 msgs.append(RemoveMessage(id=mid))
         update["session_lang"] = None  # re-lock the language on this tag's turn
-    if transcript.strip():
-        msgs.append({"role": "user", "content": transcript})
+    # The turn is a plain string unless there are media blocks; then it's a content list with
+    # the labeled transcript first, followed by the inline image/document blocks (chronological).
+    content: object | None = None
+    if transcript.strip() and media_blocks:
+        content = [{"type": "text", "text": transcript}, *media_blocks]
+    elif transcript.strip():
+        content = transcript
+    elif media_blocks:
+        content = media_blocks
+    if content is not None:
+        msgs.append({"role": "user", "content": content})
     if msgs:
         update["messages"] = msgs
     return update

@@ -69,9 +69,38 @@ def _media_type(msg: dict) -> str:
         return "image"
     if "videoMessage" in msg:
         return "video"
-    if "documentMessage" in msg:
+    if "documentMessage" in msg or "documentWithCaptionMessage" in msg:
         return "document"
     return "text"
+
+
+def _doc_node(msg: dict) -> dict:
+    """The documentMessage node, unwrapping the documentWithCaptionMessage envelope
+    WhatsApp uses when a PDF is sent with a caption."""
+    if "documentMessage" in msg:
+        return msg["documentMessage"] or {}
+    dw = msg.get("documentWithCaptionMessage") or {}
+    return (dw.get("message") or {}).get("documentMessage") or dw.get("documentMessage") or {}
+
+
+def media_info(msg: dict | None) -> dict:
+    """Media provenance for a record: {type, mimetype, filename}.
+
+    `type` is `_media_type`; `mimetype`/`filename` are the DECLARED values from the payload
+    (used downstream to gate PDFs and title the document block). The actual bytes — and the
+    authoritative mimetype — are fetched separately via `get_media_base64`."""
+    msg = msg or {}
+    mt = _media_type(msg)
+    if mt == "document":
+        node = _doc_node(msg)
+        return {"type": mt, "mimetype": node.get("mimetype"), "filename": node.get("fileName")}
+    node = (
+        msg.get("imageMessage")
+        or msg.get("videoMessage")
+        or msg.get("audioMessage")
+        or {}
+    )
+    return {"type": mt, "mimetype": node.get("mimetype"), "filename": None}
 
 
 def label_for(record: dict, owner_name: str) -> str:
@@ -88,8 +117,15 @@ def label_for(record: dict, owner_name: str) -> str:
         speaker = owner_name
     else:
         speaker = record.get("push_name") or "Contact"
+    # Provenance annotation — tell the model what a line's block/marker refers to, the same
+    # way audio is flagged so it weighs a garbled transcript as speech (see the docstring).
     if record.get("is_audio"):
         speaker += " (voice message — transcribed)"
+    elif record.get("media_type") == "image":
+        speaker += " (image)"
+    elif record.get("media_type") == "document":
+        name = record.get("media_filename")
+        speaker += f" (PDF: {name})" if name else " (PDF)"
     return speaker
 
 

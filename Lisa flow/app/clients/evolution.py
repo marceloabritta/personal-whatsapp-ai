@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from ..whatsapp import extract_text, is_audio_message
+from ..whatsapp import extract_text, media_info
 
 log = logging.getLogger("mary.evolution")
 
@@ -132,7 +132,7 @@ class Evolution:
 
     async def fetch_history(self, remote_jid: str) -> list[dict]:
         """Conversation history, oldest→newest, normalised to
-        {id, from_me, text, push_name, ts}.
+        {id, from_me, text, push_name, ts, is_audio, media_type, media_mimetype, media_filename}.
 
         WhatsApp LID addressing: a 1:1 chat's inbound messages persist under the
         contact's `…@lid` JID while we send to the phone `…@s.whatsapp.net`. Querying
@@ -150,6 +150,7 @@ class Evolution:
             rid = key.get("id")
             if not rid:
                 continue
+            info = media_info(row.get("message"))
             by_id[rid] = {
                 "id": rid,
                 "from_me": bool(key.get("fromMe")),
@@ -158,6 +159,11 @@ class Evolution:
                 "ts": int(row.get("messageTimestamp") or 0),
                 # Provenance: a voice note carries no text here — context transcribes it
                 # and the transcript is annotated as audio-sourced downstream.
-                "is_audio": is_audio_message(row.get("message")),
+                "is_audio": info["type"] == "audio",
+                # Image/PDF provenance — context downloads the bytes and attaches a block;
+                # declared mimetype/filename gate PDFs and title the document block.
+                "media_type": info["type"],
+                "media_mimetype": info["mimetype"],
+                "media_filename": info["filename"],
             }
         return sorted(by_id.values(), key=lambda r: r["ts"])
