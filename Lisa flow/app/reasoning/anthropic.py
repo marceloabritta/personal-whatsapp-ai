@@ -38,9 +38,12 @@ class AnthropicReasoner:
         return self._client
 
     def _tools(self) -> list[dict]:
-        # TESTING SPEED IMPROVEMENT: web tools removed from standard calls. They cost
-        # ~6.4k input tokens on every request even on turns that never touch the web.
-        return []
+        # Web server-tools restored (test: Sonnet 5, thinking off, web tools loaded upfront).
+        n = self.s.web_search_max_uses
+        return [
+            {"type": "web_search_20260209", "name": "web_search", "max_uses": n},
+            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": n},
+        ]
 
     async def respond(self, *, system: str, messages: list) -> ReasonResult:
         client = self._client_or_make()
