@@ -38,4 +38,10 @@ WEB = Skill(
     guidance=GUIDANCE,
     server_tools=web_server_tools,   # a builder(settings) -> list; server_tools_for resolves it
     # no verbs/schemas/handler, no confirm, no render, no matcher — web is the default skill.
+    # Long, expensive server-tool turns were degenerating the forced-JSON output into silence, so
+    # this path gets a real thinking channel. Sonnet / medium / thinking-on; bump to opus + high
+    # here if the web answers need more muscle.
+    model="claude-sonnet-5",
+    effort="medium",
+    think_budget=4096,
 )

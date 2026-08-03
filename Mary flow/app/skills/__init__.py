@@ -141,9 +141,21 @@ def server_tools_for(domain: str, settings, skills: dict = SKILLS):
     return st(settings) if callable(st) else st
 
 
+def reason_runtime_for(domain: str, settings, skills: dict = SKILLS) -> dict:
+    """The resolved reason-call runtime for a domain — {model, effort, think_budget}. Each field
+    is the skill's override when set, else the settings default (think_budget defaults to off)."""
+    skill = skills[domain]
+    return {
+        "model": skill.model or settings.claude_model,
+        "effort": skill.effort or settings.claude_effort,
+        "think_budget": skill.think_budget or 0,
+    }
+
+
 __all__ = [
     "SKILLS", "Skill", "ConfirmPolicy", "LLMReadback", "Programmatic",
     "count_unions", "count_optionals",
     "output_schema_for", "has_actions", "system_prompt_for",
     "handlers", "confirm_policies", "render_policies", "server_tools_for",
+    "reason_runtime_for",
 ]

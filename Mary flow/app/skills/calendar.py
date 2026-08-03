@@ -91,4 +91,8 @@ CALENDAR = Skill(
     confirm=FlagConfirm({"create", "update", "delete"}),
     render=LLMReadback(),
     matcher=calendar_matcher,
+    # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
+    model="claude-sonnet-5",
+    effort="medium",
+    think_budget=0,
 )

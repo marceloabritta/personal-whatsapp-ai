@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import time
 
-from ..skills import output_schema_for, server_tools_for, system_prompt_for
+from ..skills import (
+    output_schema_for, reason_runtime_for, server_tools_for, system_prompt_for,
+)
 from ..state import MessageState
 from ..trace import Trace
 
@@ -33,11 +35,13 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     system = system_prompt_for(domain, settings, session_lang=locked_lang)
     schema = output_schema_for(domain)
     server_tools = server_tools_for(domain, settings)
+    runtime = reason_runtime_for(domain, settings)  # {model, effort, think_budget}, per skill
     convo = _to_neutral(state.get("messages"))
 
     t0 = time.monotonic()
     result = await reasoner.respond(
         system=system, messages=convo, output_schema=schema, server_tools=server_tools,
+        model=runtime["model"], effort=runtime["effort"], think_budget=runtime["think_budget"],
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -52,7 +56,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
     # and the metadata for the record.
     trace.code(
         tid, node="reason", loop_id=state.get("loop_id"), domain=domain,
-        provider=settings.llm_provider, model=settings.claude_model,
+        provider=settings.llm_provider, model=runtime["model"],
         state=llm_state, message=message, lang=result.get("lang"),
         reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
@@ -68,7 +72,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
         "actions": actions,
         "workflow": workflow,
         "provider": settings.llm_provider,
-        "model": settings.claude_model,
+        "model": runtime["model"],
         "provider_request_id": result.get("provider_request_id"),
         "usage": usage,
         "latency_ms": latency_ms,

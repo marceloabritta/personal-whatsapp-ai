@@ -29,12 +29,15 @@ class Reasoner(Protocol):
     async def respond(
         self, *, system: str, messages: list,
         output_schema: dict | None = None, server_tools: list | None = None,
+        model: str | None = None, effort: str | None = None, think_budget: int = 0,
     ) -> ReasonResult:
         """Given the system prompt and a neutral [{role, content}] history, return the
         enforced-JSON decision plus metadata. `output_schema` is the per-call enforced-JSON
         contract (the routed skill's) and `server_tools` the native tools to attach this call
-        (e.g. the web skill's) — both fall back to the reasoner's defaults when None. Tool use /
-        thinking / the pause_turn loop are the provider's private concern."""
+        (e.g. the web skill's) — both fall back to the reasoner's defaults when None. `model`,
+        `effort`, `think_budget` are the routed skill's per-call runtime (settings defaults when
+        None/0; think_budget > 0 enables thinking). Tool use / the pause_turn loop are the
+        provider's private concern."""
         ...
 
     async def classify(

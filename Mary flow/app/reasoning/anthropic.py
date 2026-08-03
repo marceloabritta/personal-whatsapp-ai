@@ -41,6 +41,7 @@ class AnthropicReasoner:
     async def respond(
         self, *, system: str, messages: list,
         output_schema: dict | None = None, server_tools: list | None = None,
+        model: str | None = None, effort: str | None = None, think_budget: int = 0,
     ) -> ReasonResult:
         client = self._client_or_make()
         convo = [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -49,17 +50,28 @@ class AnthropicReasoner:
         usage = {"input": 0, "output": 0}
         resp = None
 
+        # Per-skill runtime (resolved by the caller, settings defaults already applied). A skill
+        # sets think_budget > 0 to get a real thinking channel — the web path uses it because its
+        # long server-tool turns were degenerating the forced-JSON output into silence. Budget must
+        # sit under max_tokens.
+        model = model or self.s.claude_model
+        effort = effort or self.s.claude_effort
+        if think_budget and think_budget > 0:
+            thinking = {"type": "enabled",
+                        "budget_tokens": min(think_budget, self.s.claude_max_tokens - 1024)}
+        else:
+            thinking = {"type": "disabled"}
+
         try:
             for _ in range(_MAX_TOOL_HOPS):
                 kwargs = dict(
-                    model=self.s.claude_model,
+                    model=model,
                     max_tokens=self.s.claude_max_tokens,
                     system=system,
                     messages=convo,
-                    # TESTING SPEED IMPROVEMENT: no adaptive thinking (Sonnet 5 default run).
-                    thinking={"type": "disabled"},
+                    thinking=thinking,
                     output_config={
-                        "effort": self.s.claude_effort,
+                        "effort": effort,
                         "format": {"type": "json_schema", "schema": schema},
                     },
                 )
