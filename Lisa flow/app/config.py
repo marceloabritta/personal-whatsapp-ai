@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     default_meeting_minutes: int = 45
     calendar_timezone: str = "America/Sao_Paulo"
 
-    prompt_version: str = "2026-08-03.3"
+    prompt_version: str = "2026-08-03.4-no-web-claim"
 
     @property
     def tags(self) -> list[str]:
