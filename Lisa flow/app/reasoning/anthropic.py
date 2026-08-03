@@ -38,12 +38,10 @@ class AnthropicReasoner:
         return self._client
 
     def _tools(self) -> list[dict]:
-        # Web server-tools restored (test: Sonnet 5, thinking off, web tools loaded upfront).
-        n = self.s.web_search_max_uses
-        return [
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": n},
-            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": n},
-        ]
+        # Web tools OFF. On Sonnet 5 with thinking disabled they get invoked on every
+        # calendar turn (code_execution hops) — ~4x input tokens, ~2x latency. Winning
+        # config = lean, no web tools. Re-add on demand via a declared action, not upfront.
+        return []
 
     async def respond(self, *, system: str, messages: list) -> ReasonResult:
         client = self._client_or_make()
