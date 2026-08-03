@@ -228,6 +228,33 @@ async def main() -> None:
     check("no block for the oversized file", len(blocks_of(content, "document")) == 0)
     check("marked too large", "[PDF: huge.pdf — too large]" in text0)
 
+    # ---- 6. a fresh tag keeps her own past reply as context (not filtered) ----
+    # Regression: she transcribed an image, then a second @mary asked for a calculation. The
+    # reset used to filter her reply out of the re-seed, so the old "transcribe" order looked
+    # unanswered and she re-transcribed. Her framed reply must survive the reset, labeled
+    # "AI Assistant", so she can see the transcribe is done.
+    print("6. own reply kept on reset, labeled AI Assistant")
+    ai_header = "[Marcelo's AI Assistant]:"
+    history = [
+        media_rec("img6", media_type="image", mimetype="image/jpeg",
+                  text="@mary transcribe this", from_me=True, ts=1),
+        # her prior reply, echoed back by Evolution as fromMe with the header stamp
+        media_rec("airep6", media_type="text", from_me=True, ts=2,
+                  text=f"*{ai_header}*\n\nHere is the transcript: 12 + 30"),
+        media_rec("ask6", media_type="text", from_me=True, ts=3,
+                  text="@mary now add those two numbers"),
+    ]
+    graph, evo, reasoner = make_graph(history, {"img6": ("image/jpeg", JPEG)})
+    await invoke(graph, tag_upsert("@mary now add those two numbers", mid="ask6"))
+    content = last_user_content(reasoner)
+    text0 = content if isinstance(content, str) else content[0]["text"]
+    check("her past reply survives the reset (not filtered)",
+          "Here is the transcript: 12 + 30" in text0)
+    check("her past reply is labeled AI Assistant",
+          "AI Assistant: " in text0 and "AI Assistant: @mary" not in text0)
+    check("owner's own lines are not labeled AI Assistant",
+          "AI Assistant: @mary now add" not in text0)
+
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
 

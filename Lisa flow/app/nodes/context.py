@@ -196,13 +196,26 @@ async def context_node(
 
     raw = list(new)  # both sides, before the assistant-origin filter — for the log
 
-    # Filter assistant-origin — already AIMessages; never re-ingest. Primary filter is
-    # the message id we recorded when we sent it; the header stamp is the fallback.
-    new = [
-        r for r in new
-        if not echoes.is_ours(jid, r.get("id"))
-        and not is_own_message(r.get("text") or "", owner)
-    ]
+    # Filter assistant-origin messages. On a window CONTINUATION her past replies already live
+    # in the checkpoint as AIMessages, so re-ingesting them from history would duplicate them —
+    # drop anything recognised by recorded id OR header stamp. On a RESET the checkpoint was just
+    # wiped, so there is nothing to duplicate: KEEP her own replies as context, so she can see
+    # what she already did and not redo an already-answered order. But keep only the ones we can
+    # attribute — a header-stamped reply is labeled "AI Assistant" by build_labeled_transcript;
+    # a reply recognised ONLY by recorded id (header missing/mangled) has no header for label_for
+    # to key on and would be misattributed to the owner, so drop that one rather than mislabel it.
+    if reset:
+        new = [
+            r for r in new
+            if not (echoes.is_ours(jid, r.get("id"))
+                    and not is_own_message(r.get("text") or "", owner))
+        ]
+    else:
+        new = [
+            r for r in new
+            if not echoes.is_ours(jid, r.get("id"))
+            and not is_own_message(r.get("text") or "", owner)
+        ]
 
     loop_id = state.get("loop_id")
 
