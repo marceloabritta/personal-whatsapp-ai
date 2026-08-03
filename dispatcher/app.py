@@ -4,9 +4,12 @@ One WhatsApp number → one Evolution instance → one webhook URL. Evolution ca
 by message content, so this thin service reads the summon @tag (and per-chat window
 ownership) and forwards the *raw, unmodified* payload to the flow that owns the turn:
 
-    @assistente / @assistant / @mary  ─▶  Mary flow   (Node secretary, :3000)
     @lisa                              ─▶  Lisa flow   (LangGraph brain, :8000)
     (untagged)                         ─▶  the chat's current owner-flow, if its window is live
+
+Adding a new experimental flow is one line: drop another (tags, url) route below (or wire it
+via env) and point a fresh @tag at it — the core @lisa flow keeps running, untouched, so a
+new feature can never break it.
 
 Routing invariants (mirror each flow's own gate, which stays as the final arbiter):
   - a tag only *summons* when it comes from the OWNER (fromMe) — a contact typing "@mary"
@@ -47,7 +50,6 @@ def extract_text(msg: dict | None) -> str:
 
 
 _LEADING_MARKERS = "*_~ \t\r\n"
-LEGACY_HEADERS = ["[Mary]:"]
 
 
 def _header_for(owner_name: str, lang: str = "en") -> str:
@@ -57,7 +59,7 @@ def _header_for(owner_name: str, lang: str = "en") -> str:
 
 
 def _all_headers(owner_name: str) -> list[str]:
-    return [_header_for(owner_name, "en"), _header_for(owner_name, "pt"), *LEGACY_HEADERS]
+    return [_header_for(owner_name, "en"), _header_for(owner_name, "pt")]
 
 
 def _ends_tag(ch: str) -> bool:
@@ -90,12 +92,10 @@ class Config:
         self.window_ttl = int(os.getenv("WINDOW_TTL", "120"))
         self.redis_url = os.getenv("REDIS_URL") or None
         # Ordered routes: first tag-set that matches wins. Env-overridable so the
-        # tag→URL wiring lives with the deployment, not in code.
+        # tag→URL wiring lives with the deployment, not in code. To add a new flow,
+        # append another (tags, url) entry here and point a fresh @tag at it — the
+        # core @lisa route stays untouched, so a new feature can't break it.
         self.routes = [
-            (
-                _tags(os.getenv("MARY_TAGS", "@assistente,@assistant,@mary")),
-                os.getenv("MARY_URL", "http://mary:3000/webhook"),
-            ),
             (
                 _tags(os.getenv("LISA_TAGS", "@lisa")),
                 os.getenv("LISA_URL", "http://lisa:8000/webhook"),

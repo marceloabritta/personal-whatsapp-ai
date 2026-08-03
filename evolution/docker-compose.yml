@@ -1,7 +1,7 @@
 # ============================================================================
 #  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis +
-#  dispatcher + three flows (mary = @assistant/@mary, lisa = @lisa).
-#  Runs on a single droplet. Everything talks over the internal "evolution-net".
+#  dispatcher + Lisa (@lisa). Runs on a single droplet. Everything talks over
+#  the internal "evolution-net".
 # ============================================================================
 services:
   api:
@@ -44,13 +44,14 @@ services:
     networks:
       - evolution-net
 
-  # ── THREE FLOWS, ONE NUMBER ────────────────────────────────────────────────
+  # ── ONE NUMBER, TAG-ROUTED ─────────────────────────────────────────────────
   # One Evolution instance posts every message to ONE webhook. The `dispatcher`
   # is that single target; it reads the summon @tag (and per-chat window
   # ownership) and forwards the raw payload to the flow that owns the turn:
-  #   @assistente / @assistant / @mary → mary  (Node secretary, db83a6a)
-  #   @lisa                            → lisa  (LangGraph brain)
-  # The old secretary's full source is also preserved on branch archive/secretary-v1.
+  #   @lisa → lisa  (LangGraph brain — the core flow)
+  # To add a new experimental flow, add its service below, then wire a new
+  # @tag → its URL in the dispatcher env — the core @lisa flow stays untouched.
+  # The retired Node "secretary"/"Mary" flow is preserved on archive/secretary-v1.
 
   dispatcher:
     container_name: flow_dispatcher
@@ -60,7 +61,6 @@ services:
     depends_on:
       - api
       - redis
-      - mary
       - lisa
     ports:
       - "8090:8090"          # the ONE webhook Evolution posts to
@@ -72,50 +72,14 @@ services:
       # Own DB index, clear of Evolution's cache and the flows' session stores.
       REDIS_URL: redis://redis:6379/4
       # tag → flow wiring (forwarded by Docker service DNS on evolution-net).
-      MARY_TAGS: "@assistente,@assistant,@mary"
-      MARY_URL: http://mary:3000/webhook
+      # A new flow adds NEW_TAGS + NEW_URL here; @lisa stays untouched.
       LISA_TAGS: "@lisa"
       LISA_URL: http://lisa:8000/webhook
     networks:
       - evolution-net
 
-  # @assistant + @mary — the restored Node "secretary" (db83a6a). ONE process,
-  # two personas selected by tag inside 1. Orchestrator/server.js. Redis DB 0
-  # (it namespaces its own keys with `secretary:*`); no Postgres.
-  mary:
-    container_name: mary_flow
-    build:
-      context: ../Mary flow
-    restart: always
-    depends_on:
-      - api
-      - redis
-    environment:
-      EVOLUTION_URL: http://api:8080
-      EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
-      EVOLUTION_INSTANCE: secretaria
-      OWNER_NAME: "Marcelo"
-      # Trigger tags (lowercase). NOTE: the secretary persists tag changes in Redis
-      # (secretary:settings:tags / :new:tags) and those WIN over these at boot — clear
-      # them once if the stored values differ (see the plan / .env.example).
-      SECRETARY_TAG: "@assistente,@assistant"
-      SECRETARY_TAG_NEW: "@mary"
-      REDIS_URL: redis://redis:6379/0
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      CLAUDE_MODEL: claude-sonnet-5
-      # Skills: Google (calendar + tasks), AssemblyAI (audio), Kiwi flights (keyless).
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
-      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
-      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
-      ASSEMBLYAI_LANGUAGE: en
-      FLIGHT_CURRENCY: BRL
-    networks:
-      - evolution-net
-
-  # @lisa — the LangGraph brain (Python). Redis DB 1; Postgres checkpointer + its
-  # own log schema (renamed lisa_log so it never reads as Mary's).
+  # @lisa — the LangGraph brain (Python). The core flow: calendar, audio, PDFs,
+  # images. Redis DB 1; Postgres checkpointer + its own lisa_log schema.
   lisa:
     container_name: lisa_brain
     build:
