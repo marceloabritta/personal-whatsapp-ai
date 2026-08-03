@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .cache import TranscriptionService
 from .clients.evolution import Evolution
 from .config import Settings, load_settings
 from .echoes import InMemoryEchoes, RedisEchoes
 from .reasoning import build_reasoner
 from .sessions import InMemorySessions, RedisSessions
+from .transcription import build_transcriber
 from .tools.registry import (
     build_mcp_servers,
     build_output_schema,
@@ -29,6 +31,7 @@ class Deps:
     echoes: Any
     trace: Trace
     reasoner: Any
+    transcription: Any = None  # TranscriptionService (download + transcribe + cache)
     redis: Any = None
     # Tool framework — the registry fanned out (see tools/registry.py).
     tools: dict = None            # {domain: handler_instance} for the execute node
@@ -57,17 +60,25 @@ def build_deps(settings: Settings | None = None) -> Deps:
     output_schema = build_output_schema()
     mcp_servers = build_mcp_servers(settings=settings)
 
+    evolution = Evolution(
+        settings.evolution_url,
+        settings.evolution_apikey,
+        settings.evolution_instance,
+    )
+    # Transcription service: download + transcribe + cache. The durable cache tier (a
+    # TranscriptStore) is attached best-effort in the FastAPI lifespan when a DB is present.
+    transcription = TranscriptionService(
+        evolution, build_transcriber(settings), settings
+    )
+
     return Deps(
         settings=settings,
-        evolution=Evolution(
-            settings.evolution_url,
-            settings.evolution_apikey,
-            settings.evolution_instance,
-        ),
+        evolution=evolution,
         sessions=sessions,
         echoes=echoes,
         trace=build_trace(store=store),
         reasoner=build_reasoner(settings, output_schema=output_schema, mcp_servers=mcp_servers),
+        transcription=transcription,
         redis=redis_client,
         tools=local_handlers(settings=settings),
         tools_prompt=build_tools_prompt(owner_name=settings.owner_name),

@@ -56,6 +56,25 @@ class Settings(BaseSettings):
     # Tools. The read-back loop (list/find/failure -> reason) is bounded so it can't spin.
     max_tool_actions: int = 4
 
+    # Transcription — provider-neutral seam (app/transcription/), AssemblyAI first.
+    transcription_enabled: bool = True
+    transcription_provider: str = "assemblyai"
+    assemblyai_api_key: str = Field(
+        default="", validation_alias=AliasChoices("ASSEMBLYAI_API_KEY")
+    )
+    # Language for the transcript. "auto" → the provider detects it (drives the fast-path
+    # reply header without a reasoning pass); or pin an ISO code.
+    assemblyai_language: str = "auto"
+    transcription_max_poll_seconds: int = 120   # provider poll ceiling
+    transcription_request_timeout: float = 60.0  # per-HTTP-call timeout
+    transcription_cache_max: int = 512           # in-process LRU size (wa_id -> transcript)
+    long_audio_seconds: int = 120                # past this, deliver a .txt instead of inline
+    max_context_transcriptions: int = 8          # per-turn cap in the context pass
+    transcription_concurrency: int = 4           # semaphore width for the context gather
+    # Reactive fast path: how a reply-to-audio is recognised WITHOUT the model.
+    transcribe_fuzzy_threshold: float = 0.82     # difflib ratio a token must clear
+    transcribe_on_empty_reply: bool = True       # bare @mary on a voice note → transcribe
+
     # Google Calendar tool — OAuth2 refresh-token client on the owner's own account.
     google_client_id: str = ""
     google_client_secret: str = ""
@@ -64,7 +83,7 @@ class Settings(BaseSettings):
     default_meeting_minutes: int = 45
     calendar_timezone: str = "America/Sao_Paulo"
 
-    prompt_version: str = "2026-08-03.1"
+    prompt_version: str = "2026-08-03.2"
 
     @property
     def tags(self) -> list[str]:

@@ -8,6 +8,8 @@ memory. Assistant-origin messages are filtered (they're already AIMessages in th
 checkpoint). The new messages become one labeled user turn; the cursor advances."""
 from __future__ import annotations
 
+import asyncio
+
 from langchain_core.messages import RemoveMessage
 
 from ..identity import is_own_message
@@ -19,7 +21,9 @@ from ..whatsapp import build_labeled_transcript, label_for
 def _log_transcript(trace: Trace, tid: str, loop_id: str | None, records: list[dict],
                     owner: str) -> None:
     """Record each chat message into the loop's transcript stream (deduped by id in the
-    store). Both sides — owner, contact, and Mary — so the log is the real conversation."""
+    store). Both sides — owner, contact, and Mary — so the log is the real conversation.
+    Provenance: an audio record is logged with source="audio" so the durable stream records
+    which turns were spoken, not just what was said."""
     if not loop_id:
         return
     for r in records:
@@ -27,7 +31,45 @@ def _log_transcript(trace: Trace, tid: str, loop_id: str | None, records: list[d
         if not text:
             continue
         trace.user(tid, label_for(r, owner), text, loop_id=loop_id,
-                   wa_id=r.get("id"), ts=r.get("ts"), from_me=bool(r.get("from_me")))
+                   wa_id=r.get("id"), ts=r.get("ts"), from_me=bool(r.get("from_me")),
+                   source="audio" if r.get("is_audio") else "text")
+
+
+async def _transcribe_audio(records: list[dict], transcription, settings, trace: Trace,
+                            tid: str, loop_id: str | None) -> None:
+    """Transcribe the voice notes in `records` IN PLACE — an is_audio record with no text
+    gets its transcript (or an honest bracketed placeholder). Cached by wa id; capped at
+    settings.max_context_transcriptions with the overflow logged (no silent truncation);
+    concurrent under a bounded semaphore so a multi-clip window doesn't serialize."""
+    audio = [r for r in records if r.get("is_audio") and not (r.get("text") or "").strip()]
+    if not audio:
+        return
+    if not (transcription and settings.transcription_enabled):
+        for r in audio:  # mark presence — better than a silently dropped, empty voice note
+            r["text"] = "[voice message]"
+        return
+
+    cap = settings.max_context_transcriptions
+    todo, overflow = audio[:cap], audio[cap:]
+    for r in overflow:
+        r["text"] = "[voice message — not transcribed]"
+    if overflow and loop_id:
+        trace.code(tid, node="context", loop_id=loop_id, transcription_dropped=len(overflow))
+
+    sem = asyncio.Semaphore(settings.transcription_concurrency)
+
+    async def fill(r: dict) -> None:
+        async with sem:
+            res = await transcription.get(r["id"])
+            txt = (res.get("text") or "").strip()
+            if txt:
+                r["text"] = txt
+            elif res.get("error") == "empty":
+                r["text"] = "[voice message — no speech]"
+            else:
+                r["text"] = "[voice message — could not transcribe]"
+
+    await asyncio.gather(*(fill(r) for r in todo))
 
 
 def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[dict]:
@@ -40,7 +82,7 @@ def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[
 
 
 async def context_node(
-    state: MessageState, *, evolution, echoes, settings, trace: Trace
+    state: MessageState, *, evolution, echoes, settings, trace: Trace, transcription=None
 ) -> dict:
     tid = state["trace_id"]
     jid = state["remote_jid"]
@@ -75,14 +117,35 @@ async def context_node(
         and not is_own_message(r.get("text") or "", owner)
     ]
 
+    loop_id = state.get("loop_id")
+
+    # Hear voice notes: transcribe the window's audio IN PLACE before building the transcript,
+    # so label_for annotates them "(voice message — transcribed)" and _log_transcript marks
+    # the source. Mutates the shared record dicts, so both `raw` (reset log) and `new` (model)
+    # see the transcripts. Language follows the locked session language when set, else auto.
+    lang = state.get("session_lang")
+    await _transcribe_audio(new, transcription, settings, trace, tid, loop_id)
+
     transcript = build_labeled_transcript(new, owner)
     ids = [r["id"] for r in new if r.get("id")]
     newest = ids[-1] if ids else state.get("last_whatsapp_message_id")
 
+    # Compositional reply-to-audio: the owner referenced a voice note that isn't in the window.
+    # Transcribe it and inject one explicit line — no speaker-label guessing about who spoke it.
+    qid = state.get("quoted_audio_id")
+    if qid and qid not in ids and transcription and settings.transcription_enabled:
+        qres = await transcription.get(qid, language=lang)
+        qtext = (qres.get("text") or "").strip()
+        if qtext:
+            line = f'[{owner} replied to a voice message — transcribed: "{qtext}"]'
+            transcript = f"{transcript}\n{line}" if transcript.strip() else line
+            if loop_id:
+                trace.user(tid, f"{owner} (replied-to voice message)", qtext,
+                           loop_id=loop_id, wa_id=qid, source="audio")
+
     # Durable transcript. On a fresh tag (loop open) log the whole seed — the ~30
     # messages before the tag, both sides — as the loop's opening context. On a window
     # continuation log only the new inbound; Mary's own replies are logged by `act`.
-    loop_id = state.get("loop_id")
     _log_transcript(trace, tid, loop_id, raw if reset else new, owner)
     trace.code(
         tid, node="context", loop_id=loop_id,

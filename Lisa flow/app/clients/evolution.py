@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from ..whatsapp import extract_text
+from ..whatsapp import extract_text, is_audio_message
 
 log = logging.getLogger("mary.evolution")
 
@@ -62,6 +62,54 @@ class Evolution:
         key = (data.get("key") if isinstance(data, dict) else None) or {}
         return key.get("id") or ""
 
+    async def send_media(
+        self, number: str, *, mediatype: str, mimetype: str, media_b64: str,
+        filename: str, caption: str,
+    ) -> bool:
+        """POST /message/sendMedia/{instance}. Delivers a document (e.g. a long transcript
+        as a .txt). The caption is framed by the caller, never here. Returns True on 2xx."""
+        try:
+            resp = await self._post(
+                f"/message/sendMedia/{self.instance}",
+                {"number": number, "mediatype": mediatype, "mimetype": mimetype,
+                 "media": media_b64, "fileName": filename, "caption": caption},
+            )
+        except httpx.HTTPError as exc:
+            log.error("sendMedia transport error: %s", exc)
+            return False
+        if resp.status_code >= 400:
+            log.error("sendMedia failed %s: %s", resp.status_code, resp.text[:500])
+            return False
+        return True
+
+    async def get_media_base64(
+        self, message_id: str, *, convert_to_mp4: bool = False
+    ) -> Optional[dict]:
+        """POST /chat/getBase64FromMediaMessage/{instance}. Downloads and decrypts a media
+        message's bytes. Returns {"base64": str, "mimetype": str} on success, None on failure
+        (never raises into the graph — consistent with send_text)."""
+        try:
+            resp = await self._post(
+                f"/chat/getBase64FromMediaMessage/{self.instance}",
+                {"message": {"key": {"id": message_id}}, "convertToMp4": convert_to_mp4},
+            )
+        except httpx.HTTPError as exc:
+            log.error("getBase64FromMediaMessage transport error: %s", exc)
+            return None
+        if resp.status_code >= 400:
+            log.error("getBase64FromMediaMessage failed %s: %s",
+                      resp.status_code, resp.text[:500])
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        b64 = data.get("base64") if isinstance(data, dict) else None
+        if not b64:
+            log.error("getBase64FromMediaMessage: no base64 in response")
+            return None
+        return {"base64": b64, "mimetype": data.get("mimetype") or "audio/ogg"}
+
     async def _find_messages(self, where: dict) -> list[dict]:
         """One findMessages page. Returns [] on any failure so one bad query can't
         take down the other in fetch_history."""
@@ -108,5 +156,8 @@ class Evolution:
                 "text": extract_text(row.get("message")).strip(),
                 "push_name": row.get("pushName"),
                 "ts": int(row.get("messageTimestamp") or 0),
+                # Provenance: a voice note carries no text here — context transcribes it
+                # and the transcript is annotated as audio-sourced downstream.
+                "is_audio": is_audio_message(row.get("message")),
             }
         return sorted(by_id.values(), key=lambda r: r["ts"])

@@ -58,12 +58,30 @@ async def lifespan(app: FastAPI):
             log.warning("loop-logstore disabled: %s", exc)
             store = None
 
+    # Durable transcript cache — shares DATABASE_URL, isolated in the log schema. Best-effort:
+    # if it can't open, the in-process LRU is the whole cache and the reply path is unchanged.
+    tstore = None
+    if s.database_url and s.transcription_enabled:
+        from .cache import TranscriptStore
+
+        tstore = TranscriptStore(s.database_url, schema=s.log_schema)
+        try:
+            await tstore.open()
+            if deps.transcription is not None:
+                deps.transcription.store = tstore
+            log.info("%s", '{"boot":"transcript-cache"}')
+        except Exception as exc:  # cache must never block startup
+            log.warning("transcript-cache disabled: %s", exc)
+            tstore = None
+
     app.state.deps = deps
     app.state.logstore = store
     app.state.graph = build_graph(deps, checkpointer)
     try:
         yield
     finally:
+        if tstore is not None:
+            await tstore.aclose()
         if store is not None:
             await store.aclose()
         if cp_cm is not None:

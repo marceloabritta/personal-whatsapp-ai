@@ -33,6 +33,12 @@ class MessageState(TypedDict, total=False):
     is_own: bool
     tag: Optional[str]
 
+    # Voice-note transcription. `quoted_audio_id` is the audio this message replies to (fed to
+    # the fast-path transcribe node, or injected into context on the slow lane).
+    # `transcribe_only` is the matcher verdict — gate routes it to the fast lane.
+    quoted_audio_id: Optional[str]
+    transcribe_only: bool
+
     decision: str  # gate: "run" | "stop"
     trigger: Optional[str]  # "tag" | "window"
     loop_opened: bool  # this activation opened a NEW loop (tag on a closed window)

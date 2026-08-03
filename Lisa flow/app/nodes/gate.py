@@ -27,6 +27,12 @@ def gate_node(state: MessageState, *, sessions, trace: Trace) -> dict:
         return {"decision": "stop", "trigger": None}
 
     if state["from_me"] and state["tag"]:
+        # Fast lane: a pure transcribe request (reply to a voice note + tag, nothing else)
+        # short-circuits the model. One-shot — no listening window, no loop opened; the
+        # transcribe node does the work and mints its own loop for the durable log.
+        if state.get("transcribe_only") and state.get("quoted_audio_id"):
+            trace.code(tid, node="gate", decision="transcribe", trigger="transcribe")
+            return {"decision": "transcribe", "trigger": "transcribe"}
         sessions.open(jid)  # open the window (act refreshes/closes it)
         loop_id = trace.new_loop_id(state["number"])  # every tag = a new loop
         started = state.get("ts") or int(time.time())

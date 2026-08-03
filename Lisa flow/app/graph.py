@@ -17,6 +17,7 @@ from .nodes.execute import execute_node, route_after_execute
 from .nodes.gate import gate_node, route_after_gate
 from .nodes.parse import parse_node
 from .nodes.reason import reason_node, route_after_reason
+from .nodes.transcribe import transcribe_node
 from .state import MessageState
 
 
@@ -26,13 +27,18 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "parse",
         partial(parse_node, trace=deps.trace, tags=deps.settings.tags,
-                owner_name=deps.settings.owner_name),
+                owner_name=deps.settings.owner_name, settings=deps.settings),
     )
     g.add_node("gate", partial(gate_node, sessions=deps.sessions, trace=deps.trace))
     g.add_node(
+        "transcribe",
+        partial(transcribe_node, evolution=deps.evolution, transcription=deps.transcription,
+                echoes=deps.echoes, settings=deps.settings, trace=deps.trace),
+    )
+    g.add_node(
         "context",
         partial(context_node, evolution=deps.evolution, echoes=deps.echoes,
-                settings=deps.settings, trace=deps.trace),
+                settings=deps.settings, trace=deps.trace, transcription=deps.transcription),
     )
     g.add_node(
         "reason",
@@ -54,7 +60,11 @@ def build_graph(deps: Deps, checkpointer=None):
 
     g.set_entry_point("parse")
     g.add_edge("parse", "gate")
-    g.add_conditional_edges("gate", route_after_gate, {"run": "context", "stop": END})
+    g.add_conditional_edges(
+        "gate", route_after_gate,
+        {"run": "context", "transcribe": "transcribe", "stop": END},
+    )
+    g.add_edge("transcribe", END)
     g.add_edge("context", "reason")
     g.add_conditional_edges("reason", route_after_reason, {"execute": "execute", "act": "act"})
     g.add_conditional_edges("execute", route_after_execute, {"reason": "reason", "act": "act"})
