@@ -62,6 +62,7 @@ services:
       - api
       - redis
       - lisa
+      - mary
     ports:
       - "8090:8090"          # the ONE webhook Evolution posts to
     environment:
@@ -75,6 +76,9 @@ services:
       # A new flow adds NEW_TAGS + NEW_URL here; @lisa stays untouched.
       LISA_TAGS: "@lisa"
       LISA_URL: http://lisa:8000/webhook
+      # @mary — the experimental orchestrator flow (calendar + web skills).
+      MARY_TAGS: "@mary"
+      MARY_URL: http://mary:8000/webhook
     networks:
       - evolution-net
 
@@ -114,6 +118,53 @@ services:
       # Tools
       MAX_TOOL_ACTIONS: "4"
       # Google calendar tool (owner's account)
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
+      CALENDAR_TIMEZONE: America/Sao_Paulo
+    networks:
+      - evolution-net
+
+  # @mary — the experimental programmatic-orchestrator brain (calendar + web skills).
+  # ISOLATED from @lisa so a test flow can never corrupt the core one:
+  #   - own Redis DB (2) for its listening window + echo store (Lisa uses DB 1);
+  #   - NO DATABASE_URL → in-memory checkpointer, so it does NOT share the Postgres
+  #     checkpoint tables with Lisa (their thread_ids would otherwise collide on the same
+  #     instance+chat and a fresh-tag reset would wipe the other's history).
+  # Same WhatsApp number/account; the dispatcher routes @mary here, @lisa stays on lisa.
+  mary:
+    container_name: mary_brain
+    build:
+      context: ../Mary flow
+    restart: always
+    depends_on:
+      - api
+      - redis
+    environment:
+      EVOLUTION_URL: http://api:8080
+      EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
+      EVOLUTION_INSTANCE: secretaria
+      OWNER_NAME: "Marcelo"
+      # @mary wakes this brain.
+      MARY_TRIGGER_TAG: "@mary"
+      # Own Redis DB, clear of Lisa's (1), Evolution's cache, and the dispatcher's (4).
+      REDIS_URL: redis://redis:6379/2
+      LOOP_TTL_SECONDS: "60"
+      CONTEXT_WINDOW_MESSAGES: "30"
+      # NB: DATABASE_URL intentionally unset → in-memory checkpointer (isolation, see above).
+      # Reasoning (provider-neutral; Anthropic today).
+      LLM_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: claude-opus-4-8
+      CLAUDE_EFFORT: high
+      WEB_SEARCH_MAX_USES: "5"
+      PROMPT_VERSION: "2026-08-03-orchestrator"
+      # Programmatic domain orchestrator.
+      DEFAULT_DOMAIN: web
+      ROUTER_EFFORT: low
+      MAX_TOOL_ACTIONS: "4"
+      # Google calendar tool (owner's account — same as Lisa; confirmation-gated).
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}

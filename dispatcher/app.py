@@ -101,6 +101,11 @@ class Config:
                 os.getenv("LISA_URL", "http://lisa:8000/webhook"),
             ),
         ]
+        # Mary — the experimental orchestrator flow (@mary). Appended only when its URL is
+        # wired in the env, so the core @lisa route above is never affected by its presence.
+        mary_url = os.getenv("MARY_URL")
+        if mary_url:
+            self.routes.append((_tags(os.getenv("MARY_TAGS", "@mary")), mary_url))
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
