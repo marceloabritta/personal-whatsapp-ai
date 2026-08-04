@@ -22,8 +22,8 @@ _MONTHS = {
     "es": ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
 }
 _WEEKDAYS = {
-    "pt": ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira",
-           "Sábado", "Domingo"],
+    # PT weekdays without the "-feira" suffix — shorter and cleaner ("segunda", not "segunda-feira").
+    "pt": ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"],
     "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
     "es": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
 }
@@ -223,4 +223,5 @@ def fmt_list(results: list, state: dict) -> str:
             order.append(iso)
         t = L["all_day"] if "T" not in iso else fmt_time(iso, lang)
         by_day[day].append(f"{t} - {e.get('title') or L['untitled']}")
-    return "\n\n".join(fmt_date(iso, lang) + "\n" + "\n".join(by_day[iso[:10]]) for iso in order)
+    # The day header is bold (WhatsApp *…* — it has no underline) so each day stands out.
+    return "\n\n".join(f"*{fmt_date(iso, lang)}*\n" + "\n".join(by_day[iso[:10]]) for iso in order)
