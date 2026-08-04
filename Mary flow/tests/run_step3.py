@@ -185,16 +185,25 @@ async def router_checks() -> None:
     check("router: matcher 'yes' routes to calendar with no LLM",
           d == "calendar" and how == "matcher" and r.calls == 0)
 
-    # no -> web default, NO classifier call
-    d, how = await route_domain({"text": "tell me a joke"}, s, reasoner=r)
-    check("router: no signal falls back to web (default), no LLM",
-          d == "web" and how == "default" and r.calls == 0)
-
-    # maybe -> classifier decides
+    # NOT obviously calendar -> the classifier decides (a keyword-less edit/cancel/confirmation is
+    # never stranded on web). Here it correctly returns calendar.
     r2 = _ClsReasoner(domain="calendar")
-    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r2)
-    check("router: ambiguous escalates to the classifier exactly once",
+    d, how = await route_domain({"text": "mude o titulo para TESTE"}, s, reasoner=r2)
+    check("router: a keyword-less calendar edit goes to the classifier -> calendar",
           d == "calendar" and how == "classifier" and r2.calls == 1)
+    check("router: a guest-word edit hits the fast path (no classifier)",
+          (await route_domain({"text": "adicione a ana como convidada"}, s,
+                              reasoner=_ClsReasoner(domain="calendar")))[1] == "matcher")
+
+    # a bare confirmation with no keyword also asks the classifier (not web).
+    r3 = _ClsReasoner(domain="calendar")
+    d, how = await route_domain({"text": "sim, crie"}, s, reasoner=r3)
+    check("router: 'sim, crie' asks the classifier -> calendar", d == "calendar" and r3.calls == 1)
+
+    # a genuine web turn: the classifier says web.
+    r4 = _ClsReasoner(domain="web")
+    d, how = await route_domain({"text": "tell me a joke"}, s, reasoner=r4)
+    check("router: a general turn is classified web", d == "web" and how == "classifier")
 
     # classifier error -> safe default (web)
     r3 = _ClsReasoner(boom=True)
@@ -434,8 +443,10 @@ async def graph_checks() -> None:
     await _invoke(graph, _upsert("@mary check my agenda", mid="b1"))
     check("[bound] read-back stopped at max_tool_actions", cal.n("find") == 2)
 
-    # 10. web routing unchanged — a general turn → web skill + web tools, single pass.
+    # 10. web routing — a general turn has no calendar keyword → the classifier decides web →
+    #     web skill + web tools, single pass.
     deps, evo, stub, cal, graph = make_toolenv()
+    stub._classify_domain = "web"  # the classifier (no matcher hit) sends this general turn to web
     stub.script = [{"message": "It's sunny in Lisbon."}]
     st = await _invoke(graph, _upsert("@mary what's the weather in Lisbon?", mid="web1"))
     check("[web] routed to web with web tools",

@@ -22,8 +22,12 @@ def _classify_schema(domains: list[str]) -> dict:
 
 _CLASSIFY_SYSTEM = (
     "Classify the user's request into exactly one domain.\n"
-    '- "calendar": creating, listing, finding, rescheduling, or cancelling calendar events.\n'
+    '- "calendar": anything about events on the owner\'s calendar — creating, listing, finding, '
+    "rescheduling, cancelling, OR editing an existing event (changing its title, time, location, "
+    "or its guests / attendees; adding or removing a guest; adding a video call).\n"
     '- "web": anything else — general questions, chit-chat, or looking something up online.\n'
+    "A short follow-up that acts on an event just discussed (e.g. \"add Ana as a guest and rename "
+    'it\") is "calendar".\n'
     'Respond ONLY as JSON: {"domain": "calendar"} or {"domain": "web"}.'
 )
 
@@ -47,23 +51,22 @@ async def classify_domain(text: str, domains: list[str], reasoner, settings) -> 
 async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, str]:
     """Return (domain, how) where `how` is "matcher" | "classifier" | "default" — for the trace.
 
+    Only an OBVIOUS calendar signal (a matcher "yes") skips the model. Anything the matcher can't
+    affirmatively place — a keyword-less edit, a cancel, a bare confirmation like "sim, crie" — goes
+    to the cheap classifier, NOT silently to web. Web is only the fallback when there's no reasoner
+    or the classifier errors. (Earlier, a matcher "no" defaulted straight to web, which stranded
+    every calendar request the lexicon didn't recognise on the general skill.)
+
     Imported lazily so this module has no import cycle with the skills registry."""
     from . import SKILLS
 
     text = state.get("text") or ""
-    any_maybe = False
     for name, skill in SKILLS.items():
-        if skill.matcher is None:
-            continue
-        verdict = skill.matcher(text)
-        if verdict == "yes":
+        if skill.matcher is not None and skill.matcher(text) == "yes":
             return name, "matcher"
-        if verdict == "maybe":
-            any_maybe = True
 
-    if not any_maybe or reasoner is None:
+    if reasoner is None:
         return settings.default_domain, "default"
-
     try:
         return await classify_domain(text, list(SKILLS), reasoner, settings), "classifier"
     except Exception as exc:  # any classifier/transport error → safe default

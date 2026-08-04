@@ -35,10 +35,11 @@ from .render import LLMReadback, Programmatic
 # Unambiguous scheduling words (EN / PT / ES). Any hit → "yes".
 _STRONG = {
     "schedule", "reschedule", "meeting", "appointment", "calendar", "agenda", "remind",
-    "reminder", "invite", "event",
-    "agendar", "reagendar", "reuniao", "reuniao", "compromisso", "marcar", "remarcar",
-    "lembrete", "convite", "evento", "calendario",
-    "agenda", "reunion", "cita", "recordatorio", "agendame",
+    "reminder", "invite", "invitee", "event", "attendee", "attendees", "guest", "guests",
+    "agendar", "reagendar", "reagende", "reuniao", "compromisso", "marcar", "remarcar",
+    "remarque", "lembrete", "convite", "convidado", "convidados", "convidar", "evento",
+    "calendario",
+    "agenda", "reunion", "cita", "recordatorio", "agendame", "invitado", "invitados",
 }
 
 # Weak / time-ish words that MIGHT be scheduling but often are not ("cancel my sub", "monday
