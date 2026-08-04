@@ -19,6 +19,8 @@ class MessageState(TypedDict, total=False):
     loop_started_ts: Optional[int]  # unix ts the loop opened (tag on a closed window)
     workflow: Optional[dict]  # persistent gather memory toward a goal; cleared on tag-reset
     seen_event_ids: list  # calendar ids surfaced by find/list this loop; gates update/delete
+    seen_events: dict  # {event_id: view} surfaced by find/list this loop; feeds programmatic messages
+    pending_action: Optional[dict]  # a write awaiting the owner's yes; run by resolve_pending on a clean confirmation
 
     # --- per-turn scratch ---
     raw: dict
@@ -68,7 +70,8 @@ class MessageState(TypedDict, total=False):
     last_ran: int  # actions executed in the latest execute pass (respond reads this)
     last_results: list  # results of the latest execute pass (for a Programmatic render)
     confirm_route: str  # confirm node's routing verdict: "execute" | "reason" | "act"
-    respond_route: str  # respond node's routing verdict: "reason" | "act"
+    respond_route: str  # respond node's routing verdict: "reason" | "confirm" | "act"
+    resolve_route: str  # resolve_pending node's verdict: "execute" (clean yes) | "route"
 
     # act output
     reply: Optional[str]  # framed text actually sent

@@ -25,6 +25,7 @@ from .nodes.execute import execute_node
 from .nodes.gate import gate_node, route_after_gate
 from .nodes.parse import parse_node
 from .nodes.reason import reason_node, route_after_reason
+from .nodes.resolve import resolve_pending_node, route_after_resolve
 from .nodes.respond import respond_node, route_after_respond
 from .nodes.route import route_node
 from .nodes.transcribe import transcribe_node
@@ -49,6 +50,11 @@ def build_graph(deps: Deps, checkpointer=None):
         "context",
         partial(context_node, evolution=deps.evolution, echoes=deps.echoes,
                 settings=deps.settings, trace=deps.trace, transcription=deps.transcription),
+    )
+    g.add_node(
+        "resolve_pending",
+        partial(resolve_pending_node, confirm_policies=deps.confirm_policies or {},
+                trace=deps.trace),
     )
     g.add_node(
         "route",
@@ -85,7 +91,11 @@ def build_graph(deps: Deps, checkpointer=None):
         {"run": "context", "transcribe": "transcribe", "stop": END},
     )
     g.add_edge("transcribe", END)
-    g.add_edge("context", "route")
+    g.add_edge("context", "resolve_pending")
+    g.add_conditional_edges(
+        "resolve_pending", route_after_resolve,
+        {"execute": "execute", "reason": "reason", "route": "route"},
+    )
     g.add_edge("route", "reason")
     g.add_conditional_edges("reason", route_after_reason, {"confirm": "confirm", "act": "act"})
     g.add_conditional_edges(
@@ -93,7 +103,10 @@ def build_graph(deps: Deps, checkpointer=None):
         {"execute": "execute", "reason": "reason", "act": "act"},
     )
     g.add_edge("execute", "respond")
-    g.add_conditional_edges("respond", route_after_respond, {"reason": "reason", "act": "act"})
+    g.add_conditional_edges(
+        "respond", route_after_respond,
+        {"reason": "reason", "confirm": "confirm", "act": "act"},
+    )
     g.add_edge("act", END)
 
     return g.compile(checkpointer=checkpointer)

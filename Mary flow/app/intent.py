@@ -55,6 +55,60 @@ def _is_transcribe_word(tok: str, threshold: float) -> bool:
     )
 
 
+# --- confirmation intent (yes / other) — the programmatic happy-path gate -------------------
+#
+# When a skill has proposed a write and is waiting for the owner's go-ahead, the next message is
+# classified here with NO model call. "yes" fires ONLY when the reply is purely affirmative
+# (+ filler), so every tricky case — "yes but at 4pm", "no", a question — falls to "other" and is
+# handled by the model, exactly as today. Multi-word affirmatives are matched as normalized bigrams.
+
+_YES_WORDS = {
+    "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "k", "kk", "go", "confirm",
+    "confirmed", "perfect", "correct", "right", "please", "yea", "yup",
+    "sim", "s", "isso", "pode", "manda", "mande", "confirma", "confirmado", "vai", "beleza",
+    "blz", "ta", "certo", "perfeito", "claro", "fechado", "combinado", "positivo",
+    "si", "dale", "hazlo", "correcto", "perfecto", "vale", "adelante",
+}
+# Multi-word affirmatives (normalized, space-joined). Matched as contiguous bigrams.
+_YES_PHRASES = {
+    "go ahead", "do it", "send it", "sounds good", "that works", "yes please", "go for it",
+    "pode ser", "pode sim", "pode mandar", "manda ver", "vai la", "isso mesmo", "pode agendar",
+    "esta certo", "ta bom", "por favor",
+    "hazlo ya", "esta bien", "de acuerdo",
+}
+# Filler that carries no instruction — ignored when deciding if a reply is a CLEAN yes.
+_CONFIRM_FILLER = {
+    "please", "pls", "plz", "por", "favor", "obrigado", "obrigada", "thanks", "thank", "you",
+    "the", "it", "this", "that", "entao", "then", "ai", "e", "mas",
+}
+
+
+def classify_confirmation(text: str) -> str:
+    """"yes" | "other" — is this reply a clean affirmative? (programmatic, no model call).
+
+    "yes" only when every substantive token is affirmative (or filler); anything else — a
+    rejection, a question, or a yes carrying a change ("sim, mas 17h") — returns "other" so the
+    model handles it. Bigram phrases ("go ahead", "pode mandar") count as affirmative."""
+    tokens = _normalize(text).split()
+    if not tokens:
+        return "other"
+    # Consume affirmative bigrams first, so their words aren't counted as "other".
+    matched = [False] * len(tokens)
+    for i in range(len(tokens) - 1):
+        if f"{tokens[i]} {tokens[i + 1]}" in _YES_PHRASES:
+            matched[i] = matched[i + 1] = True
+    hit = any(matched)
+    other = False
+    for i, tok in enumerate(tokens):
+        if matched[i]:
+            continue
+        if tok in _YES_WORDS:
+            hit = True
+        elif tok not in _CONFIRM_FILLER:
+            other = True
+    return "yes" if (hit and not other) else "other"
+
+
 def classify_transcribe(
     text: str, tags: list[str], quoted_text: str | None, *, threshold: float = 0.82,
     on_empty: bool = True,

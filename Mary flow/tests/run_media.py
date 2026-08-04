@@ -45,7 +45,7 @@ class StubReasoner:
     def __init__(self) -> None:
         self.calls: list = []
 
-    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None, model=None, effort=None, think=False):
         self.calls.append({"system": system, "messages": [dict(m) for m in messages]})
         return {"state": "keep_listening", "message": None, "lang": "en", "usage": {},
                 "provider_request_id": "req", "stop_reason": "end_turn",

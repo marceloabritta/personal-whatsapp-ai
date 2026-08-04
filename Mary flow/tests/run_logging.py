@@ -81,7 +81,7 @@ class StubReasoner:
         self.calls: list = []
         self.script: list = []
 
-    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None, model=None, effort=None, think=False):
         self.calls.append({"messages": list(messages)})
         if self.script:
             return self.script.pop(0)

@@ -268,9 +268,12 @@ async def context_node(
     }
     if reset:
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
-        # loop can never bleed into this one (the anti-delirium invariant).
+        # loop can never bleed into this one (the anti-delirium invariant). A fresh tag is a new
+        # request, so a write awaiting confirmation is abandoned (cleared), not silently run.
         update["workflow"] = None
         update["seen_event_ids"] = []
+        update["seen_events"] = {}
+        update["pending_action"] = None
 
     # add_messages appends, so to truly start fresh we must first REMOVE every
     # message the checkpoint restored, then add this loop's seed turn.
