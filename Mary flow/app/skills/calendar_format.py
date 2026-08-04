@@ -37,6 +37,8 @@ _L = {
         "guests_will": "Os convidados serão avisados.", "guests_did": "Os convidados foram avisados.",
         "empty": "Nada na agenda.", "all_day": "Dia inteiro", "untitled": "(sem título)",
         "event": "(evento)",
+        "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local",
+        "u_video": "Agora por vídeo (Google Meet)", "u_guests": "Adicionar", "u_none": "sem alterações",
     },
     "en": {
         "confirm_create": "Confirming", "confirm_update": "Confirming this change",
@@ -48,6 +50,8 @@ _L = {
         "guests_will": "The guests will be notified.", "guests_did": "The guests were notified.",
         "empty": "Nothing on your calendar.", "all_day": "All day", "untitled": "(no title)",
         "event": "(event)",
+        "u_title": "New title", "u_time": "New time", "u_where": "New location",
+        "u_video": "Now a video call (Google Meet)", "u_guests": "Add", "u_none": "no changes",
     },
     "es": {
         "confirm_create": "Confirmando", "confirm_update": "Confirmando el cambio",
@@ -58,6 +62,8 @@ _L = {
         "guests_will": "Se avisará a los invitados.", "guests_did": "Se avisó a los invitados.",
         "empty": "Nada en la agenda.", "all_day": "Todo el día", "untitled": "(sin título)",
         "event": "(evento)",
+        "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación",
+        "u_video": "Ahora por video (Google Meet)", "u_guests": "Añadir", "u_none": "sin cambios",
     },
 }
 
@@ -84,7 +90,9 @@ def _dt(iso: str, lang: str) -> str:
 
 
 def _joined(lines: list) -> str:
-    return "\n".join(x for x in lines if x is not None and x != "")
+    # Keep intentional blank lines ("" separators between sections); drop only absent fields (None).
+    # The formatters never append "" for a missing field — they skip it — so nothing collapses.
+    return "\n".join(x for x in lines if x is not None)
 
 
 # --- confirmation prompts (before a write) ------------------------------------------------
@@ -105,19 +113,34 @@ def compose_create(action: dict, state: dict) -> str | None:
 
 
 def compose_update(action: dict, state: dict) -> str | None:
+    """Identify the event (its CURRENT title + time) and list WHAT is changing, so the owner can
+    tell exactly what he's approving. New values come from the action, old from the cached event."""
     lang = _lang(state); L = _L[lang]
     ev = (state.get("seen_events") or {}).get(action.get("event_id")) or {}
-    start = action.get("start") or ev.get("start")
-    title = ev.get("title") or action.get("title")
-    if not (title or start):
-        return None
-    lines = [f"{L['confirm_update']}:", title or L["event"]]
-    if start:
-        lines.append(_dt(start, lang))
+    header = ev.get("title") or action.get("title")
+    if not (header or ev.get("start")):
+        return None  # nothing to identify the event by → let the model phrase it
+
+    lines = [f"{L['confirm_update']}:", header or L["event"]]
+    if ev.get("start"):
+        lines.append(_dt(ev["start"], lang))
+
+    changes: list[str] = []
+    if action.get("title") and action["title"] != ev.get("title"):
+        changes.append(f"{L['u_title']}: {action['title']}")
+    if action.get("start") and action["start"] != ev.get("start"):
+        changes.append(f"{L['u_time']}: {_dt(action['start'], lang)}")
     if action.get("virtual"):
-        lines.append(L["video"])
-    elif action.get("location"):
-        lines.append(action["location"])
+        changes.append(L["u_video"])
+    elif action.get("location") and action["location"] != ev.get("location"):
+        changes.append(f"{L['u_where']}: {action['location']}")
+    if action.get("attendees"):
+        added = [a for a in action["attendees"] if a not in (ev.get("attendees") or [])]
+        if added:
+            changes.append(f"{L['u_guests']}: {', '.join(added)}")
+
+    if changes:
+        lines += [""] + changes
     lines += ["", L["ask_update"]]
     return _joined(lines)
 
@@ -165,6 +188,8 @@ def fmt_update(results: list, state: dict) -> str:
         lines.append(L["video"])
     elif d.get("location"):
         lines.append(d["location"])
+    if d.get("attendees"):
+        lines.append(f"{L['with']} {', '.join(d['attendees'])}")
     return _joined(lines)
 
 

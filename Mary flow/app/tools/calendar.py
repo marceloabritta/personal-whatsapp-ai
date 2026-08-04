@@ -57,16 +57,13 @@ CREATE — you only need a title and a start; do not interrogate {owner_name} fo
 
 LIST — read-only, no confirmation. Resolve the window from his question (default: what is coming up). Emit `calendar.list` with time_min/time_max; the system formats and sends the agenda.
 
-FIND — the resolver. Search by title words ("query"), the person ("attendee"), and/or a time window.
-- If he asked "when is X", just emit `calendar.find`; the system answers.
-- If the find is a STEP toward a reschedule or cancel, ALSO set "workflow" to the goal so the system can finish it directly when the search hits a single event:
-  {{"task": "calendar.update", "known_inputs": [{{"field": "start", "value": "<new ISO datetime>"}}]}}  (for a reschedule — one entry per changed field)
-  {{"task": "calendar.delete", "known_inputs": []}}  (for a cancel)
-  If several events match, the system shows them and you pick one next turn.
+FIND — the resolver. Search by title words ("query"), the person ("attendee"), and/or a time window. Emit `calendar.find`.
+- To answer "when is X", just emit the find; the system replies.
+- To CANCEL an event, emit the find AND set "workflow" to {{"task": "calendar.delete"}} — when the search hits a single event the system asks to cancel it directly. If several match, the system lists them and you pick one next turn.
 
-UPDATE (reschedule / edit) — `find` first to get the id, then emit `calendar.update` with the "event_id" and the changed fields, "confirmed": false, "message": null. A new start keeps the original length unless you also give an end.
+UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, location, virtual, attendees), "confirmed": false, "message": null. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
-DELETE (cancel) — `find` first to get the id, then emit `calendar.delete` with the "event_id", "confirmed": false, "message": null."""
+DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id", "confirmed": false, "message": null."""
 
 
 class GoogleCalendarService:

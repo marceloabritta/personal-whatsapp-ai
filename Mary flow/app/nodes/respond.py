@@ -17,14 +17,15 @@ from ..skills.calendar_format import LANGS
 from ..state import MessageState
 from ..trace import Trace
 
-_WRITE_INTENTS = {"calendar.update", "calendar.delete"}
-
-
 def _build_write_from_find(state: MessageState) -> dict | None:
-    """A single-match find + a recorded write intent → the resolved write action, or None."""
+    """A single-match find + a recorded DELETE intent → the resolved delete action, or None.
+
+    Only `delete` auto-resolves: it needs nothing but the id, so a single match goes straight to
+    the cancel confirmation with no reason ②. `update` is intentionally NOT auto-resolved here — its
+    edits (a new title, added guests, a video call) are structured fields that don't survive being
+    carried as workflow string values; those go through the model's structured proposal (reason ②)."""
     wf = state.get("workflow") or {}
-    task = wf.get("task", "")
-    if task not in _WRITE_INTENTS:
+    if wf.get("task") != "calendar.delete":
         return None
     results = state.get("last_results") or []
     items = ((results[0].get("data") or {}).get("items")) if results else None
@@ -33,14 +34,7 @@ def _build_write_from_find(state: MessageState) -> dict | None:
     eid = items[0].get("event_id")
     if not eid:
         return None
-    if task == "calendar.delete":
-        return {"task": "calendar.delete", "event_id": eid, "confirmed": False}
-    # update — needs the intended change(s), carried in workflow.known_inputs
-    changes = {ki["field"]: ki["value"] for ki in (wf.get("known_inputs") or [])
-               if ki.get("field") and ki["field"] not in ("event_id", "task") and ki.get("value")}
-    if not changes:
-        return None
-    return {"task": "calendar.update", "event_id": eid, "confirmed": False, **changes}
+    return {"task": "calendar.delete", "event_id": eid, "confirmed": False}
 
 
 async def respond_node(
