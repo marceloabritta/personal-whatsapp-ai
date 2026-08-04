@@ -33,12 +33,12 @@ _L = {
         "confirm_delete": "Confirmando cancelamento",
         "ask_create": "Posso agendar?", "ask_update": "Posso alterar?", "ask_delete": "Cancelar?",
         "created": "Agendado", "updated": "Alterado", "cancelled": "Cancelado",
-        "video": "Google Meet (chamada de vídeo)", "with": "com", "guests": "convidados",
+        "video": "Chamada de vídeo", "participants": "Participantes", "event_link": "Link do evento",
+        "u_done": "Agora com os detalhes acima.",
         "guests_will": "Os convidados serão avisados.", "guests_did": "Os convidados foram avisados.",
         "empty": "Nada na agenda.", "all_day": "Dia inteiro", "untitled": "(sem título)",
         "event": "(evento)",
-        "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local",
-        "u_video": "Agora por vídeo (Google Meet)", "u_guests": "Adicionar", "u_none": "sem alterações",
+        "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local", "u_guests": "Adicionar",
     },
     "en": {
         "confirm_create": "Confirming", "confirm_update": "Confirming this change",
@@ -46,24 +46,24 @@ _L = {
         "ask_create": "Shall I schedule it?", "ask_update": "Shall I change it?",
         "ask_delete": "Cancel this one?",
         "created": "Scheduled", "updated": "Updated", "cancelled": "Cancelled",
-        "video": "Google Meet (video call)", "with": "with", "guests": "guest(s)",
+        "video": "Video call", "participants": "Guests", "event_link": "Event link",
+        "u_done": "Now with the details above.",
         "guests_will": "The guests will be notified.", "guests_did": "The guests were notified.",
         "empty": "Nothing on your calendar.", "all_day": "All day", "untitled": "(no title)",
         "event": "(event)",
-        "u_title": "New title", "u_time": "New time", "u_where": "New location",
-        "u_video": "Now a video call (Google Meet)", "u_guests": "Add", "u_none": "no changes",
+        "u_title": "New title", "u_time": "New time", "u_where": "New location", "u_guests": "Add",
     },
     "es": {
         "confirm_create": "Confirmando", "confirm_update": "Confirmando el cambio",
         "confirm_delete": "Confirmando la cancelación",
         "ask_create": "¿Lo agendo?", "ask_update": "¿Lo cambio?", "ask_delete": "¿Lo cancelo?",
         "created": "Agendado", "updated": "Actualizado", "cancelled": "Cancelado",
-        "video": "Google Meet (videollamada)", "with": "con", "guests": "invitados",
+        "video": "Videollamada", "participants": "Invitados", "event_link": "Enlace del evento",
+        "u_done": "Ahora con los detalles de arriba.",
         "guests_will": "Se avisará a los invitados.", "guests_did": "Se avisó a los invitados.",
         "empty": "Nada en la agenda.", "all_day": "Todo el día", "untitled": "(sin título)",
         "event": "(evento)",
-        "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación",
-        "u_video": "Ahora por video (Google Meet)", "u_guests": "Añadir", "u_none": "sin cambios",
+        "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación", "u_guests": "Añadir",
     },
 }
 
@@ -89,10 +89,17 @@ def _dt(iso: str, lang: str) -> str:
     return f"{fmt_date(iso, lang)}, {fmt_time(iso, lang)}"
 
 
+def _cap(line: str) -> str:
+    # Capitalize the first character of a line when it's a letter (so a name-email "ana@x.com" →
+    # "Ana@x.com"); lines starting with a digit or symbol (dates "05/ago", the "*bold*" header) are
+    # left untouched.
+    return line[0].upper() + line[1:] if line and line[0].islower() else line
+
+
 def _joined(lines: list) -> str:
     # Keep intentional blank lines ("" separators between sections); drop only absent fields (None).
     # The formatters never append "" for a missing field — they skip it — so nothing collapses.
-    return "\n".join(x for x in lines if x is not None)
+    return "\n".join(_cap(x) for x in lines if x is not None)
 
 
 # --- confirmation prompts (before a write) ------------------------------------------------
@@ -101,13 +108,14 @@ def compose_create(action: dict, state: dict) -> str | None:
     lang = _lang(state); L = _L[lang]
     if not action.get("start"):
         return None
-    lines = [f"{L['confirm_create']}:", action.get("title") or L["event"], _dt(action["start"], lang)]
+    lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"], _dt(action["start"], lang)]
     if action.get("virtual"):
         lines.append(L["video"])
     elif action.get("location"):
         lines.append(action["location"])
     if action.get("attendees"):
-        lines.append(f"{L['with']} {', '.join(action['attendees'])}")
+        lines.append(L["participants"])
+        lines.extend(action["attendees"])
     lines += ["", L["ask_create"]]
     return _joined(lines)
 
@@ -121,7 +129,7 @@ def compose_update(action: dict, state: dict) -> str | None:
     if not (header or ev.get("start")):
         return None  # nothing to identify the event by → let the model phrase it
 
-    lines = [f"{L['confirm_update']}:", header or L["event"]]
+    lines = [f"{L['confirm_update']}:", "", header or L["event"]]
     if ev.get("start"):
         lines.append(_dt(ev["start"], lang))
 
@@ -131,13 +139,14 @@ def compose_update(action: dict, state: dict) -> str | None:
     if action.get("start") and action["start"] != ev.get("start"):
         changes.append(f"{L['u_time']}: {_dt(action['start'], lang)}")
     if action.get("virtual"):
-        changes.append(L["u_video"])
+        changes.append(L["video"])
     elif action.get("location") and action["location"] != ev.get("location"):
         changes.append(f"{L['u_where']}: {action['location']}")
     if action.get("attendees"):
         added = [a for a in action["attendees"] if a not in (ev.get("attendees") or [])]
-        if added:
-            changes.append(f"{L['u_guests']}: {', '.join(added)}")
+        if added:  # same shape as create/delete: a Participantes label + one email per line
+            changes.append(L["participants"])
+            changes.extend(added)
 
     if changes:
         lines += [""] + changes
@@ -150,9 +159,12 @@ def compose_delete(action: dict, state: dict) -> str | None:
     ev = (state.get("seen_events") or {}).get(action.get("event_id")) or {}
     if not ev:  # need the event's details to confirm a cancellation
         return None
-    lines = [f"{L['confirm_delete']}:", ev.get("title") or L["event"]]
+    lines = [f"{L['confirm_delete']}:", "", ev.get("title") or L["event"]]
     if ev.get("start"):
         lines.append(_dt(ev["start"], lang))
+    if ev.get("attendees"):
+        lines.append(L["participants"])
+        lines.extend(ev["attendees"])
     ask = L["ask_delete"] + (f" {L['guests_will']}" if ev.get("attendees") else "")
     lines += ["", ask]
     return _joined(lines)
@@ -161,42 +173,36 @@ def compose_delete(action: dict, state: dict) -> str | None:
 # --- success cards (after a write) --------------------------------------------------------
 
 def fmt_create(results: list, state: dict) -> str:
+    # Kept deliberately minimal — same shape whether virtual or in-person: heading, blank, title,
+    # date/time, blank, the event link. The details were already in the confirmation.
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
-    lines = [f"{L['created']}:", d.get("title") or L["event"]]
+    lines = [f"{L['created']}:", "", d.get("title") or L["event"]]
     if d.get("start"):
         lines.append(_dt(d["start"], lang))
-    if d.get("meet_link"):
-        lines.append(L["video"])
-    elif d.get("location"):
-        lines.append(d["location"])
     if d.get("html_link"):
-        lines.append(d["html_link"])
-    n = len(d.get("attendees") or [])
-    if n:
-        lines.append(f"{n} {L['guests']}")
+        lines += ["", f"{L['event_link']}: {d['html_link']}"]
     return _joined(lines)
 
 
 def fmt_update(results: list, state: dict) -> str:
+    # The changes were listed in the confirmation just above, so the card points back to them
+    # ("now with the details above") instead of re-listing.
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
-    lines = [f"{L['updated']}:", d.get("title") or L["event"]]
+    lines = [f"{L['updated']}:", "", d.get("title") or L["event"]]
     if d.get("start"):
         lines.append(_dt(d["start"], lang))
-    if d.get("meet_link"):
-        lines.append(L["video"])
-    elif d.get("location"):
-        lines.append(d["location"])
-    if d.get("attendees"):
-        lines.append(f"{L['with']} {', '.join(d['attendees'])}")
+    lines += ["", L["u_done"]]
+    if d.get("html_link"):
+        lines += ["", f"{L['event_link']}: {d['html_link']}"]
     return _joined(lines)
 
 
 def fmt_delete(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
-    lines = [f"{L['cancelled']}:", d.get("title") or L["event"]]
+    lines = [f"{L['cancelled']}:", "", d.get("title") or L["event"]]
     if d.get("start"):
         lines.append(_dt(d["start"], lang))
     if d.get("had_attendees"):
