@@ -271,6 +271,7 @@ async def context_node(
         # loop can never bleed into this one (the anti-delirium invariant). A fresh tag is a new
         # request, so a write awaiting confirmation is abandoned (cleared), not silently run.
         update["workflow"] = None
+        update["loop_domain"] = None
         update["seen_event_ids"] = []
         update["seen_events"] = {}
         update["pending_action"] = None

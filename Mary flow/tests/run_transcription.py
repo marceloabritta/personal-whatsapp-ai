@@ -50,7 +50,7 @@ class StubReasoner:
                 "usage": {}, "provider_request_id": "req", "stop_reason": "end_turn",
                 "tool_calls": [], "error_category": "none"}
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         return {"domain": "web"}
 
 

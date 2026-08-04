@@ -163,7 +163,7 @@ class _ClsReasoner:
     def __init__(self, domain: str | None = None, boom: bool = False) -> None:
         self.domain, self.boom, self.calls = domain, boom, 0
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         self.calls += 1
         if self.boom:
             raise RuntimeError("classifier down")
@@ -206,9 +206,26 @@ async def router_checks() -> None:
     check("router: a general turn is classified web", d == "web" and how == "classifier")
 
     # classifier error -> safe default (web)
-    r3 = _ClsReasoner(boom=True)
-    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r3)
+    r5 = _ClsReasoner(boom=True)
+    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r5)
     check("router: classifier failure falls back to web", d == "web" and how == "default")
+
+    # loop stickiness: a continuation of an open loop sticks to the loop domain — NO model call,
+    # even if the classifier would say otherwise. ("sim, crie" inside a calendar loop stays calendar.)
+    r6 = _ClsReasoner(domain="web")
+    d, how = await route_domain(
+        {"text": "sim, crie", "loop_domain": "calendar", "loop_opened": False}, s, reasoner=r6)
+    check("router: a loop continuation sticks to the loop domain (no LLM)",
+          d == "calendar" and how == "loop" and r6.calls == 0)
+    # an explicit calendar signal still switches INTO calendar mid-web-loop.
+    d, how = await route_domain(
+        {"text": "agenda uma reuniao", "loop_domain": "web", "loop_opened": False}, s, reasoner=r6)
+    check("router: an explicit calendar word overrides a web loop", d == "calendar" and how == "matcher")
+    # a fresh tag re-decides (loop_opened) instead of sticking to a stale loop domain.
+    r7 = _ClsReasoner(domain="web")
+    d, how = await route_domain(
+        {"text": "tell me a joke", "loop_domain": "calendar", "loop_opened": True}, s, reasoner=r7)
+    check("router: a fresh tag re-decides, not sticky", d == "web" and how == "classifier")
 
 
 # ============================ P2 — the tool loop (graph-driven) ============================
@@ -234,7 +251,7 @@ class StubReasoner:
             base.update(self.script.pop(0))
         return base
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         return {"domain": self._classify_domain}
 
 
@@ -455,6 +472,25 @@ async def graph_checks() -> None:
           == ["web_search_20260209", "web_fetch_20260209"])
     check("[web] single pass, no calendar touched", len(stub.calls) == 1 and cal.calls == [])
 
+    # 11. loop stickiness (the "sim, crie" bug): the loop opened on calendar; a keyword-less
+    #     untagged continuation stays on calendar — NOT re-routed to web — with no classifier call.
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["find"] = {"ok": True, "summary": "1 [id=E1]", "data": {"items": [
+        {"event_id": "E1", "title": "Reunião", "start": "2026-08-05T10:30:00-03:00"}]}}
+    stub.script = [
+        {"message": None, "actions": [{"task": "calendar.find", "query": "reuniao",
+            "time_min": "2026-08-05T00:00:00-03:00", "time_max": "2026-08-05T23:59:59-03:00"}]},
+        {"message": "Você já tem uma reunião às 10:30. Quer criar mesmo assim?"},  # asks, no pending
+        {"message": None, "actions": [{"task": "calendar.create", "title": "Reunião",
+            "start": "2026-08-05T10:30:00-03:00", "confirmed": False}]}]
+    st = await _invoke(graph, _upsert("@mary marque uma reuniao amanha 10:30", mid="s1"))
+    check("[sticky] the loop opened on calendar", st.get("loop_domain") == "calendar")
+    stub._classify_domain = "web"  # if stickiness failed, the classifier would send it to web
+    st = await _invoke(graph, _upsert("sim, crie", mid="s2"))
+    check("[sticky] a keyword-less continuation stayed on calendar (not web)",
+          st.get("domain") == "calendar")
+    check("[sticky] and the calendar skill proposed the create", cal.n("find") == 1)
+
 
 # ============================ P3 — a programmatic render skill (stub) ======================
 
@@ -478,7 +514,7 @@ class _StrReasoner:
             base["message"], base["actions"] = "SHOULD NOT SEND", []
         return base
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         return {"domain": "calendar"}
 
 

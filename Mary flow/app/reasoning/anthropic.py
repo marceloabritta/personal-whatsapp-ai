@@ -140,17 +140,19 @@ class AnthropicReasoner:
         )
 
     async def classify(
-        self, *, system: str, text: str, schema: dict,
+        self, *, system: str, messages: list, schema: dict,
         max_tokens: int = 32, effort: str = "low",
     ) -> dict:
-        """One cheap enforced-JSON call, no tools, returning the raw parsed object. Used by the
-        router's domain classifier; raises on failure so the caller falls back to a default."""
+        """One cheap enforced-JSON call, no tools, over a neutral conversation, returning the raw
+        parsed object. Used by the router's domain classifier; raises on failure so the caller
+        falls back to a default."""
         client = self._client_or_make()
+        convo = [{"role": m["role"], "content": m["content"]} for m in messages]
         resp = await client.messages.create(
             model=self.s.claude_model,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": text}],
+            messages=convo,
             thinking={"type": "disabled"},
             output_config={
                 "effort": effort,

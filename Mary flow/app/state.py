@@ -18,6 +18,7 @@ class MessageState(TypedDict, total=False):
     loop_id: Optional[str]  # id of the current listening loop (grouping key for the log)
     loop_started_ts: Optional[int]  # unix ts the loop opened (tag on a closed window)
     workflow: Optional[dict]  # persistent gather memory toward a goal; cleared on tag-reset
+    loop_domain: Optional[str]  # the domain this loop is operating in; a continuation sticks to it
     seen_event_ids: list  # calendar ids surfaced by find/list this loop; gates update/delete
     seen_events: dict  # {event_id: view} surfaced by find/list this loop; feeds programmatic messages
     pending_action: Optional[dict]  # a write awaiting the owner's yes; run by resolve_pending on a clean confirmation
