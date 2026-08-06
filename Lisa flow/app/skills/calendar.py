@@ -12,8 +12,12 @@ import unicodedata
 from ..tools.calendar import DESCRIBE, GUIDANCE, GoogleCalendarService
 from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
+from .calendar_format import (
+    compose_create, compose_delete, compose_update,
+    fmt_create, fmt_delete, fmt_list, fmt_update,
+)
 from .confirm import FlagConfirm
-from .render import LLMReadback
+from .render import LLMReadback, Programmatic
 
 
 # --- the router matcher -------------------------------------------------------------------
@@ -31,10 +35,11 @@ from .render import LLMReadback
 # Unambiguous scheduling words (EN / PT / ES). Any hit → "yes".
 _STRONG = {
     "schedule", "reschedule", "meeting", "appointment", "calendar", "agenda", "remind",
-    "reminder", "invite", "event",
-    "agendar", "reagendar", "reuniao", "reuniao", "compromisso", "marcar", "remarcar",
-    "lembrete", "convite", "evento", "calendario",
-    "agenda", "reunion", "cita", "recordatorio", "agendame",
+    "reminder", "invite", "invitee", "event", "attendee", "attendees", "guest", "guests",
+    "agendar", "reagendar", "reagende", "reuniao", "compromisso", "marcar", "remarcar",
+    "remarque", "lembrete", "convite", "convidado", "convidados", "convidar", "evento",
+    "calendario",
+    "agenda", "reunion", "cita", "recordatorio", "agendame", "invitado", "invitados",
 }
 
 # Weak / time-ish words that MIGHT be scheduling but often are not ("cancel my sub", "monday
@@ -88,8 +93,22 @@ CALENDAR = Skill(
     verbs=["create", "list", "find", "update", "delete"],
     schemas=CALENDAR_TASK_SCHEMAS,
     handler_cls=GoogleCalendarService,
-    confirm=FlagConfirm({"create", "update", "delete"}),
-    render=LLMReadback(),
+    # The confirm policy composes the confirmation prompt per verb (no LLM writes it) and detects
+    # the owner's "yes" in code (skills.confirm.FlagConfirm.detect).
+    confirm=FlagConfirm(
+        {"create", "update", "delete"},
+        compose_map={"create": compose_create, "update": compose_update, "delete": compose_delete},
+    ),
+    # Render is PER VERB: writes + list render programmatically from the result; find keeps the
+    # model (judgment / "which one?"). respond falls back to the model on failure or an
+    # unsupported language.
+    render={
+        "create": Programmatic(fmt_create),
+        "update": Programmatic(fmt_update),
+        "delete": Programmatic(fmt_delete),
+        "list": Programmatic(fmt_list),
+        "find": LLMReadback(),
+    },
     matcher=calendar_matcher,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",

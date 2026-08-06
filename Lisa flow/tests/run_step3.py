@@ -123,9 +123,16 @@ def unit_checks() -> None:
     check("calendar confirm policy gates {create,update,delete}",
           getattr(cp["calendar"], "needs", None) == {"create", "update", "delete"})
     check("web has no confirm policy (None)", cp["web"] is None)
-    check("calendar render is LLMReadback, web render is None",
+    check("calendar render is a per-verb map (programmatic writes/list, LLM find), web is None",
           type(cp["calendar"]).__name__ == "FlagConfirm"
-          and type(rp["calendar"]).__name__ == "LLMReadback" and rp["web"] is None)
+          and isinstance(rp["calendar"], dict)
+          and type(rp["calendar"]["create"]).__name__ == "Programmatic"
+          and type(rp["calendar"]["find"]).__name__ == "LLMReadback" and rp["web"] is None)
+    check("calendar confirm composes per verb + detects a clean yes",
+          cp["calendar"].compose({"task": "calendar.create", "title": "T",
+                                  "start": "2026-08-05T15:00:00-03:00"}, {"session_lang": "en"})
+          is not None and cp["calendar"].detect("sim") == "yes"
+          and cp["calendar"].detect("sim, mas 17h") == "other")
     st = server_tools_for("web", settings)
     check("web server_tools = web_search + web_fetch (with max_uses)",
           [t["type"] for t in st] == ["web_search_20260209", "web_fetch_20260209"]
@@ -156,7 +163,7 @@ class _ClsReasoner:
     def __init__(self, domain: str | None = None, boom: bool = False) -> None:
         self.domain, self.boom, self.calls = domain, boom, 0
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         self.calls += 1
         if self.boom:
             raise RuntimeError("classifier down")
@@ -178,21 +185,47 @@ async def router_checks() -> None:
     check("router: matcher 'yes' routes to calendar with no LLM",
           d == "calendar" and how == "matcher" and r.calls == 0)
 
-    # no -> web default, NO classifier call
-    d, how = await route_domain({"text": "tell me a joke"}, s, reasoner=r)
-    check("router: no signal falls back to web (default), no LLM",
-          d == "web" and how == "default" and r.calls == 0)
-
-    # maybe -> classifier decides
+    # NOT obviously calendar -> the classifier decides (a keyword-less edit/cancel/confirmation is
+    # never stranded on web). Here it correctly returns calendar.
     r2 = _ClsReasoner(domain="calendar")
-    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r2)
-    check("router: ambiguous escalates to the classifier exactly once",
+    d, how = await route_domain({"text": "mude o titulo para TESTE"}, s, reasoner=r2)
+    check("router: a keyword-less calendar edit goes to the classifier -> calendar",
           d == "calendar" and how == "classifier" and r2.calls == 1)
+    check("router: a guest-word edit hits the fast path (no classifier)",
+          (await route_domain({"text": "adicione a ana como convidada"}, s,
+                              reasoner=_ClsReasoner(domain="calendar")))[1] == "matcher")
+
+    # a bare confirmation with no keyword also asks the classifier (not web).
+    r3 = _ClsReasoner(domain="calendar")
+    d, how = await route_domain({"text": "sim, crie"}, s, reasoner=r3)
+    check("router: 'sim, crie' asks the classifier -> calendar", d == "calendar" and r3.calls == 1)
+
+    # a genuine web turn: the classifier says web.
+    r4 = _ClsReasoner(domain="web")
+    d, how = await route_domain({"text": "tell me a joke"}, s, reasoner=r4)
+    check("router: a general turn is classified web", d == "web" and how == "classifier")
 
     # classifier error -> safe default (web)
-    r3 = _ClsReasoner(boom=True)
-    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r3)
+    r5 = _ClsReasoner(boom=True)
+    d, how = await route_domain({"text": "cancel it tomorrow"}, s, reasoner=r5)
     check("router: classifier failure falls back to web", d == "web" and how == "default")
+
+    # loop stickiness: a continuation of an open loop sticks to the loop domain — NO model call,
+    # even if the classifier would say otherwise. ("sim, crie" inside a calendar loop stays calendar.)
+    r6 = _ClsReasoner(domain="web")
+    d, how = await route_domain(
+        {"text": "sim, crie", "loop_domain": "calendar", "loop_opened": False}, s, reasoner=r6)
+    check("router: a loop continuation sticks to the loop domain (no LLM)",
+          d == "calendar" and how == "loop" and r6.calls == 0)
+    # an explicit calendar signal still switches INTO calendar mid-web-loop.
+    d, how = await route_domain(
+        {"text": "agenda uma reuniao", "loop_domain": "web", "loop_opened": False}, s, reasoner=r6)
+    check("router: an explicit calendar word overrides a web loop", d == "calendar" and how == "matcher")
+    # a fresh tag re-decides (loop_opened) instead of sticking to a stale loop domain.
+    r7 = _ClsReasoner(domain="web")
+    d, how = await route_domain(
+        {"text": "tell me a joke", "loop_domain": "calendar", "loop_opened": True}, s, reasoner=r7)
+    check("router: a fresh tag re-decides, not sticky", d == "web" and how == "classifier")
 
 
 # ============================ P2 — the tool loop (graph-driven) ============================
@@ -206,7 +239,8 @@ class StubReasoner:
         self.script: list = []
         self._classify_domain = classify_domain
 
-    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None,
+                      model=None, effort=None, think=False):
         self.calls.append({"system": system, "messages": list(messages),
                            "server_tools": server_tools})
         base = {"state": "keep_listening", "message": None, "lang": "en", "actions": [],
@@ -217,7 +251,7 @@ class StubReasoner:
             base.update(self.script.pop(0))
         return base
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         return {"domain": self._classify_domain}
 
 
@@ -294,143 +328,168 @@ async def graph_checks() -> None:
     check("[route] the calendar reason call attaches no server tools",
           stub.calls[0]["server_tools"] is None)
 
-    # 1. a successful write reads back so it confirms FROM the result (LLMReadback render).
+    # 1. CREATE happy path. Turn 1: the model emits the write with confirmed:false + message
+    #    null; the SKILL composes and sends the confirmation; the handler is NOT called; ONE call.
+    deps, evo, stub, cal, graph = make_toolenv()
+    stub.script = [{"message": None, "actions": [
+        {"task": "calendar.create", "title": "Call", "start": "2026-08-05T15:00:00-03:00",
+         "confirmed": False}]}]
+    st = await _invoke(graph, _upsert("@mary schedule a call at 3pm", mid="c1"))
+    check("[create·ask] handler NOT called before the yes", cal.n("create") == 0)
+    check("[create·ask] exactly ONE model call (no readback)", len(stub.calls) == 1)
+    check("[create·ask] the SKILL composed the confirmation, not the model",
+          "Confirming" in evo.sent[-1][1] and "Call" in evo.sent[-1][1]
+          and "Shall I schedule" in evo.sent[-1][1])
+    check("[create·ask] the write is held as pending",
+          (st.get("pending_action") or {}).get("task") == "calendar.create")
+    #    Turn 2: owner replies "sim" — a clean yes → run + programmatic card, ZERO model calls.
+    cal.responses["create"] = {"ok": True, "summary": "created",
+        "data": {"title": "Call", "start": "2026-08-05T15:00:00-03:00", "html_link": "http://cal/1"}}
+    st = await _invoke(graph, _upsert("sim", mid="c2"))
+    check("[create·yes] the write ran after a clean yes", cal.n("create") == 1)
+    check("[create·yes] the yes turn made ZERO model calls", len(stub.calls) == 1)
+    check("[create·yes] the executed write was confirmed in code",
+          next((i.get("confirmed") for v, i in cal.calls if v == "create"), None) is True)
+    check("[create·yes] the SKILL rendered the success card",
+          "Scheduled" in evo.sent[-1][1] and "Call" in evo.sent[-1][1])
+    check("[create·yes] pending cleared", st.get("pending_action") is None)
+
+    # 2. LIST — one model call, programmatic agenda (no reason ②).
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["list"] = {"ok": True, "summary": "agenda", "data": {"items": [
+        {"event_id": "L1", "title": "Academia", "start": "2026-08-05T09:00:00-03:00"}]}}
+    stub.script = [{"message": None, "actions": [{"task": "calendar.list",
+        "time_min": "2026-08-05T00:00:00-03:00", "time_max": "2026-08-05T23:59:59-03:00"}]}]
+    await _invoke(graph, _upsert("@mary what's on my agenda tomorrow?", mid="l1"))
+    check("[list] ran once, no readback (one model call)",
+          cal.n("list") == 1 and len(stub.calls) == 1)
+    check("[list] agenda rendered programmatically",
+          "Academia" in evo.sent[-1][1] and "09:00" in evo.sent[-1][1])
+
+    # 3. FIND (a pure "when is X") — judgment verb → reason ② writes the answer (two calls).
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["find"] = {"ok": True, "summary": "1 [id=E1]", "data": {"items": [
+        {"event_id": "E1", "title": "Dentista", "start": "2026-08-07T15:00:00-03:00"}]}}
+    stub.script = [
+        {"message": None, "actions": [{"task": "calendar.find", "query": "dentista"}]},
+        {"message": "É sexta às 15:00."}]
+    st = await _invoke(graph, _upsert("@mary quando é meu compromisso no dentista?", mid="f1"))
+    check("[find] read back to the model (two calls)",
+          cal.n("find") == 1 and len(stub.calls) == 2)
+    check("[find] the model's answer was sent", "sexta" in evo.sent[-1][1])
+    check("[find] the event was cached for a later edit", "E1" in (st.get("seen_events") or {}))
+
+    # 4. DELETE single-match auto-resolve — reason ① emits find + a delete intent in workflow; the
+    #    one match resolves IN CODE and the skill composes the cancel confirmation. ONE model call.
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["find"] = {"ok": True, "summary": "1 [id=E7]", "data": {"items": [
+        {"event_id": "E7", "title": "Dentista", "start": "2026-08-07T15:00:00-03:00"}]}}
+    stub.script = [{"message": None,
+        "actions": [{"task": "calendar.find", "query": "dentista"}],
+        "workflow": {"task": "calendar.delete", "known_inputs": []}}]
+    st = await _invoke(graph, _upsert("@mary cancela meu dentista", mid="d1"))
+    check("[delete·1match] delete not run yet; the search ran",
+          cal.n("delete") == 0 and cal.n("find") == 1)
+    check("[delete·1match] ONE model call — no reason ② to propose it", len(stub.calls) == 1)
+    check("[delete·1match] the skill composed the cancel confirmation",
+          "cancellation" in evo.sent[-1][1] and "Dentista" in evo.sent[-1][1])
+    check("[delete·1match] the delete is held as pending on E7",
+          (st.get("pending_action") or {}).get("event_id") == "E7")
+    cal.responses["delete"] = {"ok": True, "summary": "cancelled", "data": {
+        "event_id": "E7", "title": "Dentista", "start": "2026-08-07T15:00:00-03:00",
+        "had_attendees": False}}
+    await _invoke(graph, _upsert("sim", mid="d2"))
+    check("[delete·yes] delete ran, zero model calls",
+          cal.n("delete") == 1 and len(stub.calls) == 1)
+    check("[delete·yes] cancellation card rendered", "Cancelled" in evo.sent[-1][1])
+
+    # 5. confirmation detection — "sim, mas…" is NOT a clean yes → falls back to the model.
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
-        {"message": None, "actions": [
-            {"task": "calendar.create", "title": "Call", "start": "2026-08-05T15:00:00-03:00",
-             "confirmed": True}]},
-        {"message": "Booked your 3pm."},
-    ]
-    await _invoke(graph, _upsert("@mary schedule a call at 3pm", mid="c1"))
-    check("[create] handler ran exactly once", cal.n("create") == 1)
-    check("[create] the write reads back via reason ② (two reason passes)", len(stub.calls) == 2)
-    check("[create] confirmation sent from the result",
-          len(evo.sent) == 1 and "Booked" in evo.sent[-1][1])
-    check("[create] execute != close — window stays open", deps.sessions.is_open(OWNER_JID))
+        {"message": None, "actions": [{"task": "calendar.create", "title": "Y",
+            "start": "2026-08-05T10:00:00-03:00", "confirmed": False}]},
+        {"message": None, "actions": [{"task": "calendar.create", "title": "Y",
+            "start": "2026-08-05T17:00:00-03:00", "confirmed": False}]}]  # re-proposes at 17h
+    await _invoke(graph, _upsert("@mary schedule Y at 10", mid="y1"))
+    st = await _invoke(graph, _upsert("sim, mas às 17h", mid="y2"))
+    check("[detect] a yes-with-a-change is NOT auto-run", cal.n("create") == 0)
+    check("[detect] it fell to the model (a second reason call)", len(stub.calls) == 2)
+    check("[detect] the stale 10:00 pending was cleared",
+          (st.get("pending_action") or {}).get("start") != "2026-08-05T10:00:00-03:00")
 
-    # 2. read (find) -> read-back -> reply.
-    deps, evo, stub, cal, graph = make_toolenv()
-    cal.responses["find"] = {"ok": True, "summary": "1 match: dentist Fri 15:00 [id=E1]",
-                             "data": {"items": [{"event_id": "E1", "title": "dentist"}]}}
-    stub.script = [
-        {"message": None, "actions": [{"task": "calendar.find", "query": "dentist"}]},
-        {"message": "Found it — dentist Friday 15:00."},
-    ]
-    st = await _invoke(graph, _upsert("@mary find my dentist appointment", mid="f1"))
-    check("[find] handler ran", cal.n("find") == 1)
-    check("[find] read triggered a read-back (two reason passes)", len(stub.calls) == 2)
-    check("[find] reply reflects the observation", "Found it" in evo.sent[-1][1])
-    check("[find] event id remembered for later edits", "E1" in (st.get("seen_event_ids") or []))
-
-    # 3. failure -> read-back -> honest; no false "done" sent before the result.
+    # 6. failure never fakes success — an executed write that fails reads back to the model.
     deps, evo, stub, cal, graph = make_toolenv()
     cal.responses["create"] = {"ok": False, "error": "auth", "summary": "auth error"}
     stub.script = [
-        {"message": "Done!", "actions": [
-            {"task": "calendar.create", "title": "X", "start": "2026-08-05T09:00:00-03:00",
-             "confirmed": True}]},
-        {"message": "Sorry — I couldn't create it (auth error)."},
-    ]
-    await _invoke(graph, _upsert("@mary schedule X", mid="e1"))
-    check("[fail] read-back happened on failure", len(stub.calls) == 2)
-    check("[fail] the premature 'Done!' was NOT sent", all("Done!" not in t for _, t in evo.sent))
-    check("[fail] honest error is what got sent", "couldn't create" in evo.sent[-1][1])
+        {"message": None, "actions": [{"task": "calendar.create", "title": "X",
+            "start": "2026-08-05T09:00:00-03:00", "confirmed": True}]},
+        {"message": "Sorry — I couldn't create it (auth)."}]
+    await _invoke(graph, _upsert("@mary schedule X now, go ahead", mid="x1"))
+    check("[fail] failure read back to the model (no fake card)", len(stub.calls) == 2)
+    check("[fail] honest error sent", "couldn't create" in evo.sent[-1][1])
 
-    # 4. skill-owned confirm gate: an unconfirmed write is blocked before the handler.
+    # 7. resolved-id gate stays in execute — update on an unseen id is blocked, reads back.
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
-        {"message": "Creating.", "actions": [
-            {"task": "calendar.create", "title": "Y", "start": "2026-08-05T10:00:00-03:00"}]},
-        {"message": "Want me to create Y at 10:00?"},
-    ]
-    await _invoke(graph, _upsert("@mary schedule Y at 10", mid="g1"))
-    check("[confirm] handler NOT called without confirmation", cal.n("create") == 0)
-    check("[confirm] bounced back to ask", len(stub.calls) == 2 and "Want me" in evo.sent[-1][1])
+        {"message": None, "actions": [{"task": "calendar.update", "event_id": "GHOST",
+            "confirmed": True, "start": "2026-08-06T15:00:00-03:00"}]},
+        {"message": "Let me find that first."}]
+    await _invoke(graph, _upsert("@mary reschedule my meeting to 3pm", mid="u1"))
+    check("[id-gate] update NOT run on an unresolved id", cal.n("update") == 0)
+    check("[id-gate] the blocked write read back to the model", len(stub.calls) == 2)
 
-    # 5. resolved-id gate (stays in execute): update on an unseen id is blocked.
+    # 8. a fresh @mary tag wipes a pending confirmation (new request, not an accidental run).
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
-        {"message": "Moving it.", "actions": [
-            {"task": "calendar.update", "event_id": "GHOST", "confirmed": True,
-             "start": "2026-08-06T15:00:00-03:00"}]},
-        {"message": "Let me find that event first."},
-    ]
-    await _invoke(graph, _upsert("@mary reschedule my meeting", mid="u1"))
-    check("[id-gate] update NOT called on an unresolved id", cal.n("update") == 0)
-    check("[id-gate] bounced back to search first", len(stub.calls) == 2)
+        {"message": None, "actions": [{"task": "calendar.create", "title": "Z",
+            "start": "2026-08-05T10:00:00-03:00", "confirmed": False}]},
+        {"message": None, "actions": []}]
+    await _invoke(graph, _upsert("@mary schedule Z at 10", mid="z1"))
+    st = await _invoke(graph, _upsert("@mary what's the weather?", mid="z2"))  # fresh tag
+    check("[reset] a fresh tag cleared the pending write", st.get("pending_action") is None)
+    check("[reset] the held write was NOT run", cal.n("create") == 0)
 
-    # 6. find -> update: a resolved id passes the gate and the write runs.
-    deps, evo, stub, cal, graph = make_toolenv()
-    cal.responses["find"] = {"ok": True, "summary": "1 match [id=E9]",
-                             "data": {"items": [{"event_id": "E9"}]}}
-    stub.script = [
-        {"message": None, "actions": [{"task": "calendar.find", "query": "review"}]},
-        {"message": None, "actions": [
-            {"task": "calendar.update", "event_id": "E9", "confirmed": True,
-             "start": "2026-08-07T15:00:00-03:00"}]},
-        {"message": "Moved it to Friday."},
-    ]
-    await _invoke(graph, _upsert("@mary reschedule the review to Friday", mid="fu1"))
-    check("[find->update] update ran on the resolved id",
-          cal.n("find") == 1 and cal.n("update") == 1)
-    check("[find->update] the id passed to update was the found one",
-          next((i["event_id"] for v, i in cal.calls if v == "update"), None) == "E9")
-    check("[find->update] final confirmation sent from the result", "Moved it" in evo.sent[-1][1])
-
-    # 7. workflow persists across turns, then is cleared by a fresh tag (anti-delirium).
-    deps, evo, stub, cal, graph = make_toolenv()
-    stub.script = [{"message": "What time works?", "workflow": {
-        "task": "calendar.create", "known_inputs": [{"field": "title", "value": "lunch"}],
-        "open_questions": [{"field": "start", "reason": "no time given"}]}}]
-    st = await _invoke(graph, _upsert("@mary schedule lunch with Ana", mid="w1"))
-    check("[workflow] gather ran no action", cal.calls == [])
-    check("[workflow] the goal is remembered in state",
-          (st.get("workflow") or {}).get("task") == "calendar.create")
-    stub.script = [{"message": "Sure."}]
-    st = await _invoke(graph, _upsert("@mary actually, what's the weather?", mid="w2"))
-    check("[workflow] a fresh tag wipes the goal (no cross-loop leak)", st.get("workflow") is None)
-    check("[workflow] a fresh tag wipes remembered ids too", (st.get("seen_event_ids") or []) == [])
-
-    # 8. the read-back loop is bounded by max_tool_actions.
+    # 9. the read-back loop stays bounded by max_tool_actions.
     deps, evo, stub, cal, graph = make_toolenv(max_tool_actions=2)
-    cal.responses["find"] = {"ok": True, "summary": "still looking", "data": {}}
+    cal.responses["find"] = {"ok": True, "summary": "looking", "data": {"items": []}}
     stub.script = [
         {"actions": [{"task": "calendar.find", "query": "a"}]},
         {"actions": [{"task": "calendar.find", "query": "b"}]},
         {"actions": [{"task": "calendar.find", "query": "c"}]},
-        {"message": "stopping"},
-    ]
+        {"message": "stopping"}]
     await _invoke(graph, _upsert("@mary check my agenda", mid="b1"))
     check("[bound] read-back stopped at max_tool_actions", cal.n("find") == 2)
 
-    # 9. language locks at the tag and is fed to every later pass (the PT-drift bug).
+    # 10. web routing — a general turn has no calendar keyword → the classifier decides web →
+    #     web skill + web tools, single pass.
     deps, evo, stub, cal, graph = make_toolenv()
-    cal.responses["find"] = {"ok": True, "summary": "1 [id=E1]", "data": {"items": [{"event_id": "E1"}]}}
-    stub.script = [
-        {"message": None, "lang": "en", "actions": [{"task": "calendar.find", "query": "x"}]},
-        {"message": "Feito.", "lang": "pt"},  # model tries to drift to PT on the read-back pass
-    ]
-    await _invoke(graph, _upsert("@mary what's on my agenda friday?", mid="l1"))
-    check("[lang] first pass judges from the tag (no lock yet)",
-          'in "en"' not in stub.calls[0]["system"])
-    check("[lang] read-back pass is TOLD to stay in the locked language",
-          'in "en"' in stub.calls[1]["system"] or 'to "en"' in stub.calls[1]["system"])
-    check("[lang] header stays locked EN despite the model drifting to PT",
-          evo.sent[-1][1].startswith("*[Marcelo's AI Assistant]:*"))
-
-    # 10. web routing: a general turn routes to web, loads web tools, and takes the reason->act
-    #     path (no confirm/execute/readback — web has no actions, no render policy).
-    deps, evo, stub, cal, graph = make_toolenv()
+    stub._classify_domain = "web"  # the classifier (no matcher hit) sends this general turn to web
     stub.script = [{"message": "It's sunny in Lisbon."}]
     st = await _invoke(graph, _upsert("@mary what's the weather in Lisbon?", mid="web1"))
-    check("[web] general turn routes to web", st.get("domain") == "web")
-    check("[web] the web reason call attaches web_search/web_fetch",
-          [t["type"] for t in (stub.calls[0]["server_tools"] or [])]
+    check("[web] routed to web with web tools",
+          st.get("domain") == "web"
+          and [t["type"] for t in (stub.calls[0]["server_tools"] or [])]
           == ["web_search_20260209", "web_fetch_20260209"])
-    check("[web] single reason pass (no readback), reply sent",
-          len(stub.calls) == 1 and "sunny" in evo.sent[-1][1])
-    check("[web] no calendar handler touched", cal.calls == [])
+    check("[web] single pass, no calendar touched", len(stub.calls) == 1 and cal.calls == [])
+
+    # 11. loop stickiness (the "sim, crie" bug): the loop opened on calendar; a keyword-less
+    #     untagged continuation stays on calendar — NOT re-routed to web — with no classifier call.
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["find"] = {"ok": True, "summary": "1 [id=E1]", "data": {"items": [
+        {"event_id": "E1", "title": "Reunião", "start": "2026-08-05T10:30:00-03:00"}]}}
+    stub.script = [
+        {"message": None, "actions": [{"task": "calendar.find", "query": "reuniao",
+            "time_min": "2026-08-05T00:00:00-03:00", "time_max": "2026-08-05T23:59:59-03:00"}]},
+        {"message": "Você já tem uma reunião às 10:30. Quer criar mesmo assim?"},  # asks, no pending
+        {"message": None, "actions": [{"task": "calendar.create", "title": "Reunião",
+            "start": "2026-08-05T10:30:00-03:00", "confirmed": False}]}]
+    st = await _invoke(graph, _upsert("@mary marque uma reuniao amanha 10:30", mid="s1"))
+    check("[sticky] the loop opened on calendar", st.get("loop_domain") == "calendar")
+    stub._classify_domain = "web"  # if stickiness failed, the classifier would send it to web
+    st = await _invoke(graph, _upsert("sim, crie", mid="s2"))
+    check("[sticky] a keyword-less continuation stayed on calendar (not web)",
+          st.get("domain") == "calendar")
+    check("[sticky] and the calendar skill proposed the create", cal.n("find") == 1)
 
 
 # ============================ P3 — a programmatic render skill (stub) ======================
@@ -442,7 +501,8 @@ class _StrReasoner:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None,
+                      model=None, effort=None, think=False):
         self.calls += 1
         base = {"state": "keep_listening", "message": None, "lang": "en", "workflow": None,
                 "usage": {"input": 1, "output": 1}, "provider_request_id": "r",
@@ -454,7 +514,7 @@ class _StrReasoner:
             base["message"], base["actions"] = "SHOULD NOT SEND", []
         return base
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         return {"domain": "calendar"}
 
 

@@ -40,77 +40,30 @@ DESCRIBE = (
 
 # Per-task guidance, appended to the system prompt by the calendar skill (skills/calendar.py).
 # Templated with {owner_name}. Co-located with the handler so prompt and behaviour never drift.
-GUIDANCE = """Calendar actions — you manage {owner_name}'s Google Calendar: create an event, list the agenda, find an event, reschedule it (update), or cancel it (delete). General rules first, then each verb.
+GUIDANCE = """Calendar — you manage {owner_name}'s Google Calendar: create an event, list the agenda, find an event, reschedule it (update), or cancel it (delete).
+
+HOW YOU WORK HERE — you do NOT write the confirmation, the result, or the agenda. You emit the structured action; the SYSTEM composes and sends every calendar message. So on a calendar turn set "message" to null, UNLESS you genuinely need to ask a clarifying question or explain something the tools cannot do (e.g. a recurring event). Never write a "Scheduled:"/"Confirming:" text yourself.
 
 ALWAYS
-- NEVER create, change or cancel anything until you have SENT the confirmation message for it AND {owner_name} has answered yes. No positive answer yet → do not act and do not set `confirmed: true`; send the confirmation and wait for his go-ahead. Only `list` and `find` may run without asking.
-- The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" → 2026-08-07T15:00:00-03:00) — never pass a vague phrase to the tool.
-- Report what actually happened FROM the tool's result — never announce success before you have seen it come back.
-- Do not write the reply header (the system stamps it). 
-- No emoji.
-- You cannot make recurring/repeating events or all-day / multi-day events. If asked for one, say so briefly and offer a single timed event instead — never pretend you set up a recurrence.
-- Talk in the same language that was used on the tagged message that called you into action for the current session.
+- The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase.
+- To create, change or cancel anything, emit the action with "confirmed": false and leave "message" null. The system shows {owner_name} a confirmation and, when he answers yes, runs it for you — do NOT set "confirmed": true yourself and do NOT re-send the action. Only `list` and `find` run without asking.
+- You cannot make recurring/repeating or all-day / multi-day events. If asked for one, say so briefly in "message" and offer a single timed event instead.
 
-CREATE
-- You only need a title and a start; do not interrogate {owner_name} for details he did not give.
-- Title is what the event is ABOUT — a short topic ("Budget review", "Apartment viewing"). If you can`t resolve the topic, the title should have the format Name & Name & Name for each attendant, starting with {owner_name}.
-- If he gives no end, it defaults to 45 minutes. Use `virtual: true` for a video call (a Google Meet link is created and the location is dropped — video wins over a place); otherwise set `location`. Add `attendees` emails when he names people; they are emailed an invite by default — set `send_invites: false` only if he does not want that.
-- If he is vague about the hour, assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) and show that assumption in the confirmation so he can fix it.
-- Get his go-ahead first — set `confirmed: true` only after he agrees — using EXACTLY this shape (omit the attendees line when there are none):
+CREATE — you only need a title and a start; do not interrogate {owner_name} for details he did not give.
+- Title is what the event is ABOUT — a short topic ("Budget review"). If you can't resolve the topic, use the format Name & Name for the people, starting with {owner_name}.
+- No end -> defaults to 45 minutes. Use "virtual": true for a video call (a Meet link is created and the location dropped); otherwise set "location". Add "attendees" emails when he names people (invited by default; "send_invites": false to suppress).
+- Vague about the hour? Assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) — the confirmation shows it so he can fix it.
+- Emit: {{"task": "calendar.create", "title": ..., "start": ..., "confirmed": false}} with "message": null.
 
-Ok, confirming before I dispatch:
+LIST — read-only, no confirmation. Resolve the window from his question (default: what is coming up). Emit `calendar.list` with time_min/time_max; the system formats and sends the agenda.
 
-<title>
-<date as DD/MM - Weekday, e.g. 05/08 - Wednesday>
-<time — a MORNING time as 12-hour with AM (e.g. 09:00 AM); an AFTERNOON/EVENING time as 24-hour (e.g. 15:00)>
-<attendees>
-<location — or "Google Meet (video call)" if virtual>
+FIND — the resolver. Search by title words ("query"), the person ("attendee"), and/or a time window. Emit `calendar.find`.
+- To answer "when is X", just emit the find; the system replies.
+- To CANCEL an event, emit the find AND set "workflow" to {{"task": "calendar.delete"}} — when the search hits a single event the system asks to cancel it directly. If several match, the system lists them and you pick one next turn.
 
-Should I go ahead, or is anything missing?
+UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, location, virtual, attendees), "confirmed": false, "message": null. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
-- Once it is created, report it EXACTLY like this (render the heading, weekday and any "Video call" label in the conversation's language):
-
-Scheduled:
-
-<title>
-<date as DD/MM - Weekday, e.g. 05/08 - Wednesday>
-
-Here is the event link:
-<event link>
-
-LIST
-- Read-only, no confirmation. Resolve the window from his question (default: what is coming up).
-- The list tool returns the agenda ALREADY formatted by day. Send it back exactly as returned — do not reformat, re-sort, or add lines. The shape is a "DD/MMM - Weekday" header, then one "HH:MM - Title" per event, with a blank line between days. Say plainly when there is nothing.
-
-FIND
-- The resolver. Search by title words (`query`), the person on it (`attendee`), and/or a time window (`time_min`/`time_max`). If he asked "when is X", answer directly; when it is a step toward an edit or cancel it is internal — you do not announce it.
-- One clear match → proceed. Several → read them back and ask which one. None → say so. Never invent an id.
-
-UPDATE (reschedule / edit)
-- ALWAYS `find` first to get the id — never guess one. A new start keeps the original length unless you also give a new end. You can change the time, title, location, virtual, or attendees.
-- Get his go-ahead first (set `confirmed: true` only after he agrees), showing WHAT changes as before → now — EXACTLY this shape:
-
-Ok, confirming this change:
-<title>
-<date as DD/MM - Weekday, e.g. 05/08 - Wednesday>
-<each change as "Field: was → now", e.g. Time: Fri 8 Aug 15:00 → Mon 11 Aug 17:00>
-
-Go ahead?
-
-- Once it is changed, confirm briefly what the event is now.
-
-DELETE (cancel)
-- ALWAYS `find` first to get the id. Confirm WHICH event so there is no mistake — set `confirmed: true` only after he agrees — using EXACTLY this shape (include the last sentence only if the event has attendees):
-
-Ok, confirming this cancellation:
-
-<title>
-<date as DD/MM - Weekday, e.g. 05/08 - Wednesday>
-<time — a MORNING time as 12-hour with AM (e.g. 09:00 AM); an AFTERNOON/EVENING time as 24-hour (e.g. 15:00)>
-
-Cancel this one? The guests will be notified.
-
-- Once it is cancelled, confirm briefly."""
+DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id", "confirmed": false, "message": null."""
 
 
 class GoogleCalendarService:
@@ -276,9 +229,8 @@ class GoogleCalendarService:
             parts.append(f"{n} guest(s) invited")
         if view["html_link"]:
             parts.append(f"event link: {view['html_link']}")
-        return {"ok": True, "summary": " · ".join(parts),
-                "data": {"event_id": view["event_id"], "html_link": view["html_link"],
-                         "meet_link": meet}}
+        # Full view in data so the skill can render the "Scheduled" card programmatically.
+        return {"ok": True, "summary": " · ".join(parts), "data": {**view, "meet_link": meet}}
 
     def _list(self, inp: dict) -> ActionResult:
         params = dict(calendarId=self._cal(), singleEvents=True, orderBy="startTime",
@@ -378,22 +330,26 @@ class GoogleCalendarService:
         ev = self._service().events().patch(**kw).execute()
         view = self._event_view(ev)
         return {"ok": True, "summary": f"Updated '{view['title']}' → {self._fmt(view['start'])}",
-                "data": {"event_id": view["event_id"]}}
+                "data": {**view, "meet_link": self._meet_link(ev)}}
 
     def _delete(self, inp: dict) -> ActionResult:
         eid = inp.get("event_id")
         if not eid:
             return {"ok": False, "error": "validation", "summary": "delete needs an event_id."}
-        title = None
+        # Fetch the event first, so the cancellation card can show its title/time and whether it
+        # had guests (the delete itself is what matters — best-effort).
+        view: dict = {}
         try:
-            title = self._service().events().get(
-                calendarId=self._cal(), eventId=eid).execute().get("summary")
-        except Exception:  # best-effort label; the delete is what matters
+            ev = self._service().events().get(calendarId=self._cal(), eventId=eid).execute()
+            view = self._event_view(ev)
+        except Exception:
             pass
         self._service().events().delete(
             calendarId=self._cal(), eventId=eid, sendUpdates="all").execute()
-        label = f" '{title}'" if title else ""
-        return {"ok": True, "summary": f"Cancelled{label}.", "data": {"event_id": eid}}
+        label = f" '{view['title']}'" if view.get("title") else ""
+        return {"ok": True, "summary": f"Cancelled{label}.",
+                "data": {"event_id": eid, "title": view.get("title"), "start": view.get("start"),
+                         "had_attendees": bool(view.get("attendees"))}}
 
     # ---- dispatch ----------------------------------------------------------------------
 

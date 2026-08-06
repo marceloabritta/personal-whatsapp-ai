@@ -41,10 +41,11 @@ class Reasoner(Protocol):
         ...
 
     async def classify(
-        self, *, system: str, text: str, schema: dict,
+        self, *, system: str, messages: list, schema: dict,
         max_tokens: int = 32, effort: str = "low",
     ) -> dict:
-        """A single lightweight enforced-JSON call (no tools) returning the raw parsed object —
-        used by the router's domain classifier. Raises on any transport/parse failure so the
-        caller can fall back to a default."""
+        """A single lightweight enforced-JSON call (no tools) over a neutral [{role, content}]
+        conversation, returning the raw parsed object — used by the router's domain classifier so
+        it decides from the recent context, not just the last line. Raises on any transport/parse
+        failure so the caller can fall back to a default."""
         ...

@@ -1,14 +1,14 @@
-"""confirm — the skill-owned confirmation gate.
+"""confirm — the skill-owned confirmation gate + composer.
 
-The routed skill's confirm policy decides whether each pending mutating action may run. This node
-only delegates: for every action whose verb the policy `needs`, it awaits the policy; approved
-actions stay in `state["actions"]` and flow to `execute`, blocked ones are dropped and recorded as
-an observation the model reads back so it asks the owner. Reads (verbs the policy does not gate)
-and skills with no confirm policy pass straight through. Bounded by `max_tool_actions` so a
-blocked-only turn can't loop between confirm and reason.
+For each action the routed skill's confirm policy `needs`, this node checks whether it may run.
+Reads and already-confirmed writes pass through to `execute`. An unconfirmed write is held: the
+skill's policy **composes the confirmation prompt** (no model writes it), the node stores the
+action as `state["pending_action"]`, sets that prompt as `reply_body`, and routes to `act` to send
+it. Next turn `resolve_pending` runs the write on a clean "yes".
 
-The old structural confirm gate that lived in `execute` is gone — the rule now lives in the
-skill. The resolved-id gate stays in `execute` (that is tool safety, not user confirmation)."""
+If the skill can't compose a prompt (returns None) the turn falls back to the model (a readback so
+it asks). Skills with no confirm policy pass straight through. The resolved-id gate stays in
+`execute` (tool safety, not user confirmation)."""
 from __future__ import annotations
 
 from ..state import MessageState
@@ -27,6 +27,8 @@ async def confirm_node(
 
     approved: list = []
     observations: list = []
+    pending: dict | None = None
+    ask_message: str | None = None
 
     for action in actions:
         task = (action or {}).get("task", "")
@@ -38,6 +40,11 @@ async def confirm_node(
         decision = await policy.confirm(action=action, state=state, deps=ctx)
         if decision.get("ok"):
             approved.append(action)
+            continue
+        # A write awaiting go-ahead: compose the confirmation in code and hold it as pending.
+        composed = policy.compose(action, state) if pending is None else None
+        if composed:
+            pending, ask_message = action, composed
         else:
             msg = decision.get("message") or (
                 f"Not executed — {task} needs {settings.owner_name}'s go-ahead first. "
@@ -45,27 +52,31 @@ async def confirm_node(
             )
             observations.append({"role": "user", "content": f"[{task} result] {msg}"})
 
-    # Routing: any approved action -> execute (blocked observations, if any, read back after).
-    # Only-blocked -> back to reason so the model asks (bounded); nothing at all -> act.
+    # Routing: approved actions run; else a composed confirmation is sent (holding the pending);
+    # else a bare block reads back so the model asks (bounded); else nothing to do.
     if approved:
         route = "execute"
+    elif ask_message:
+        route = "act"
     elif observations and hops < settings.max_tool_actions:
         route = "reason"
-        hops += 1  # count the ask so a stubborn unconfirmed action can't loop forever
+        hops += 1
     else:
         route = "act"
 
+    update: dict = {"actions": approved, "tool_hops": hops, "confirm_route": route}
+    if observations:
+        update["messages"] = observations
+    if ask_message and route == "act":
+        update["pending_action"] = pending
+        update["reply_body"] = ask_message
+
     trace.code(
         tid, node="confirm", loop_id=state.get("loop_id"), domain=domain,
-        approved=len(approved), blocked=len(observations), route=route,
+        approved=len(approved), blocked=len(observations), pending=bool(update.get("pending_action")),
+        route=route,
     )
-
-    return {
-        "actions": approved,
-        "messages": observations,
-        "tool_hops": hops,
-        "confirm_route": route,
-    }
+    return update
 
 
 def route_after_confirm(state: MessageState) -> str:

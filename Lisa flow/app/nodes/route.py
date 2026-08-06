@@ -17,4 +17,5 @@ async def route_node(state: MessageState, *, settings, reasoner, trace: Trace) -
         tid, node="route", loop_id=state.get("loop_id"),
         domain=domain, how=how, text_preview=(state.get("text") or "")[:80],
     )
-    return {"domain": domain}
+    # Remember the loop's domain so a later continuation sticks to it (see route_domain step 2).
+    return {"domain": domain, "loop_domain": domain}

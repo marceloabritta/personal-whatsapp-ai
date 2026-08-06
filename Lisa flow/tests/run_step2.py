@@ -40,7 +40,7 @@ class StubReasoner:
         self.calls: list = []
         self.script: list = []
 
-    async def respond(self, *, system, messages, output_schema=None, server_tools=None):
+    async def respond(self, *, system, messages, output_schema=None, server_tools=None, model=None, effort=None, think=False):
         self.calls.append({"system": system, "messages": list(messages)})
         if self.script:
             return self.script.pop(0)
@@ -48,7 +48,7 @@ class StubReasoner:
                 "usage": {"input": 1, "output": 1}, "provider_request_id": "req_stub",
                 "stop_reason": "end_turn", "tool_calls": [], "error_category": "none"}
 
-    async def classify(self, *, system, text, schema, max_tokens=32, effort="low"):
+    async def classify(self, *, system, messages, schema, max_tokens=32, effort="low"):
         # These are general/chat turns — the router's ambiguity band resolves to web.
         return {"domain": "web"}
 

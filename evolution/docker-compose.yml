@@ -128,7 +128,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-03.4-no-web-claim"
+      PROMPT_VERSION: "2026-08-05-programmatic-calendar"
       # Transcription (AssemblyAI).
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
       ASSEMBLYAI_LANGUAGE: auto
@@ -148,9 +148,14 @@ services:
   # @mary — the experimental programmatic-orchestrator brain (calendar + web skills).
   # ISOLATED from @lisa so a test flow can never corrupt the core one:
   #   - own Redis DB (2) for its listening window + echo store (Lisa uses DB 1);
-  #   - NO DATABASE_URL → in-memory checkpointer, so it does NOT share the Postgres
-  #     checkpoint tables with Lisa (their thread_ids would otherwise collide on the same
-  #     instance+chat and a fresh-tag reset would wipe the other's history).
+  #   - own POSTGRES DATABASE (`mary`), not merely its own schema. The checkpointer keys
+  #     threads on sha256(instance:chat_jid), which is IDENTICAL across flows for the same
+  #     chat, so a shared database would put Mary and Lisa on ONE thread row per chat
+  #     (messages, pending_action, loop_domain, session_lang) and a fresh-tag reset would
+  #     wipe the other's history. A separate database isolates the checkpoint tables, the
+  #     durable loop log (mary_log) and the transcript cache in one move, with no code
+  #     change — identity between the two flows stays env-only.
+  #     Created once with: CREATE DATABASE mary OWNER evolution;
   # Same WhatsApp number/account; the dispatcher routes @mary here, @lisa stays on lisa.
   mary:
     container_name: mary_brain
@@ -160,6 +165,7 @@ services:
     depends_on:
       - api
       - redis
+      - postgres
     environment:
       EVOLUTION_URL: http://api:8080
       EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
@@ -170,8 +176,11 @@ services:
       # Own Redis DB, clear of Lisa's (1), Evolution's cache, and the dispatcher's (4).
       REDIS_URL: redis://redis:6379/2
       LOOP_TTL_SECONDS: "60"
+      # Memory: seed size + the LangGraph checkpointer + the durable loop log. Own DB
+      # (`mary`), never Lisa's `evolution` — see the isolation note above.
       CONTEXT_WINDOW_MESSAGES: "30"
-      # NB: DATABASE_URL intentionally unset → in-memory checkpointer (isolation, see above).
+      DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/mary
+      LOG_SCHEMA: mary_log
       MEDIA_ENABLED: "true"
       # Reasoning (provider-neutral; Anthropic today).
       LLM_PROVIDER: anthropic
@@ -180,7 +189,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-03-orchestrator"
+      PROMPT_VERSION: "2026-08-05-programmatic-calendar"
       # Programmatic domain orchestrator.
       DEFAULT_DOMAIN: web
       ROUTER_EFFORT: low

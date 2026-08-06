@@ -31,10 +31,25 @@ def _collect_ids(result: dict) -> list[str]:
     return ids
 
 
+def _collect_views(result: dict) -> dict:
+    """Full event views a result surfaced ({id: view}) — feeds the programmatic confirmation
+    for update/delete (title/time), so the model never has to compose that text."""
+    out: dict = {}
+    data = result.get("data") or {}
+    if isinstance(data, dict):
+        for it in data.get("items") or []:
+            if isinstance(it, dict) and it.get("event_id"):
+                out[it["event_id"]] = it
+        if data.get("event_id") and data.get("title"):
+            out[data["event_id"]] = data
+    return out
+
+
 async def execute_node(state: MessageState, *, tools: dict, settings, trace: Trace) -> dict:
     tid = state["trace_id"]
     actions = state.get("actions") or []
     seen: list[str] = list(state.get("seen_event_ids") or [])
+    seen_events: dict = dict(state.get("seen_events") or {})
     hops = int(state.get("tool_hops") or 0) + 1
 
     results: list[dict] = []
@@ -62,6 +77,7 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
                 if verb in _READ_VERBS:
                     any_read = True
                 seen.extend(i for i in _collect_ids(res) if i not in seen)
+                seen_events.update(_collect_views(res))
 
         res = dict(res or {})
         res.setdefault("task", task)
@@ -84,6 +100,7 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
         "messages": observations,
         "action_results": (state.get("action_results") or []) + results,
         "seen_event_ids": seen,
+        "seen_events": seen_events,
         "tool_hops": hops,
         "last_ran": len(results),
         "last_results": results,
