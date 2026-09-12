@@ -7,7 +7,8 @@ Lisa is built on [LangGraph](https://github.com/langchain-ai/langgraph) (the ope
 MIT library) + FastAPI, calling the WhatsApp gateway
 ([Evolution API](https://github.com/EvolutionAPI/evolution-api)) directly through one
 internal client. Core capabilities today: **Google Calendar** actions, **audio
-transcription**, and reading **PDFs and images**.
+transcription** — on request, or automatically for chats you enrol — and reading **PDFs and
+images**.
 
 ## Layout
 
@@ -28,6 +29,26 @@ WhatsApp ─▶ Evolution API ─MESSAGES_UPSERT─▶ dispatcher ─by @tag─�
 A run starts only when the owner sends a message carrying `@lisa` (or a session for that
 chat is already open). Every run leaves a two-level trace: a code-level event stream and a
 user-level transcript, sharing one trace id.
+
+## Automatic transcription
+
+Some people send a lot of voice notes. Enrol a chat once and every voice note in it comes back
+transcribed, as a reply to the audio, in the same format a manual `@lisa transcribe` produces.
+
+Configure it from the chat with yourself — nowhere else:
+
+    @lisa setup
+
+Add a **contact** by forwarding their contact card (the number is read from the vCard, never
+guessed); add a **group** by name (matched against your own chat list, most recently active
+first). Each chat is set to **inbound** (what they send), **outbound** (what you send), or
+**in & out**. `setup` also lists what is active — contacts and groups titled separately but
+numbered in one sequence, so "edit 2 to outbound" or "remove 5" is enough — and every change
+is confirmed before it is written.
+
+Off by default. Turn it on with `AUTO_TRANSCRIBE_ENABLED=true` on the flow, plus
+`AUTO_TRANSCRIBE_URL` on the dispatcher so untagged voice notes reach it at all
+(see `Lisa flow/.env.example`).
 
 ## Adding a new flow without risking the core
 

@@ -31,6 +31,33 @@ def _collect_ids(result: dict) -> list[str]:
     return ids
 
 
+def _collect_chat_keys(result: dict) -> list[str]:
+    """Chat keys a result surfaced (`data.seen_keys`) — so a later setup write can be gated on
+    them. The generic twin of `_collect_ids`: any skill can publish resolved ids this way."""
+    data = result.get("data") or {}
+    keys = data.get("seen_keys") if isinstance(data, dict) else None
+    return [k for k in (keys or []) if isinstance(k, str) and k]
+
+
+def _collect_chat_views(result: dict) -> dict:
+    """{chat_key: view} a result surfaced — carries the jid, label and kind a write needs, so
+    none of it has to be guessed or re-derived from the key."""
+    out: dict = {}
+    data = result.get("data") or {}
+    if not isinstance(data, dict):
+        return out
+    for c in data.get("candidates") or []:
+        if isinstance(c, dict) and c.get("chat_key"):
+            out[c["chat_key"]] = c
+    for bucket in ("contacts", "groups"):
+        for r in data.get(bucket) or []:
+            if isinstance(r, dict) and r.get("chat_key"):
+                out[r["chat_key"]] = r
+    if data.get("chat_key"):
+        out[data["chat_key"]] = data
+    return out
+
+
 def _collect_views(result: dict) -> dict:
     """Full event views a result surfaced ({id: view}) — feeds the programmatic confirmation
     for update/delete (title/time), so the model never has to compose that text."""
@@ -45,11 +72,16 @@ def _collect_views(result: dict) -> dict:
     return out
 
 
-async def execute_node(state: MessageState, *, tools: dict, settings, trace: Trace) -> dict:
+async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict | None = None,
+                       settings, trace: Trace) -> dict:
     tid = state["trace_id"]
     actions = state.get("actions") or []
     seen: list[str] = list(state.get("seen_event_ids") or [])
     seen_events: dict = dict(state.get("seen_events") or {})
+    seen_chat_keys: list[str] = list(state.get("seen_chat_keys") or [])
+    seen_chats: dict = dict(state.get("seen_chats") or {})
+    listed_chats: dict = dict(state.get("listed_chats") or {})
+    gates = resolve_gates or {}
     hops = int(state.get("tool_hops") or 0) + 1
 
     results: list[dict] = []
@@ -65,11 +97,21 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
         inputs = {k: v for k, v in (action or {}).items()
                   if k != "task" and not k.startswith("_")}
 
-        # resolved-id gate — update/delete must target an event surfaced by a prior search
-        if verb in ("update", "delete") and inputs.get("event_id") not in seen:
-            res = {"ok": False, "error": "unresolved_id",
-                   "summary": f"Cannot {verb}: that event was not found via a prior search — "
-                              f"run find first, then {verb} the id it returns."}
+        # Resolved-id gate — tool safety, not user confirmation. The RULE belongs to the skill
+        # (calendar: an event surfaced by a prior search; setup: a chat surfaced by a card, a
+        # group pick or the last list), so the skill supplies it and this node just applies it.
+        # A gate may also PATCH the inputs — that is how "edit 5" becomes a chat key.
+        gate = gates.get(domain)
+        gate_error = None
+        if gate is not None:
+            patched, gate_error = gate(verb, inputs, {**state, "seen_event_ids": seen,
+                                                     "seen_chat_keys": seen_chat_keys,
+                                                     "seen_chats": seen_chats,
+                                                     "listed_chats": listed_chats})
+            if patched is not None:
+                inputs = patched
+        if gate_error:
+            res = {"ok": False, **gate_error}
         else:
             handler = tools.get(domain)
             if handler is None:
@@ -81,6 +123,12 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
                     any_read = True
                 seen.extend(i for i in _collect_ids(res) if i not in seen)
                 seen_events.update(_collect_views(res))
+                seen_chat_keys.extend(
+                    k for k in _collect_chat_keys(res) if k not in seen_chat_keys)
+                seen_chats.update(_collect_chat_views(res))
+                ordinals = (res.get("data") or {}).get("ordinals")
+                if isinstance(ordinals, dict):
+                    listed_chats = dict(ordinals)  # a new list REPLACES the old numbering
 
         res = dict(res or {})
         res.setdefault("task", task)
@@ -104,6 +152,9 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
         "action_results": (state.get("action_results") or []) + results,
         "seen_event_ids": seen,
         "seen_events": seen_events,
+        "seen_chat_keys": seen_chat_keys,
+        "seen_chats": seen_chats,
+        "listed_chats": listed_chats,
         "tool_hops": hops,
         "last_ran": len(results),
         "last_results": results,

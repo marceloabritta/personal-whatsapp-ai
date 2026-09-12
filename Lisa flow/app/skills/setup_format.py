@@ -1,0 +1,205 @@
+"""Setup's programmatic prose — the confirmations it asks and the results it reports.
+
+Every sentence here is built in CODE, which is the point: the words the owner approves and the
+row that gets written come from the same place, so they cannot disagree. The model chooses a
+verb; it never writes a confirmation and never reports a change.
+
+Only two languages render programmatically (en/pt), matching the calendar formatter; anything
+else falls back to the model (see nodes/respond.py)."""
+from __future__ import annotations
+
+from ..roster import BOTH, INBOUND, OUTBOUND
+
+LANGS = ("en", "pt")
+
+# The direction labels. Fixed words, never translated: they are labels, so the list column reads
+# the same every time. "both" is the one value whose label differs from its stored key.
+LABEL = {INBOUND: "inbound", OUTBOUND: "outbound", BOTH: "in & out"}
+
+
+def label_of(direction: str | None) -> str:
+    return LABEL.get(direction or "", direction or "?")
+
+
+def _lang(state: dict) -> str:
+    return (state.get("session_lang") or state.get("lang") or "en")[:2].lower()
+
+
+def _name(view: dict | None, key: str) -> str:
+    return (view or {}).get("label") or key
+
+
+def _view(state: dict, key: str) -> dict:
+    return (state.get("seen_chats") or {}).get(key) or {}
+
+
+def target_key(action: dict, state: dict) -> str:
+    """The chat this action targets, resolving an ordinal the same way the execute gate will.
+
+    The gate runs at EXECUTE, which is after the confirmation is composed — so without this the
+    question would be written before the number had been resolved, and would name no one. The
+    owner has to read the name he is approving, so the resolution happens in both places against
+    the same list."""
+    ordinal = (action or {}).get("ordinal")
+    if ordinal is not None:
+        return (state.get("listed_chats") or {}).get(str(ordinal)) or ""
+    return ((action or {}).get("chat_key") or "").strip()
+
+
+# --- confirmations (composed by the confirm node, before anything is written) ---------------
+
+def compose_enroll(action: dict, state: dict) -> str:
+    key = target_key(action, state)
+    view = _view(state, key)
+    name = action.get("label") or _name(view, key)
+    kind = view.get("kind") or "contact"
+    d = label_of(action.get("direction"))
+    existing = (state.get("seen_chats") or {}).get(key, {}).get("direction")
+    tail = " (group)" if kind == "group" else ""
+    if _lang(state) == "pt":
+        if existing:
+            return f"Confirmar — *{name}*{tail}: mudar {label_of(existing)} → *{d}*?"
+        return f"Confirmar — *{name}*{tail}: transcrever automaticamente os áudios *{d}*. Registro?"
+    if existing:
+        return f"Confirm — *{name}*{tail}: change {label_of(existing)} → *{d}*?"
+    return f"Confirm — *{name}*{tail}: auto-transcribe *{d}* audio. Register it?"
+
+
+def compose_update(action: dict, state: dict) -> str:
+    key = target_key(action, state)
+    view = _view(state, key)
+    name = _name(view, key)
+    n = _ordinal_of(state, key, action)
+    head = f"{n}. {name}" if n else name
+    kind = view.get("kind") or "contact"
+    tail = " (group)" if kind == "group" else ""
+    before = label_of(view.get("direction")) if view.get("direction") else None
+    d = label_of(action.get("direction"))
+    if _lang(state) == "pt":
+        return (f"Confirmar — *{head}*{tail}: mudar {before} → *{d}*?" if before
+                else f"Confirmar — *{head}*{tail}: mudar para *{d}*?")
+    return (f"Confirm — *{head}*{tail}: change {before} → *{d}*?" if before
+            else f"Confirm — *{head}*{tail}: change to *{d}*?")
+
+
+def compose_remove(action: dict, state: dict) -> str:
+    key = target_key(action, state)
+    view = _view(state, key)
+    name = _name(view, key)
+    n = _ordinal_of(state, key, action)
+    head = f"{n}. {name}" if n else name
+    tail = " (group)" if (view.get("kind") == "group") else ""
+    if _lang(state) == "pt":
+        return (f"Remover *{head}*{tail}? Para de ser transcrito e sai da lista.")
+    return f"Remove *{head}*{tail}? It stops being transcribed and drops off the list."
+
+
+def _ordinal_of(state: dict, key: str, action: dict | None = None) -> str:
+    """The number to echo back. What the owner typed when he used one; otherwise the number this
+    chat carried on the last list."""
+    if action is not None and action.get("ordinal") is not None:
+        return str(action["ordinal"])
+    return _ordinal_lookup(state, key)
+
+
+def _ordinal_lookup(state: dict, key: str) -> str:
+    """The number this chat was printed against in the last list, so the confirmation can echo
+    it back — the cheapest way to catch a stale or misremembered number."""
+    for n, k in (state.get("listed_chats") or {}).items():
+        if k == key:
+            return str(n)
+    return ""
+
+
+# --- result rendering -----------------------------------------------------------------------
+
+def fmt_list(results: list, state: dict) -> str:
+    """The roster, contacts and groups under separate titles, numbered in ONE sequence.
+
+    The continuous numbering is what makes "edit 5" unambiguous, and the titles are what make it
+    readable — so the sections are cosmetic and the numbers are the handle."""
+    data = (results[0].get("data") or {}) if results else {}
+    contacts = data.get("contacts") or []
+    groups = data.get("groups") or []
+    pt = _lang(state) == "pt"
+    if not contacts and not groups:
+        return ("Transcrição — nada configurado ainda.\n\n"
+                "Para adicionar um contato, me encaminhe o cartão dele. "
+                "Para um grupo, é só dizer o nome." if pt else
+                "Transcription — nothing enrolled yet.\n\n"
+                "To add a contact, forward me their contact card. "
+                "To add a group, just tell me its name.")
+
+    total = len(contacts) + len(groups)
+    head = (f"Transcrição — {total} conversa(s)" if pt else
+            f"Transcription — {total} chat{'s' if total != 1 else ''}")
+    width = max((len(r.get("label") or r["chat_key"]) for r in contacts + groups), default=0)
+    lines = [head]
+    for title, bucket in ((("Contatos" if pt else "Contacts"), contacts),
+                          (("Grupos" if pt else "Groups"), groups)):
+        if not bucket:
+            continue  # an empty section is omitted, not printed empty
+        lines.append("")
+        lines.append(f"*{title}*")
+        for r in bucket:
+            name = r.get("label") or r["chat_key"]
+            lines.append(f"{r['n']:>2}. {name.ljust(width)}   {label_of(r.get('direction'))}")
+    lines.append("")
+    lines.append('Diga "edita 1 pra in & out" ou "remove 2".' if pt else
+                 'Say "edit 1 to in & out" or "remove 2".')
+    return "\n".join(lines)
+
+
+def fmt_menu(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    items = data.get("items") or []
+    pt = _lang(state) == "pt"
+    lines = ["Setup. " + ("Um item configurável hoje:" if pt else "One thing is configurable today:"), ""]
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. *{item['title']}* — {item['summary']}")
+    return "\n".join(lines)
+
+
+def fmt_enroll(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    name = data.get("label") or data.get("chat_key") or "?"
+    d = label_of(data.get("direction"))
+    pt = _lang(state) == "pt"
+    return f"Pronto. {name} → {d}." if pt else f"Done. {name} → {d}."
+
+
+def fmt_update(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    name = data.get("label") or data.get("chat_key") or "?"
+    d = label_of(data.get("to") or data.get("direction"))
+    pt = _lang(state) == "pt"
+    return f"Pronto. {name} → {d}." if pt else f"Done. {name} → {d}."
+
+
+def fmt_remove(results: list, state: dict) -> str:
+    """A delete reports what went, then re-lists — the receipt, and the new numbering."""
+    data = (results[0].get("data") or {}) if results else {}
+    name = data.get("label") or data.get("chat_key") or "?"
+    pt = _lang(state) == "pt"
+    head = (f"Removido. {name} saiu da lista." if pt else
+            f"Removed. {name} is off the list.")
+    remaining = data.get("remaining") or []
+    if not remaining:
+        return head
+    contacts, groups, n = [], [], 0
+    for rule in remaining:
+        n += 1
+        (groups if rule.get("kind") == "group" else contacts).append({**rule, "n": n})
+    relist = fmt_list([{"data": {"contacts": contacts, "groups": groups}}], state)
+    return f"{head}\n\n{relist}"
+
+
+def fmt_failure(results: list, state: dict) -> str:
+    """An honest line when a setup action failed, in code — never handed back to the model,
+    which would answer by silently re-proposing the same change."""
+    first = next((r for r in results if not r.get("ok")), {})
+    detail = first.get("summary") or ""
+    pt = _lang(state) == "pt"
+    head = ("Não consegui salvar essa mudança agora." if pt else
+            "I couldn't save that change just now.")
+    return f"{head}\n\n{detail}".strip()

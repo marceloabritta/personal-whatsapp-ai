@@ -79,12 +79,13 @@ class FakeEvolution:
         self.history = history or []
         self.missing_media = missing_media
 
-    async def send_text(self, number, text):
+    async def send_text(self, number, text, *, quoted=None):
         mid = f"echo{len(self.sent)}"
         self.sent.append((number, text))
         return mid
 
-    async def send_media(self, number, *, mediatype, mimetype, media_b64, filename, caption):
+    async def send_media(self, number, *, mediatype, mimetype, media_b64, filename, caption,
+                         quoted=None):
         self.media.append({"number": number, "mediatype": mediatype, "mimetype": mimetype,
                            "media_b64": media_b64, "filename": filename, "caption": caption})
         return True

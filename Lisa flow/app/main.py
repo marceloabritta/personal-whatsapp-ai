@@ -74,6 +74,38 @@ async def lifespan(app: FastAPI):
             log.warning("transcript-cache disabled: %s", exc)
             tstore = None
 
+    # Auto-transcription roster — the rules the gate reads on every voice note. Durable tier
+    # when a DB is present; otherwise the in-memory roster stands alone (dev/tests). Best-effort:
+    # a roster that cannot load matches nothing, so the feature is simply inert.
+    rstore = None
+    if s.database_url and s.auto_transcribe_enabled:
+        from .roster import RosterStore
+
+        rstore = RosterStore(s.database_url, schema=s.log_schema)
+        try:
+            await rstore.open()
+            deps.roster.store = rstore
+            await deps.roster.refresh(force=True)
+            deps.roster.start()
+            log.info("%s", '{"boot":"transcribe-roster"}')
+        except Exception as exc:  # the roster must never block startup
+            log.warning("transcribe-roster disabled: %s", exc)
+            rstore = None
+
+    # The owner's own JID, for recognising his chat with himself (where setup runs). Configured
+    # explicitly, or asked of Evolution once at boot so a fresh deployment needs no hand-copied
+    # phone number. Unknown → no chat is the self-chat and setup is simply unreachable.
+    if s.setup_enabled and not s.owner_jid:
+        try:
+            owner_jid = await deps.evolution.fetch_owner_jid()
+            if owner_jid:
+                deps.settings.owner_jid = owner_jid
+                log.info('{"boot":"owner-jid","source":"evolution"}')
+            else:
+                log.warning("owner jid unknown — setup stays unreachable until OWNER_JID is set")
+        except Exception as exc:
+            log.warning("owner jid lookup failed: %s", exc)
+
     # Session review — grades each turn once a session closes (app/review/). Best-effort and
     # strictly downstream: it reads the log, writes only its own tables, and nothing in the reply
     # path ever awaits it. Off unless REVIEW_ENABLED, so it ships inert to a flow that hasn't
@@ -107,6 +139,9 @@ async def lifespan(app: FastAPI):
         if reaper is not None:
             await reaper.aclose()
             await reviewer.store.aclose()
+        await deps.roster.aclose()
+        if rstore is not None:
+            await rstore.aclose()
         if tstore is not None:
             await tstore.aclose()
         if store is not None:

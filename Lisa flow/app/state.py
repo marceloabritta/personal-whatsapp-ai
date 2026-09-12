@@ -28,6 +28,9 @@ class MessageState(TypedDict, total=False):
     workflow: Optional[dict]  # persistent gather memory toward a goal; cleared on tag-reset
     loop_domain: Optional[str]  # the domain this loop is operating in; a continuation sticks to it
     seen_event_ids: list  # calendar ids surfaced by find/list this loop; gates update/delete
+    seen_chat_keys: list  # chat keys surfaced by a card/resolve/list this loop; gates setup writes
+    seen_chats: dict  # {chat_key: view} surfaced this loop; supplies jid/label/kind to a write
+    listed_chats: dict  # {"1": chat_key, ...} from the last setup.list; makes "edit 5" resolvable
     seen_events: dict  # {event_id: view} surfaced by find/list this loop; feeds programmatic messages
     pending_action: Optional[dict]  # a write awaiting the owner's yes; run by resolve_pending on a clean confirmation
     last_confirm_sig: Optional[str]  # fingerprint of the confirmation already sent this loop; blocks an identical re-ask
@@ -50,6 +53,22 @@ class MessageState(TypedDict, total=False):
     # `transcribe_only` is the matcher verdict — gate routes it to the fast lane.
     quoted_audio_id: Optional[str]
     transcribe_only: bool
+
+    # This message's OWN audio (the automatic path). `auto_rule` is the roster rule the gate
+    # matched; `auto_then_run` means a listening window was also open, so the turn continues
+    # into the normal conversation after the transcript goes out.
+    is_audio: bool
+    audio_seconds: Optional[float]
+    auto_rule: Optional[dict]
+    auto_then_run: bool
+
+    # Chat identity, normalised once in `parse`. `alt_key` is the @lid/phone twin Evolution
+    # reports as remoteJidAlt — a 1:1 persists inbound under one and outbound under the other.
+    chat_key: str
+    alt_key: Optional[str]
+    chat_kind: str  # "contact" | "group"
+    is_self_chat: bool  # the owner's chat with himself — the only place setup runs
+    contact_cards: list  # [{name, number}] forwarded this message; the ONLY way a contact enrolls
 
     decision: str  # gate: "run" | "stop"
     trigger: Optional[str]  # "tag" | "window"

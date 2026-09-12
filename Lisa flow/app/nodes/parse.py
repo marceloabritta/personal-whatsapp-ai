@@ -8,7 +8,10 @@ from ..identity import is_own_message, matched_tag
 from ..intent import classify_transcribe
 from ..state import MessageState
 from ..trace import Trace
-from ..whatsapp import extract_text, get_quoted
+from ..whatsapp import (
+    audio_seconds, chat_key, chat_kind, contact_cards, extract_text, get_quoted,
+    is_audio_message,
+)
 
 
 def parse_node(
@@ -40,10 +43,20 @@ def parse_node(
             on_empty=settings.transcribe_on_empty_reply,
         ) == "transcribe"
 
+    # This message's OWN audio and chat identity — what the automatic path is gated on.
+    # `alt_key` is the @lid/phone twin: a 1:1 persists inbound under one JID and outbound under
+    # the other, so a rule has to be matchable by either.
+    message = data.get("message")
+    is_audio = is_audio_message(message)
+    ckey = chat_key(remote_jid)
+    alt = chat_key(key.get("remoteJidAlt"))
+    cards = contact_cards(message)
+
     trace.code(
         tid, node="parse", chat=remote_jid, from_me=from_me,
         is_own=is_own_message(text, owner_name), tag=tag, text_preview=text[:80],
         quoted_audio=bool(quoted_audio_id), transcribe_only=transcribe_only,
+        is_audio=is_audio, cards=len(cards),
     )
 
     return {
@@ -59,5 +72,12 @@ def parse_node(
         "tag": tag,
         "quoted_audio_id": quoted_audio_id,
         "transcribe_only": transcribe_only,
+        "is_audio": is_audio,
+        "audio_seconds": audio_seconds(message),
+        "chat_key": ckey,
+        "alt_key": alt or None,
+        "chat_kind": chat_kind(remote_jid),
+        "is_self_chat": bool(settings.owner_key) and ckey == settings.owner_key,
+        "contact_cards": cards,
         "error_category": "none",
     }

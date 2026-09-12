@@ -72,6 +72,43 @@ async def _transcribe_audio(records: list[dict], transcription, settings, trace:
     await asyncio.gather(*(fill(r) for r in todo))
 
 
+def _card_line(card: dict) -> str:
+    """How a forwarded contact card appears in the transcript the model reads. The number IS the
+    chat key, so the model can refer to it without ever typing a number the owner did not send."""
+    name = (card.get("name") or "").strip()
+    return f"[contact card: {name} · {card['number']}]" if name else f"[contact card: {card['number']}]"
+
+
+def _collect_cards(records: list[dict], current: list[dict]) -> tuple[list[str], dict]:
+    """Every contact card in this turn — from the fetched history and from the message being
+    handled (the two overlap; the record wins). Returns (keys, views).
+
+    Marks each card record IN PLACE so `build_labeled_transcript` emits a line for it: a card
+    carries no text, so without this it would vanish from the transcript entirely."""
+    keys: list[str] = []
+    views: dict = {}
+    seen: set[str] = set()
+
+    def take(card: dict) -> None:
+        num = card.get("number")
+        if not num or num in seen:
+            return
+        seen.add(num)
+        keys.append(num)
+        views[num] = {"chat_key": num, "chat_jid": f"{num}@s.whatsapp.net",
+                      "label": (card.get("name") or "").strip() or None, "kind": "contact"}
+
+    for r in records:
+        cards = r.get("contact_cards") or []
+        if cards and not (r.get("text") or "").strip():
+            r["text"] = " ".join(_card_line(c) for c in cards)
+        for c in cards:
+            take(c)
+    for c in current or []:
+        take(c)
+    return keys, views
+
+
 def _media_marker(r: dict, status: str = "ok") -> str:
     """Transcript marker for an image/PDF row: "[image]" / "[PDF: report.pdf]", or a status
     variant ("— unavailable" / "— too large" / "— omitted") when no block was attached."""
@@ -246,9 +283,15 @@ async def context_node(
                 trace.user(tid, f"{owner} (replied-to voice message)", qtext,
                            loop_id=loop_id, wa_id=qid, source="audio")
 
+    # Forwarded contact cards. Marked into the transcript, and their numbers remembered as
+    # resolved ids for this loop — that is what lets `setup.enroll` name a contact at all.
+    card_keys, card_views = _collect_cards(raw if reset else new, state.get("contact_cards"))
+
     # Durable transcript. On a fresh tag (loop open) log the whole seed — the ~30
     # messages before the tag, both sides — as the loop's opening context. On a window
     # continuation log only the new inbound; Mary's own replies are logged by `act`.
+    if card_keys:  # a marked card changed the records, so re-render the labeled transcript
+        transcript = build_labeled_transcript(raw if reset else new, owner)
     _log_transcript(trace, tid, loop_id, raw if reset else new, owner)
     trace.code(
         tid, node="context", loop_id=loop_id,
@@ -274,8 +317,17 @@ async def context_node(
         update["loop_domain"] = None
         update["seen_event_ids"] = []
         update["seen_events"] = {}
+        update["seen_chat_keys"] = []
+        update["seen_chats"] = {}
+        update["listed_chats"] = {}
         update["pending_action"] = None
         update["last_confirm_sig"] = None
+
+    if card_keys:
+        prior = [] if reset else list(state.get("seen_chat_keys") or [])
+        update["seen_chat_keys"] = prior + [k for k in card_keys if k not in prior]
+        update["seen_chats"] = {**({} if reset else dict(state.get("seen_chats") or {})),
+                                **card_views}
 
     # add_messages appends, so to truly start fresh we must first REMOVE every
     # message the checkpoint restored, then add this loop's seed turn.

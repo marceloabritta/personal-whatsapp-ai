@@ -10,8 +10,9 @@ from .clients.evolution import Evolution
 from .config import Settings, load_settings
 from .echoes import InMemoryEchoes, RedisEchoes
 from .reasoning import build_reasoner
+from .roster import DailyCap, Roster
 from .sessions import InMemorySessions, RedisSessions
-from .skills import confirm_policies, handlers, render_policies
+from .skills import confirm_policies, handlers, render_policies, resolve_gates
 from .transcription import build_transcriber
 from .trace import Trace, build_trace
 
@@ -33,6 +34,11 @@ class Deps:
     tools: dict = None              # {domain: handler_instance} for the execute node
     confirm_policies: dict = None   # {domain: ConfirmPolicy|None} for the confirm node
     render_policies: dict = None    # {domain: RenderPolicy|None} for the respond node
+    resolve_gates: dict = None      # {domain: gate} — the execute node's tool-safety rules
+    # Auto-transcription. `roster` is read by the gate on every voice note (pure, no I/O) and
+    # written by the setup skill; `caps` is the per-chat daily ceiling.
+    roster: Any = None
+    caps: Any = None
 
 
 def build_deps(settings: Settings | None = None) -> Deps:
@@ -62,6 +68,20 @@ def build_deps(settings: Settings | None = None) -> Deps:
         evolution, build_transcriber(settings), settings
     )
 
+    # The roster starts empty and in-memory; the durable tier is attached in the FastAPI
+    # lifespan when a DB is present, exactly like the transcript cache.
+    roster = Roster(ttl=settings.roster_cache_ttl)
+    caps = DailyCap(settings.auto_transcribe_daily_cap)
+
+    tools = handlers(settings)
+    # The setup handler needs the roster it edits and the client it searches chats with. The
+    # skills fan-out builds handlers from settings alone, so they are attached here — the same
+    # way the transcript store is attached to the transcription service.
+    setup_tool = tools.get("setup")
+    if setup_tool is not None:
+        setup_tool.roster = roster
+        setup_tool.evolution = evolution
+
     # The reasoner builds its default (calendar) schema itself; the reason node passes the
     # routed skill's per-call schema each turn. No merged schema, no MCP tools in v1.
     return Deps(
@@ -73,7 +93,10 @@ def build_deps(settings: Settings | None = None) -> Deps:
         reasoner=build_reasoner(settings),
         transcription=transcription,
         redis=redis_client,
-        tools=handlers(settings),
+        tools=tools,
         confirm_policies=confirm_policies(),
         render_policies=render_policies(),
+        resolve_gates=resolve_gates(),
+        roster=roster,
+        caps=caps,
     )

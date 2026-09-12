@@ -33,6 +33,7 @@ from app.skills import (  # noqa: E402
     has_actions,
     output_schema_for,
     render_policies,
+    resolve_gates,
     server_tools_for,
     system_prompt_for,
 )
@@ -280,7 +281,7 @@ class FakeEvolution:
         self.sent: list = []
         self.history = history or []
 
-    async def send_text(self, number, text):
+    async def send_text(self, number, text, *, quoted=None):
         mid = f"echo{len(self.sent)}"
         self.sent.append((number, text))
         return mid
@@ -322,7 +323,8 @@ def make_toolenv(history=None, max_tool_actions=4):
     deps = Deps(settings=settings, evolution=evo, sessions=InMemorySessions(ttl=60),
                 echoes=InMemoryEchoes(ttl=3600), trace=build_trace(), reasoner=stub,
                 redis=None, tools={"calendar": cal},
-                confirm_policies=confirm_policies(), render_policies=render_policies())
+                confirm_policies=confirm_policies(), render_policies=render_policies(),
+                resolve_gates=resolve_gates())
     return deps, evo, stub, cal, build_graph(deps, MemorySaver())
 
 

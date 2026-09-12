@@ -31,6 +31,16 @@ class Skill:
     server_tools: Any = None                         # native tool defs, or a builder(settings) -> list
     matcher: Optional[Callable[[str], str]] = None   # text -> "yes" | "no" | "maybe" for this domain
 
+    # Structural placement, not prompt guidance.
+    # `only_self_chat` keeps a skill out of every chat but the owner's chat with himself — the
+    # router skips it elsewhere, so no classifier miss can put it in a contact's conversation.
+    # `resolve_gate` is the skill's own tool-safety rule, applied by the execute node:
+    #   (verb, inputs, state) -> (patched_inputs | None, {"error", "summary"} | None)
+    # It answers "may this action run, and against what?" and may PATCH the inputs (that is how
+    # an ordinal from a list becomes a resolved id). None = this skill gates nothing.
+    only_self_chat: bool = False
+    resolve_gate: Optional[Callable] = None
+
     # Per-skill reason-call runtime. model/effort fall back to the settings default when None, so a
     # skill only names what it wants to differ. `think` turns on adaptive thinking for this skill's
     # reason call — its depth is governed by `effort` (this is how Sonnet 5 exposes thinking under a
