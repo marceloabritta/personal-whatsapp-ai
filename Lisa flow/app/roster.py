@@ -35,7 +35,13 @@ DIRECTION_ALIASES = {
     "in": INBOUND, "inbound": INBOUND, "received": INBOUND,
     "out": OUTBOUND, "outbound": OUTBOUND, "sent": OUTBOUND,
     "both": BOTH, "in & out": BOTH, "in and out": BOTH, "in&out": BOTH,
+    # The direction is always offered as a numbered list, so answering "1" has to mean
+    # something here too — the number may arrive as the direction itself.
+    "1": INBOUND, "2": OUTBOUND, "3": BOTH,
 }
+
+# The numbered choice, in the fixed order it is always presented in.
+DIRECTION_CHOICES = ((1, INBOUND), (2, OUTBOUND), (3, BOTH))
 
 
 def normalize_direction(value: str | None) -> Optional[str]:

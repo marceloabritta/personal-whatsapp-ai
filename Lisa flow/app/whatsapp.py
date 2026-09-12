@@ -56,37 +56,53 @@ def chat_kind(jid: str | None) -> str:
     return "group" if (jid or "").endswith("@g.us") else "contact"
 
 
-def _vcard_number(vcard: str) -> str:
-    """The WhatsApp id from a vCard's TEL line.
+def _vcard_numbers(vcard: str) -> list[dict]:
+    """Every phone number on a vCard, as [{number, wa, label}], in the order listed.
 
-    WhatsApp writes the account id into the TEL parameters, which is the authoritative source:
+        TEL;type=Home:+55 11 4563-9572                        -> wa=False (a landline)
+        TEL;type=Mobile;waid=5511994224000:+55 11 99422-4000  -> wa=True
 
-        TEL;type=CELL;type=VOICE;waid=5511976004417:+55 11 97600-4417
-
-    Prefer `waid`; fall back to the digits of the printed number when a card was exported by a
-    client that omits it. Returns "" when nothing usable is present."""
+    `waid` is the account's WhatsApp id and the only authoritative one. A number without it is
+    just a printed phone number — it may not be on WhatsApp at all — so it is kept as a
+    fallback candidate but never outranks a waid. Reading them per-line and taking the first
+    usable one is what made a landline listed above a mobile win."""
+    out: list[dict] = []
+    seen: set[str] = set()
     for line in (vcard or "").splitlines():
         if not line.upper().startswith("TEL"):
             continue
         params, _, value = line.partition(":")
+        waid = ""
+        label = ""
         for part in params.split(";"):
             k, _, v = part.partition("=")
-            if k.strip().lower() == "waid" and v.strip():
-                return "".join(c for c in v if c.isdigit())
-        digits = "".join(c for c in value if c.isdigit())
-        if digits:
-            return digits
-    return ""
+            k = k.strip().lower()
+            if k == "waid" and v.strip():
+                waid = "".join(c for c in v if c.isdigit())
+            elif k == "type" and v.strip():
+                label = v.strip()
+        number = waid or "".join(c for c in value if c.isdigit())
+        if not number or number in seen:
+            continue
+        seen.add(number)
+        out.append({"number": number, "wa": bool(waid), "label": label})
+    return out
 
 
 def contact_cards(msg: dict | None) -> list[dict]:
-    """Every contact card forwarded in this message, as [{name, number}].
+    """Every contact card forwarded in this message.
 
-    A card carries no text, so `extract_text` returns "" for it — this is the only way the
-    graph learns a card was sent. Both shapes are read: `contactMessage` (one card) and
-    `contactsArrayMessage` (several forwarded at once). Cards whose vCard yields no number are
-    dropped: a card we cannot key on is not a candidate, and guessing is what this whole path
-    exists to avoid."""
+    Each card is {name, number, candidates, ambiguous}:
+      number      the one to use — a WhatsApp (`waid`) number always wins over a printed one;
+      candidates  every number on the card, so a different one can still be chosen;
+      ambiguous   True only when the choice is a REAL choice: two or more WhatsApp numbers, or
+                  none at all and more than one printed number. A mobile plus a landline is not
+                  ambiguous — only one of them can receive a voice note.
+
+    A card carries no text, so `extract_text` returns "" for it; this is the only way the graph
+    learns a card was sent. Both shapes are read: `contactMessage` and `contactsArrayMessage`.
+    A card yielding no number is dropped — one we cannot key on is not a candidate, and guessing
+    is what this whole path exists to avoid."""
     if not msg:
         return []
     nodes = []
@@ -96,15 +112,20 @@ def contact_cards(msg: dict | None) -> list[dict]:
     nodes.extend(arr.get("contacts") or [])
 
     out: list[dict] = []
-    seen: set[str] = set()
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        number = _vcard_number(node.get("vcard") or "")
-        if not number or number in seen:
+        numbers = _vcard_numbers(node.get("vcard") or "")
+        if not numbers:
             continue
-        seen.add(number)
-        out.append({"name": (node.get("displayName") or "").strip(), "number": number})
+        wa = [n for n in numbers if n["wa"]]
+        pool = wa or numbers
+        out.append({
+            "name": (node.get("displayName") or "").strip(),
+            "number": pool[0]["number"],
+            "candidates": numbers,
+            "ambiguous": len(pool) > 1,
+        })
     return out
 
 

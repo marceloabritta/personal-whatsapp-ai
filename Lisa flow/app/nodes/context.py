@@ -73,10 +73,22 @@ async def _transcribe_audio(records: list[dict], transcription, settings, trace:
 
 
 def _card_line(card: dict) -> str:
-    """How a forwarded contact card appears in the transcript the model reads. The number IS the
-    chat key, so the model can refer to it without ever typing a number the owner did not send."""
+    """How a forwarded contact card appears in the transcript the model reads.
+
+    An unambiguous card shows the number that will be used. An ambiguous one — two WhatsApp
+    numbers, or none and several printed ones — shows them NUMBERED so the model can ask "1 or
+    2?" and the owner can answer with a digit. Numbers that are not WhatsApp accounts are
+    marked, because one of those cannot receive a voice note at all."""
     name = (card.get("name") or "").strip()
-    return f"[contact card: {name} · {card['number']}]" if name else f"[contact card: {card['number']}]"
+    head = f"contact card: {name}" if name else "contact card"
+    if not card.get("ambiguous"):
+        return f"[{head} · {card['number']}]"
+    opts = "  ".join(
+        f"{i}) {c['number']}" + (f" ({c['label']})" if c.get("label") else "")
+        + ("" if c.get("wa") else " — not on WhatsApp")
+        for i, c in enumerate(card.get("candidates") or [], 1)
+    )
+    return f"[{head} · several numbers, ask which: {opts}]"
 
 
 def _collect_cards(records: list[dict], current: list[dict]) -> tuple[list[str], dict]:
@@ -90,13 +102,17 @@ def _collect_cards(records: list[dict], current: list[dict]) -> tuple[list[str],
     seen: set[str] = set()
 
     def take(card: dict) -> None:
-        num = card.get("number")
-        if not num or num in seen:
-            return
-        seen.add(num)
-        keys.append(num)
-        views[num] = {"chat_key": num, "chat_jid": f"{num}@s.whatsapp.net",
-                      "label": (card.get("name") or "").strip() or None, "kind": "contact"}
+        # EVERY number on the card is a resolved id, not just the chosen one — otherwise
+        # picking the other one would be refused by the write gate as unresolved.
+        name = (card.get("name") or "").strip() or None
+        for c in card.get("candidates") or [{"number": card.get("number")}]:
+            num = c.get("number")
+            if not num or num in seen:
+                continue
+            seen.add(num)
+            keys.append(num)
+            views[num] = {"chat_key": num, "chat_jid": f"{num}@s.whatsapp.net",
+                          "label": name, "kind": "contact"}
 
     for r in records:
         cards = r.get("contact_cards") or []

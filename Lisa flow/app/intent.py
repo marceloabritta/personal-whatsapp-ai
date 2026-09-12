@@ -135,3 +135,49 @@ def classify_transcribe(
         not _is_transcribe_word(t, threshold) and t not in _FILLER for t in tokens
     )
     return "transcribe" if (hit and not other) else "compositional"
+
+
+# --- language detection (programmatic, no model call) ---------------------------------------
+#
+# The reason node locks the session language from the MODEL's own `lang` output, which it infers
+# from the surrounding history. In the owner's self-chat that history is mostly Portuguese, so a
+# conversation opened in English ("@lisa setup") came back in Portuguese. For a configuration
+# conversation that is simply wrong: it should follow the words the owner is actually typing,
+# starting in English and moving to Portuguese when he does.
+
+_PT_MARKERS = {
+    "que", "nao", "sim", "voce", "vc", "por", "favor", "obrigado", "obrigada", "para", "pra",
+    "com", "uma", "isso", "muito", "tem", "mas", "quero", "pode", "manda", "mande", "numero",
+    "numeros", "cartao", "grupo", "grupos", "audio", "audios", "meu", "minha", "dele", "dela",
+    "contato", "contatos", "telefone", "errado", "certo", "agora", "depois", "tambem", "entao",
+    "esse", "essa", "este", "esta", "aqui", "ali", "quais", "qual", "ambos", "todos", "coloca",
+    "adiciona", "remove", "muda", "troca", "usa", "usar", "pegou", "pegue", "reenviar",
+}
+_EN_MARKERS = {
+    "the", "what", "which", "add", "remove", "delete", "edit", "change", "please", "yes", "no",
+    "group", "groups", "contact", "contacts", "number", "numbers", "both", "send", "sent",
+    "list", "show", "setup", "settings", "use", "this", "that", "and", "with", "for", "chat",
+    "chats", "active", "inbound", "outbound",
+}
+
+
+def detect_language(text: str) -> str | None:
+    """"pt" | "en" | None — which language the owner is writing in, or None when there is no
+    signal either way ("1", "sim ok", a bare number).
+
+    Accented characters are a strong Portuguese signal on their own; otherwise it is a simple
+    marker-word count. Deliberately conservative: None means "keep whatever is already locked",
+    which is safer than flip-flopping on a two-word message."""
+    raw = text or ""
+    if any(unicodedata.combining(c) for c in unicodedata.normalize("NFKD", raw)):
+        return "pt"
+    tokens = set(_normalize(raw).split())
+    if not tokens:
+        return None
+    pt = len(tokens & _PT_MARKERS)
+    en = len(tokens & _EN_MARKERS)
+    if pt > en:
+        return "pt"
+    if en > pt:
+        return "en"
+    return None

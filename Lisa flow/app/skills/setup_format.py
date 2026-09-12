@@ -8,7 +8,7 @@ Only two languages render programmatically (en/pt), matching the calendar format
 else falls back to the model (see nodes/respond.py)."""
 from __future__ import annotations
 
-from ..roster import BOTH, INBOUND, OUTBOUND
+from ..roster import BOTH, DIRECTION_CHOICES, INBOUND, OUTBOUND
 
 LANGS = ("en", "pt")
 
@@ -151,13 +151,28 @@ def fmt_list(results: list, state: dict) -> str:
 
 
 def fmt_menu(results: list, state: dict) -> str:
+    """The menu. Every word localised — an English "Setup." bolted onto a Portuguese sentence is
+    what made the opening message change language halfway through."""
     data = (results[0].get("data") or {}) if results else {}
     items = data.get("items") or []
     pt = _lang(state) == "pt"
-    lines = ["Setup. " + ("Um item configurável hoje:" if pt else "One thing is configurable today:"), ""]
+    lines = ["Configuração. Um item disponível hoje:" if pt
+             else "Setup. One thing is configurable today:", ""]
     for i, item in enumerate(items, 1):
         lines.append(f"{i}. *{item['title']}* — {item['summary']}")
     return "\n".join(lines)
+
+
+def direction_choices(lang: str = "en") -> str:
+    """The three directions as a numbered list, always in the same order, so a reply of "1" is
+    unambiguous. The direction WORDS never translate — they are labels (see LABEL)."""
+    pt = (lang or "en").lower().startswith("pt")
+    gloss = {
+        INBOUND: "áudio que a outra pessoa envia" if pt else "audio the other person sends",
+        OUTBOUND: "áudio que você envia" if pt else "audio you send",
+        BOTH: "os dois" if pt else "both",
+    }
+    return "\n".join(f"{n}. *{label_of(d)}* — {gloss[d]}" for n, d in DIRECTION_CHOICES)
 
 
 def fmt_enroll(results: list, state: dict) -> str:

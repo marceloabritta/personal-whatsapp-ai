@@ -25,6 +25,8 @@ from app.config import Settings  # noqa: E402
 from app.deps import Deps  # noqa: E402
 from app.echoes import InMemoryEchoes  # noqa: E402
 from app.graph import build_graph  # noqa: E402
+from app.intent import detect_language  # noqa: E402
+from app.nodes.context import _card_line, _collect_cards  # noqa: E402
 from app.roster import DailyCap, Roster, make_rule, normalize_direction  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
 from app.skills import (  # noqa: E402
@@ -32,7 +34,7 @@ from app.skills import (  # noqa: E402
     output_schema_for, render_policies, resolve_gates, routable,
 )
 from app.skills.setup import setup_matcher, setup_resolve_gate  # noqa: E402
-from app.skills.setup_format import fmt_list  # noqa: E402
+from app.skills.setup_format import direction_choices, fmt_list, fmt_menu  # noqa: E402
 from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
 from app.transcribe_reply import inline_body  # noqa: E402
@@ -553,9 +555,119 @@ async def p9_list_render():
     check("an empty section is omitted entirely", "*Groups*" not in only_contacts)
 
 
+
+
+# ============ P10 — regressions from the first live run ===================================
+#
+# Every check here is a bug that actually happened in production on 2026-09-12, kept so it
+# cannot come back.
+
+# The exact card that broke: a landline listed FIRST, the WhatsApp number second.
+LIVE_VCARD = (
+    "BEGIN:VCARD\nVERSION:3.0\nN:;Bbzao;;;\nFN:Bbzao\n"
+    "TEL;type=Home:+55 11 4563-9572\n"
+    "TEL;type=Mobile;waid=5511994224000:+55 11 99422-4000\n"
+    "EMAIL;TYPE=Home:tp.laura@gmail.com\nEND:VCARD"
+)
+
+
+async def p10_live_regressions():
+    print("P10 — regressions from the first live run")
+
+    # --- the wrong number was picked off a two-number card -------------------------------
+    card = contact_cards({"contactMessage": {"displayName": "Bbzao", "vcard": LIVE_VCARD}})[0]
+    check("a waid number beats a landline listed ABOVE it",
+          card["number"] == "5511994224000", detail=card["number"])
+    check("both numbers are still offered as candidates",
+          [c["number"] for c in card["candidates"]] == ["551145639572", "5511994224000"])
+    check("the landline is marked as not a WhatsApp account",
+          card["candidates"][0]["wa"] is False and card["candidates"][1]["wa"] is True)
+    check("one WhatsApp number is NOT ambiguous — there is nothing to ask",
+          card["ambiguous"] is False)
+
+    two_wa = contact_cards({"contactMessage": {"displayName": "X", "vcard":
+        "FN:X\nTEL;type=Mobile;waid=111:+1\nTEL;type=Work;waid=222:+2"}})[0]
+    check("TWO WhatsApp numbers is ambiguous", two_wa["ambiguous"] is True)
+    no_wa = contact_cards({"contactMessage": {"displayName": "Y", "vcard":
+        "FN:Y\nTEL;type=Home:+55 11 1111-1111\nTEL;type=Work:+55 11 2222-2222"}})[0]
+    check("no waid at all and two printed numbers is ambiguous too",
+          no_wa["ambiguous"] is True)
+
+    check("an ambiguous card is shown NUMBERED so a digit answers it",
+          "1) 111" in _card_line(two_wa) and "2) 222" in _card_line(two_wa),
+          detail=_card_line(two_wa))
+    check("an unambiguous card just states the number it will use",
+          _card_line(card) == "[contact card: Bbzao · 5511994224000]", detail=_card_line(card))
+    check("a non-WhatsApp number is called out in the line",
+          "not on WhatsApp" in _card_line(no_wa))
+
+    keys, views = _collect_cards([], [card])
+    check("EVERY number on the card is a resolved id, so the other can still be chosen",
+          keys == ["551145639572", "5511994224000"], detail=str(keys))
+    check("and each carries the contact's name",
+          all(v["label"] == "Bbzao" for v in views.values()))
+
+    # --- the opening message changed language halfway through -----------------------------
+    check("an English opener reads as English", detect_language("@lisa setup") == "en")
+    check("a Portuguese message reads as Portuguese",
+          detect_language("o contato tem 2 nros de telefone. vc pegou o errado.") == "pt")
+    check("accents alone are enough", detect_language("configuração") == "pt")
+    check("a bare digit carries NO signal, so the locked language holds",
+          detect_language("1") is None)
+    check("the menu is localised end to end — no English prefix on a Portuguese sentence",
+          "Setup." not in fmt_menu([{"data": {"items": [{"title": "T", "summary": "s"}]}}],
+                                   {"session_lang": "pt"}))
+
+    # The whole point: setup opens in English even in a chat whose history is Portuguese.
+    reasoner = StubReasoner([{"actions": [{"task": "setup.list"}]}])
+    ev = FakeEvolution()
+    ev.history[OWNER_JID] = [
+        {"id": "h1", "from_me": True, "text": "bom dia, tudo certo por aí?", "push_name": "Marcelo",
+         "ts": 1730000000, "is_audio": False, "media_type": "text", "media_mimetype": None,
+         "media_filename": None, "contact_cards": []},
+    ]
+    deps, graph, ev, tr, roster = build(evolution=ev, reasoner=reasoner)
+    st = await invoke(graph, text_upsert("@lisa setup", mid="L1"))
+    check("setup opens in English despite a Portuguese history",
+          st.get("session_lang") == "en", detail=str(st.get("session_lang")))
+    check("and the reply really is the English rendering",
+          "nothing enrolled yet" in (st.get("reply") or "").lower(),
+          detail=(st.get("reply") or "")[:60])
+
+    reasoner2 = StubReasoner([{"actions": [{"task": "setup.list"}]},
+                              {"actions": [{"task": "setup.list"}]},
+                              {"actions": [{"task": "setup.list"}]}])
+    deps2, graph2, ev2, _, _ = build(evolution=FakeEvolution(), reasoner=reasoner2)
+    ev2.history[OWNER_JID] = []
+    await invoke(graph2, text_upsert("@lisa setup", mid="M1"))
+    st = await invoke(graph2, text_upsert("o contato tem 2 numeros", mid="M2"))
+    check("writing Portuguese switches the conversation to Portuguese",
+          st.get("session_lang") == "pt", detail=str(st.get("session_lang")))
+    st = await invoke(graph2, text_upsert("1", mid="M3"))
+    check("a bare digit afterwards HOLDS Portuguese rather than flipping back",
+          st.get("session_lang") == "pt", detail=str(st.get("session_lang")))
+
+    # --- the direction had to be picked by typing a word ---------------------------------
+    check("1 / 2 / 3 map to the three directions",
+          (normalize_direction("1"), normalize_direction("2"), normalize_direction("3"))
+          == ("inbound", "outbound", "both"))
+    choices = direction_choices("en")
+    check("the directions are offered as a numbered list, in a fixed order",
+          choices.index("1. *inbound*") < choices.index("2. *outbound*")
+          < choices.index("3. *in & out*"))
+    check("the direction labels are never translated",
+          "inbound" in direction_choices("pt") and "outbound" in direction_choices("pt"))
+    from app.tools.setup import GUIDANCE
+    check("the model is told to always offer them numbered",
+          "1. **inbound**" in GUIDANCE and "2. **outbound**" in GUIDANCE)
+    check("and told never to ask for the card twice",
+          "never ask him to forward the card again" in GUIDANCE)
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
-               p6_cards_and_groups, p7_gates, p8_crud, p9_list_render):
+               p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
+               p10_live_regressions):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]
