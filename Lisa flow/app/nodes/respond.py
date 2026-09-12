@@ -62,13 +62,30 @@ async def respond_node(
     policy = render_map.get(verb) if isinstance(render_map, dict) else render_map
     all_ok = bool(results) and all(r.get("ok") for r in results)
 
+    # A transport failure the tool already retried and gave up on. Report it, in code, and stop.
+    # Routing it to the model instead is what produced the repeated confirmations: its calendar
+    # guidance says keep `message` null and emit the action, so it "retried" by re-proposing and
+    # the system rendered that as a fresh question, with the error never mentioned.
+    transient = bool(results) and any(r.get("error") == "transient" for r in results)
+
     update: dict = {}
     if policy is None:
         route = "act"
     elif getattr(policy, "mode", "llm") == "code" and all_ok and lang in LANGS:
         update["reply_body"] = await policy.assemble(results=results, state=state)
         route = "act"
-    else:  # LLMReadback, a failure, or an unsupported language → the model reads back
+    elif transient and lang in LANGS and hasattr(policy, "assemble_failure"):
+        said = await policy.assemble_failure(results=results, state=state)
+        if said:
+            # Drop the proposal: the answer to "try again?" opens a fresh one rather than
+            # silently resurrecting this.
+            update["reply_body"] = said
+            update["pending_action"] = None
+            update["last_confirm_sig"] = None  # "try again" may legitimately re-ask the same thing
+            route = "act"
+        else:
+            route = "reason" if (ran and hops < settings.max_tool_actions) else "act"
+    else:  # LLMReadback, a non-transient failure, or an unsupported language → model reads back
         route = "reason" if (ran and hops < settings.max_tool_actions) else "act"
 
     trace.code(

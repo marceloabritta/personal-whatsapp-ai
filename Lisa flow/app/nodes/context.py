@@ -275,6 +275,7 @@ async def context_node(
         update["seen_event_ids"] = []
         update["seen_events"] = {}
         update["pending_action"] = None
+        update["last_confirm_sig"] = None
 
     # add_messages appends, so to truly start fresh we must first REMOVE every
     # message the checkpoint restored, then add this loop's seed turn.

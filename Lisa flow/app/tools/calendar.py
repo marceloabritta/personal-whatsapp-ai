@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import socket
+import threading
 import uuid
 from datetime import datetime, timedelta
 
@@ -24,6 +26,16 @@ from .base import ActionResult
 log = logging.getLogger("mary.tools.calendar")
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# Transport failures where the request never reached Google, so replaying it is safe. A broken
+# pipe is the one that mattered: the client used to cache its httplib2 connection for the life of
+# the container, Google closed the idle socket, and the next write died on it — 10 of 26 creates.
+# Deliberately NOT here: any 4xx (Google answered), which a replay would only repeat.
+_TRANSIENT_EXC = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                  socket.timeout, TimeoutError)
+_TRANSIENT_STATUS = {500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE = 0.25  # 0.25s, then 0.5s
 
 # Fuzzy-fallback relevance floor: how close a windowed candidate must be to the query before
 # `find` will surface it, so "no match" returns empty instead of the whole calendar.
@@ -71,25 +83,50 @@ class GoogleCalendarService:
 
     def __init__(self, settings) -> None:
         self.s = settings
-        self._svc = None  # lazy Calendar service (or a fake, injected in tests)
+        self._svc = None  # test seam ONLY: a fake service injected by the selftests
+        self._creds = None
+        self._creds_lock = threading.Lock()
 
     # ---- service / helpers -------------------------------------------------------------
 
-    def _service(self):
-        if self._svc is None:
-            from google.oauth2.credentials import Credentials
-            from googleapiclient.discovery import build
+    def _credentials(self):
+        """Built once and shared. Credentials caches the access token, so rebuilding the client
+        per call costs no extra OAuth round-trip — but its refresh is not thread-safe and we are
+        called from arbitrary to_thread workers, so the construction is guarded."""
+        with self._creds_lock:
+            if self._creds is None:
+                from google.oauth2.credentials import Credentials
 
-            creds = Credentials(
-                token=None,
-                refresh_token=self.s.google_refresh_token,
-                client_id=self.s.google_client_id,
-                client_secret=self.s.google_client_secret,
-                token_uri="https://oauth2.googleapis.com/token",
-                scopes=_SCOPES,
-            )
-            self._svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
-        return self._svc
+                self._creds = Credentials(
+                    token=None,
+                    refresh_token=self.s.google_refresh_token,
+                    client_id=self.s.google_client_id,
+                    client_secret=self.s.google_client_secret,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    scopes=_SCOPES,
+                )
+            return self._creds
+
+    def _service(self):
+        """A FRESH client — and so a fresh httplib2 connection — for every call.
+
+        This used to memoise the built client on `self._svc` for the life of the container
+        (five weeks in production). googleapiclient rides httplib2, which holds one keep-alive
+        socket per host; Google drops it long before Lisa's next calendar call, and the following
+        write landed on a dead socket: `[Errno 32] Broken pipe` on 10 of 26 creates. That one
+        object was also shared across `asyncio.to_thread` workers, and httplib2 is not
+        thread-safe. Building per call kills both.
+
+        The cost is nothing: `calendar.v3` ships inside googleapiclient, so with static discovery
+        `build()` never touches the network — ~1.8ms, against a p50 turn of 7.3 seconds.
+
+        `self._svc` survives as a test seam: the selftests inject a fake and it wins."""
+        if self._svc is not None:
+            return self._svc
+        from googleapiclient.discovery import build
+
+        return build("calendar", "v3", credentials=self._credentials(),
+                     cache_discovery=False, static_discovery=True)
 
     def _cal(self) -> str:
         return self.s.google_calendar_id or "primary"
@@ -216,7 +253,23 @@ class GoogleCalendarService:
         kw = dict(calendarId=self._cal(), body=body, sendUpdates=self._send_updates(inp))
         if want_meet:
             kw["conferenceDataVersion"] = 1
-        ev = self._service().events().insert(**kw).execute()
+        # Idempotency across the retry in `run`. The key is minted ONCE PER run() call, so a
+        # replayed insert reuses it and Google rejects the duplicate (409) instead of
+        # double-booking — while a genuinely new request to book the same slot again gets a fresh
+        # key and succeeds. Deriving the key from the event's content instead would wrongly
+        # collapse that second, deliberate booking into the first.
+        key = inp.get("_idempotency_key")
+        if key:
+            body["id"] = key
+        try:
+            ev = self._service().events().insert(**kw).execute()
+        except Exception as exc:
+            if key and self._is_duplicate(exc):
+                # The insert DID land before the transport died; the retry is the duplicate.
+                # Return the event we already created rather than reporting a failure.
+                ev = self._service().events().get(calendarId=self._cal(), eventId=key).execute()
+            else:
+                raise
         view = self._event_view(ev)
         meet = self._meet_link(ev)
         # The read-back summary carries what the model needs to render the "Scheduled:" message:
@@ -356,15 +409,46 @@ class GoogleCalendarService:
     _VERBS = {"create": "_create", "list": "_list", "find": "_find",
               "update": "_update", "delete": "_delete"}
 
+    @staticmethod
+    def _is_duplicate(exc: Exception) -> bool:
+        """Google's "that identifier already exists" — our own retry landing twice."""
+        return getattr(getattr(exc, "resp", None), "status", None) == 409
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """Did the request fail before Google could answer? Only then is a replay safe."""
+        if isinstance(exc, _TRANSIENT_EXC):
+            return True
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        return status in _TRANSIENT_STATUS
+
     async def run(self, verb: str, inputs: dict) -> ActionResult:
+        """Run one verb, retrying only what is safe to replay.
+
+        A fresh connection per call (see `_service`) removes the cause of the broken pipes; this
+        removes the class. Both are wanted — the next transient error will not be this one."""
         method = self._VERBS.get(verb)
         if not method:
             return {"ok": False, "error": "unknown_verb",
                     "summary": f"no calendar verb {verb!r}"}
-        try:
-            return await asyncio.to_thread(getattr(self, method), inputs)
-        except Exception as exc:  # never raise into the graph
-            return self._on_error(exc, verb)
+
+        # One key for this whole run, retries included. Only `create` reads it; a custom event
+        # id must be base32hex (0-9, a-v), which uuid4().hex satisfies.
+        if verb == "create":
+            inputs = {**inputs, "_idempotency_key": uuid.uuid4().hex}
+
+        last: Exception | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                return await asyncio.to_thread(getattr(self, method), inputs)
+            except Exception as exc:  # never raise into the graph
+                last = exc
+                if not self._is_transient(exc) or attempt == _MAX_ATTEMPTS - 1:
+                    break
+                log.warning("calendar.%s transient (%s); retry %d/%d",
+                            verb, exc, attempt + 1, _MAX_ATTEMPTS - 1)
+                await asyncio.sleep(_BACKOFF_BASE * (2 ** attempt))
+        return self._on_error(last, verb)
 
     def _on_error(self, exc: Exception, verb: str) -> ActionResult:
         status = getattr(getattr(exc, "resp", None), "status", None)
@@ -372,6 +456,10 @@ class GoogleCalendarService:
             err = "auth"
         elif status == 404:
             err = "not_found"
+        elif self._is_transient(exc):
+            # Named, so the confirm/respond path can tell "the network hiccuped" from "Google
+            # said no" and report it honestly instead of silently asking the same question again.
+            err = "transient"
         else:
             err = str(exc)
         log.exception("calendar.%s failed: %s", verb, err)

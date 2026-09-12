@@ -74,12 +74,39 @@ async def lifespan(app: FastAPI):
             log.warning("transcript-cache disabled: %s", exc)
             tstore = None
 
+    # Session review — grades each turn once a session closes (app/review/). Best-effort and
+    # strictly downstream: it reads the log, writes only its own tables, and nothing in the reply
+    # path ever awaits it. Off unless REVIEW_ENABLED, so it ships inert to a flow that hasn't
+    # opted in.
+    # `store` is the LogStore: review READS its loops/events tables, so without it there is
+    # nothing to review and pending_loops would query a table that does not exist.
+    reviewer = reaper = None
+    if store is not None and s.review_enabled:
+        from .review import ReviewStore, Reviewer
+        from .review.reaper import Reaper
+
+        rstore = ReviewStore(s.database_url, schema=s.log_schema)
+        try:
+            await rstore.open()
+            reviewer = Reviewer(s, rstore)
+            reaper = Reaper(reviewer, s)
+            reaper.start()
+            log.info("%s", '{"boot":"session-review"}')
+        except Exception as exc:  # review must never block startup
+            log.warning("session-review disabled: %s", exc)
+            reviewer = reaper = None
+
     app.state.deps = deps
     app.state.logstore = store
+    app.state.reaper = reaper
+    deps.reaper = reaper  # act_node offers closed loops here; None is a no-op
     app.state.graph = build_graph(deps, checkpointer)
     try:
         yield
     finally:
+        if reaper is not None:
+            await reaper.aclose()
+            await reviewer.store.aclose()
         if tstore is not None:
             await tstore.aclose()
         if store is not None:

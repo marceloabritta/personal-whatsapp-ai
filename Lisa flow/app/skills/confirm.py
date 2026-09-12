@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, Protocol, TypedDict, runtime_checkable
 
 from ..intent import classify_confirmation
+from ..state import APPROVED_BY, OWNER_YES
 
 
 class ConfirmDecision(TypedDict, total=False):
@@ -54,8 +55,15 @@ class FlagConfirm:
         return classify_confirmation(text)
 
     async def confirm(self, *, action: dict, state: dict, deps: Any) -> ConfirmDecision:
-        ok = bool(action.get("confirmed"))
-        return {"ok": ok, "reason": "flag" if ok else "unconfirmed"}
+        """Approval is a CODE signal, never a field the model filled in.
+
+        This used to read `action["confirmed"]` — which is part of the model's own enforced-JSON
+        schema. Its guidance says to always send `false` and let the system resolve the owner's
+        yes, but guidance is not a gate: under a repeated tool failure the model set the flag
+        itself and a calendar write ran with no human approval. `_approved_by` is stamped only by
+        `resolve_pending`, on the owner's own message, and is not in any schema the model sees."""
+        ok = action.get(APPROVED_BY) == OWNER_YES
+        return {"ok": ok, "reason": OWNER_YES if ok else "unconfirmed"}
 
 
 class LLMConfirm:

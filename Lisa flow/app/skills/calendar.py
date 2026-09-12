@@ -14,7 +14,7 @@ from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
 from .calendar_format import (
     compose_create, compose_delete, compose_update,
-    fmt_create, fmt_delete, fmt_list, fmt_update,
+    fmt_create, fmt_delete, fmt_failure, fmt_list, fmt_update,
 )
 from .confirm import FlagConfirm
 from .render import LLMReadback, Programmatic
@@ -102,11 +102,13 @@ CALENDAR = Skill(
     # Render is PER VERB: writes + list render programmatically from the result; find keeps the
     # model (judgment / "which one?"). respond falls back to the model on failure or an
     # unsupported language.
+    # A transient failure is reported in code too (fmt_failure) — never handed back to the
+    # model, which would answer by silently re-proposing the action.
     render={
-        "create": Programmatic(fmt_create),
-        "update": Programmatic(fmt_update),
-        "delete": Programmatic(fmt_delete),
-        "list": Programmatic(fmt_list),
+        "create": Programmatic(fmt_create, on_failure=fmt_failure),
+        "update": Programmatic(fmt_update, on_failure=fmt_failure),
+        "delete": Programmatic(fmt_delete, on_failure=fmt_failure),
+        "list": Programmatic(fmt_list, on_failure=fmt_failure),
         "find": LLMReadback(),
     },
     matcher=calendar_matcher,

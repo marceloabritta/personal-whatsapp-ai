@@ -47,8 +47,15 @@ def gate_node(state: MessageState, *, sessions, trace: Trace) -> dict:
         return {"decision": "run", "trigger": "window", "loop_id": loop_id,
                 "loop_opened": False}
 
+    # A message arriving after the window lapsed is dropped here. Carry the STALE loop_id the
+    # checkpointer still holds so the drop reaches the durable log at all — Trace only persists
+    # loop-scoped records, so without this the message vanishes with no trace anywhere and a
+    # follow-up nobody ever answered stays invisible. Behaviour is unchanged; this only decides
+    # whether the event is written down.
+    stale_loop = state.get("loop_id")
     trace.code(
-        tid, node="gate", decision="stop", reason="no_trigger",
+        tid, node="gate", decision="stop", reason="no_trigger", loop_id=stale_loop,
+        window="expired" if stale_loop else None,
         from_me=state["from_me"], tag=state["tag"],
     )
     return {"decision": "stop", "trigger": None}

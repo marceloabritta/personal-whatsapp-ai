@@ -11,8 +11,19 @@ it asks). Skills with no confirm policy pass straight through. The resolved-id g
 `execute` (tool safety, not user confirmation)."""
 from __future__ import annotations
 
+import hashlib
+import logging
+
 from ..state import MessageState
 from ..trace import Trace
+
+log = logging.getLogger("mary.confirm")
+
+
+def _signature(action: dict, text: str) -> str:
+    """Fingerprint of a confirmation actually sent — the task plus the exact words."""
+    task = (action or {}).get("task", "")
+    return hashlib.sha1(f"{task}|{text}".encode("utf-8")).hexdigest()[:16]
 
 
 async def confirm_node(
@@ -67,14 +78,35 @@ async def confirm_node(
     update: dict = {"actions": approved, "tool_hops": hops, "confirm_route": route}
     if observations:
         update["messages"] = observations
+    repeated = False
     if ask_message and route == "act":
-        update["pending_action"] = pending
-        update["reply_body"] = ask_message
+        # Backstop against the defect this whole path was built around: asking the SAME question
+        # twice in one session. The composer is stateless, so a retry that reaches here again
+        # produces byte-identical text and, to the person in the chat, an assistant that ignored
+        # their answer. If that happens, stay silent and keep the proposal standing — the owner's
+        # yes still resolves it — and log loudly, because arriving here means something upstream
+        # did not report its failure.
+        sig = _signature(pending, ask_message)
+        if sig == state.get("last_confirm_sig"):
+            repeated = True
+            route = "act"
+            update["confirm_route"] = "act"
+            update["pending_action"] = pending   # keep it live; just do not re-ask
+            update["reply_body"] = None
+            update["llm_state"] = "keep_listening"
+            log.warning(
+                '{"confirm":"suppressed_repeat","task":"%s","loop_id":"%s"}',
+                (pending or {}).get("task"), state.get("loop_id"),
+            )
+        else:
+            update["pending_action"] = pending
+            update["reply_body"] = ask_message
+            update["last_confirm_sig"] = sig
 
     trace.code(
         tid, node="confirm", loop_id=state.get("loop_id"), domain=domain,
         approved=len(approved), blocked=len(observations), pending=bool(update.get("pending_action")),
-        route=route,
+        route=route, repeated=repeated,
     )
     return update
 
