@@ -27,6 +27,9 @@ class Deps:
     transcription: Any = None  # TranscriptionService (download + transcribe + cache)
     redis: Any = None
     # Skills framework — the registry fanned out (see skills/__init__.py).
+    # Session review sink — attached in the FastAPI lifespan when REVIEW_ENABLED. act_node
+    # offers a closed loop id to it; None (dev, tests, review off) makes that a no-op.
+    reaper: Any = None
     tools: dict = None              # {domain: handler_instance} for the execute node
     confirm_policies: dict = None   # {domain: ConfirmPolicy|None} for the confirm node
     render_policies: dict = None    # {domain: RenderPolicy|None} for the respond node

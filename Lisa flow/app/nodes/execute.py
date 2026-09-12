@@ -60,7 +60,10 @@ async def execute_node(state: MessageState, *, tools: dict, settings, trace: Tra
     for action in actions:
         task = (action or {}).get("task", "")
         domain, _, verb = task.partition(".")
-        inputs = {k: v for k, v in (action or {}).items() if k != "task"}
+        # Underscore keys are the graph's own bookkeeping (the approval stamp), never tool
+        # inputs — strip them so nothing internal reaches a handler or Google.
+        inputs = {k: v for k, v in (action or {}).items()
+                  if k != "task" and not k.startswith("_")}
 
         # resolved-id gate — update/delete must target an event surfaced by a prior search
         if verb in ("update", "delete") and inputs.get("event_id") not in seen:

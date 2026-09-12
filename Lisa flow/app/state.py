@@ -9,6 +9,14 @@ from typing import Annotated, Optional, TypedDict
 from langgraph.graph.message import add_messages
 
 
+# The approval stamp. `confirmed` is part of the model's own output schema, so the model can set
+# it; this key is written ONLY by resolve_pending, on the owner's own message, and appears in no
+# schema the model sees. Lives here rather than in either layer so nodes and skills can both read
+# it without one importing the other.
+APPROVED_BY = "_approved_by"
+OWNER_YES = "owner_yes"
+
+
 class MessageState(TypedDict, total=False):
     # --- persisted memory (checkpointer) ---
     messages: Annotated[list, add_messages]  # model conversation history
@@ -22,6 +30,7 @@ class MessageState(TypedDict, total=False):
     seen_event_ids: list  # calendar ids surfaced by find/list this loop; gates update/delete
     seen_events: dict  # {event_id: view} surfaced by find/list this loop; feeds programmatic messages
     pending_action: Optional[dict]  # a write awaiting the owner's yes; run by resolve_pending on a clean confirmation
+    last_confirm_sig: Optional[str]  # fingerprint of the confirmation already sent this loop; blocks an identical re-ask
 
     # --- per-turn scratch ---
     raw: dict

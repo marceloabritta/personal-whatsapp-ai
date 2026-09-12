@@ -15,7 +15,7 @@ from ..trace import Trace
 
 
 async def act_node(
-    state: MessageState, *, evolution, sessions, echoes, settings, trace: Trace
+    state: MessageState, *, evolution, sessions, echoes, settings, trace: Trace, reaper=None
 ) -> dict:
     tid = state["trace_id"]
     jid = state["remote_jid"]
@@ -47,6 +47,11 @@ async def act_node(
     if llm_state == "close":
         sessions.close(jid)
         close_reason = "model"
+        # Fast lane for the reviewer: this session just ended, so it can be graded now rather
+        # than waiting for the sweeper to notice it went quiet. Non-blocking, and a full queue
+        # simply drops it — the sweeper is the guarantee, this is only the latency win.
+        if reaper is not None:
+            reaper.offer(state.get("loop_id"))
     else:
         sessions.open(jid)  # refresh the window TTL
 

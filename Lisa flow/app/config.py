@@ -96,7 +96,29 @@ class Settings(BaseSettings):
     default_meeting_minutes: int = 45
     calendar_timezone: str = "America/Sao_Paulo"
 
-    prompt_version: str = "2026-08-03.3"
+    # Session review — a second model grades every turn once a session closes (app/review/).
+    # OFF in code so this module ships inert to any flow that has not opted in; turned on per
+    # service by env. Everything here is observation only: it never touches the reply path.
+    review_enabled: bool = False
+    review_scope_version: str = ""      # only review loops with this prompt_version ("" = all)
+    review_judge_version: str = "v1"    # the rubric's identity; bump to re-score history
+    review_model: str = "claude-opus-4-8"   # NOT claude_model — a model judging itself favours it
+    review_effort: str = "medium"
+    review_max_tokens: int = 2048
+    review_sweep_seconds: int = 60      # how often the reaper looks for quiet loops
+    review_settle_seconds: int = 30     # grace past the window TTL, so the log writer has flushed
+    review_batch: int = 5               # loops reviewed per sweep
+    review_concurrency: int = 4         # parallel judge calls within one loop
+    review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
+
+    prompt_version: str = "2026-09-12-confirm-owner-only"
+
+    @property
+    def review_settle_window(self) -> float:
+        """A loop is reviewable once it has been quiet for longer than the listening window plus
+        a grace margin — long enough that the window has truly expired AND the log writer has
+        flushed the loop's last events."""
+        return float(self.loop_ttl_seconds + self.review_settle_seconds)
 
     @property
     def tags(self) -> list[str]:

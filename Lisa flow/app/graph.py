@@ -81,7 +81,8 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "act",
         partial(act_node, evolution=deps.evolution, sessions=deps.sessions,
-                echoes=deps.echoes, settings=deps.settings, trace=deps.trace),
+                echoes=deps.echoes, settings=deps.settings, trace=deps.trace,
+                reaper=deps.reaper),
     )
 
     g.set_entry_point("parse")
@@ -94,7 +95,9 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_edge("context", "resolve_pending")
     g.add_conditional_edges(
         "resolve_pending", route_after_resolve,
-        {"execute": "execute", "reason": "reason", "route": "route"},
+        # "hold" — a non-owner agreed to a pending write: say nothing, keep the proposal, and
+        # let `act` refresh the listening window so the owner can still answer.
+        {"execute": "execute", "reason": "reason", "route": "route", "hold": "act"},
     )
     g.add_edge("route", "reason")
     g.add_conditional_edges("reason", route_after_reason, {"confirm": "confirm", "act": "act"})

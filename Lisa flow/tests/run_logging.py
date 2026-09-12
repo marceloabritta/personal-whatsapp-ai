@@ -29,6 +29,8 @@ from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
 
 OWNER_JID = "5511976001033@s.whatsapp.net"
+# A chat Mary has never been tagged into — used to prove pure noise stays out of the log.
+STRANGER_JID = "5511999999999@s.whatsapp.net"
 _checks = {"pass": 0, "fail": 0}
 
 
@@ -203,10 +205,27 @@ async def test_e2e() -> None:
     rec2 = [r for r in sink.recs[n_before:] if r.get("node") == "record"][-1]
     check("closing record marks state=close", rec2.get("state") == "close")
 
-    # -- ignored traffic never reaches the log --
+    # -- ignored traffic: noise stays out, a POST-WINDOW follow-up gets recorded --
+    #
+    # These two look alike from the gate's seat — both are "stop, no trigger" — but they are
+    # opposite things. A chat Mary has never been in is pure noise and must not reach the log.
+    # A message arriving just after a window lapsed is someone still talking to her, and it used
+    # to vanish without trace: gate logged the stop WITHOUT a loop_id, and only loop-scoped
+    # records are durable. That made "the follow-up nobody ever answered" unmeasurable. It now
+    # carries the stale loop_id the checkpoint still holds, tagged window=expired.
     n_before = len(sink.recs)
     await invoke(graph, upsert("random noise", from_me=False, mid="e1"))  # window closed → ignored
-    check("an ignored message writes nothing durable", len(sink.recs) == n_before)
+    dropped = [r for r in sink.recs[n_before:] if r.get("node") == "gate"]
+    check("a post-window message IS recorded, tagged expired",
+          len(dropped) == 1 and dropped[0].get("window") == "expired")
+    check("...and only as a gate stop — no transcript, no record",
+          not [r for r in sink.recs[n_before:] if r.get("node") in ("record", None)])
+
+    n_before = len(sink.recs)
+    await invoke(graph, upsert("hello?", from_me=False, mid="e2", jid=STRANGER_JID),
+                 jid=STRANGER_JID)
+    check("noise from a chat with no loop writes nothing durable",
+          len(sink.recs) == n_before)
 
 
 # ============================ C. real Postgres ============================

@@ -38,6 +38,7 @@ _L = {
         "guests_will": "Os convidados serão avisados.", "guests_did": "Os convidados foram avisados.",
         "empty": "Nada na agenda.", "all_day": "Dia inteiro", "untitled": "(sem título)",
         "event": "(evento)",
+        "failed_transient": "Não consegui falar com o Google agora. Quer que eu tente de novo?",
         "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local", "u_guests": "Adicionar",
     },
     "en": {
@@ -51,6 +52,7 @@ _L = {
         "guests_will": "The guests will be notified.", "guests_did": "The guests were notified.",
         "empty": "Nothing on your calendar.", "all_day": "All day", "untitled": "(no title)",
         "event": "(event)",
+        "failed_transient": "I couldn't reach Google just now. Want me to try again?",
         "u_title": "New title", "u_time": "New time", "u_where": "New location", "u_guests": "Add",
     },
     "es": {
@@ -63,6 +65,7 @@ _L = {
         "guests_will": "Se avisará a los invitados.", "guests_did": "Se avisó a los invitados.",
         "empty": "Nada en la agenda.", "all_day": "Todo el día", "untitled": "(sin título)",
         "event": "(evento)",
+        "failed_transient": "No pude conectar con Google ahora. ¿Lo intento de nuevo?",
         "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación", "u_guests": "Añadir",
     },
 }
@@ -211,6 +214,17 @@ def fmt_delete(results: list, state: dict) -> str:
 
 
 # --- the agenda (a read) ------------------------------------------------------------------
+
+def fmt_failure(results: list, state: dict) -> str:
+    """What we say when the tool call failed.
+
+    Success has always been composed in code; failure was the one case left to the model, and
+    the model's calendar guidance tells it to keep `message` null and re-emit the action — so a
+    failed write came back as the SAME confirmation question, with no hint anything had gone
+    wrong. This is the missing half: short, honest, in the session language."""
+    lang = _lang(state)
+    return _L[lang]["failed_transient"]
+
 
 def fmt_list(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]

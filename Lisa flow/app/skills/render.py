@@ -30,8 +30,17 @@ class Programmatic:
 
     mode = "code"
 
-    def __init__(self, fmt: Callable[[list, dict], str]) -> None:
+    def __init__(self, fmt: Callable[[list, dict], str],
+                 on_failure: Callable[[list, dict], str] | None = None) -> None:
         self.fmt = fmt
+        # Optional: how this verb reports a TRANSIENT tool failure. Without one, a failure falls
+        # back to the model — which, on a calendar turn, its guidance tells to keep `message`
+        # null and re-emit the action, so the failure came back as the same confirmation
+        # question and the person in the chat was never told anything had gone wrong.
+        self.on_failure = on_failure
 
     async def assemble(self, *, results: list, state: dict) -> str:
         return self.fmt(results, state)
+
+    async def assemble_failure(self, *, results: list, state: dict) -> str | None:
+        return self.on_failure(results, state) if self.on_failure else None

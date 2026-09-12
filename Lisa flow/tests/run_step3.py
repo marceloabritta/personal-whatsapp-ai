@@ -289,6 +289,20 @@ class FakeEvolution:
         return list(self.history)
 
 
+def _approved(action: dict) -> dict:
+    """Stamp an action as owner-approved, the way `resolve_pending` does.
+
+    Tests that exercise execute/render need a write that is already past the gate. Setting
+    `confirmed: True` in the scripted model output no longer achieves that, and deliberately so:
+    `confirmed` is part of the model's OWN schema, so trusting it let the model self-approve a
+    calendar write (it did, in production). The gate now trusts only this stamp, which
+    `resolve_pending` writes on the owner's message and no model can reach. The gate itself is
+    pinned in confirmation_checks; here we simply start from an approved action."""
+    from app.state import APPROVED_BY, OWNER_YES
+
+    return {**action, APPROVED_BY: OWNER_YES}
+
+
 def _upsert(text, *, from_me=True, mid="m1", jid=OWNER_JID):
     return {"data": {
         "key": {"remoteJid": jid, "fromMe": from_me, "id": mid},
@@ -421,8 +435,8 @@ async def graph_checks() -> None:
     deps, evo, stub, cal, graph = make_toolenv()
     cal.responses["create"] = {"ok": False, "error": "auth", "summary": "auth error"}
     stub.script = [
-        {"message": None, "actions": [{"task": "calendar.create", "title": "X",
-            "start": "2026-08-05T09:00:00-03:00", "confirmed": True}]},
+        {"message": None, "actions": [_approved({"task": "calendar.create", "title": "X",
+            "start": "2026-08-05T09:00:00-03:00", "confirmed": True})]},
         {"message": "Sorry — I couldn't create it (auth)."}]
     await _invoke(graph, _upsert("@mary schedule X now, go ahead", mid="x1"))
     check("[fail] failure read back to the model (no fake card)", len(stub.calls) == 2)
@@ -431,8 +445,8 @@ async def graph_checks() -> None:
     # 7. resolved-id gate stays in execute — update on an unseen id is blocked, reads back.
     deps, evo, stub, cal, graph = make_toolenv()
     stub.script = [
-        {"message": None, "actions": [{"task": "calendar.update", "event_id": "GHOST",
-            "confirmed": True, "start": "2026-08-06T15:00:00-03:00"}]},
+        {"message": None, "actions": [_approved({"task": "calendar.update", "event_id": "GHOST",
+            "confirmed": True, "start": "2026-08-06T15:00:00-03:00"})]},
         {"message": "Let me find that first."}]
     await _invoke(graph, _upsert("@mary reschedule my meeting to 3pm", mid="u1"))
     check("[id-gate] update NOT run on an unresolved id", cal.n("update") == 0)
@@ -508,8 +522,8 @@ class _StrReasoner:
                 "usage": {"input": 1, "output": 1}, "provider_request_id": "r",
                 "stop_reason": "end_turn", "tool_calls": [], "error_category": "none"}
         if self.calls == 1:
-            base["actions"] = [{"task": "calendar.create", "title": "Z",
-                                "start": "2026-08-05T15:00:00-03:00", "confirmed": True}]
+            base["actions"] = [_approved({"task": "calendar.create", "title": "Z",
+                                "start": "2026-08-05T15:00:00-03:00", "confirmed": True})]
         else:
             base["message"], base["actions"] = "SHOULD NOT SEND", []
         return base
@@ -707,6 +721,161 @@ async def calendar_checks() -> None:
     check("[error] unknown verb handled", r["ok"] is False and r["error"] == "unknown_verb")
 
 
+# ======================= P5 — confirmation safety + the broken-pipe fix =====================
+#
+# Everything here exists because of one production defect: calendar.create failed on 10 of 26
+# attempts with [Errno 32] Broken pipe, and the failure came back to the chat as an IDENTICAL
+# "Posso agendar?" with no mention that anything had gone wrong. Four fixes, each pinned.
+
+async def confirmation_checks() -> None:
+    print("\nStep-3 P5 — confirmation safety + transport")
+    from app.state import APPROVED_BY, OWNER_YES
+    from app.tools.calendar import GoogleCalendarService
+
+    # --- 1. the client: a fresh connection per call ---------------------------------------
+    svc = GoogleCalendarService(Settings(google_refresh_token="r", google_client_id="c",
+                                         google_client_secret="s"))
+    check("[client] each call builds its OWN service", svc._service() is not svc._service())
+    check("[client] credentials are shared (no extra OAuth round-trip)",
+          svc._credentials() is svc._credentials())
+
+    # --- 2. retry only what is safe to replay ---------------------------------------------
+    n = {"c": 0}
+
+    def flaky(inp):
+        n["c"] += 1
+        if n["c"] < 2:
+            raise BrokenPipeError(32, "Broken pipe")
+        return {"ok": True, "summary": "created", "data": {}}
+
+    svc._create = flaky
+    r = await svc.run("create", {"title": "t", "start": "2026-09-14T18:00:00-03:00"})
+    check("[retry] a broken pipe is retried and succeeds", r.get("ok") and n["c"] == 2)
+
+    class _R:
+        status = 404
+
+    n["c"] = 0
+
+    def gone(inp):
+        n["c"] += 1
+        exc = Exception("nope")
+        exc.resp = _R()
+        raise exc
+
+    svc._create = gone
+    r = await svc.run("create", {"title": "t", "start": "x"})
+    # The half that gets forgotten: replaying what Google actually ANSWERED is wrong.
+    check("[retry] a 404 is NOT retried", (not r.get("ok")) and n["c"] == 1)
+    check("[retry] a 404 stays classified as not_found", r.get("error") == "not_found")
+
+    n["c"] = 0
+    keys = []
+
+    def always(inp):
+        n["c"] += 1
+        keys.append(inp.get("_idempotency_key"))
+        raise ConnectionResetError(104, "reset")
+
+    svc._create = always
+    r = await svc.run("create", {"title": "t", "start": "x"})
+    check("[retry] gives up after 3 attempts", n["c"] == 3)
+    check("[retry] a give-up is named 'transient'", r.get("error") == "transient")
+    check("[retry] one idempotency key for the whole run", len(set(keys)) == 1)
+    check("[retry] the key is not shared between runs",
+          (await svc.run("create", {"title": "t", "start": "x"})) is not None
+          and len(set(keys)) == 2)
+
+    # --- 3. the gate: approval is a CODE signal -------------------------------------------
+    pol = confirm_policies()["calendar"]
+    forged = {"task": "calendar.create", "confirmed": True}          # what the MODEL can write
+    stamped = {"task": "calendar.create", APPROVED_BY: OWNER_YES}    # what resolve_pending writes
+    d1 = await pol.confirm(action=forged, state={}, deps={})
+    d2 = await pol.confirm(action=stamped, state={}, deps={})
+    check("[gate] a model-set confirmed:true is REJECTED", not d1.get("ok"))
+    check("[gate] a code-stamped approval is accepted", d2.get("ok"))
+
+    # --- 4. only the owner may say yes ----------------------------------------------------
+    # A pending create is on the table; the same word arrives from two different people.
+    async def _pending_then(text, *, from_me, mid):
+        deps, evo, stub, cal, graph = make_toolenv()
+        stub.script = [{"actions": [{"task": "calendar.create", "title": "Dinner",
+                                     "start": "2026-09-14T19:00:00-03:00", "confirmed": False}]},
+                       {"message": "ok"}]
+        await _invoke(graph, _upsert("@mary schedule dinner friday 7pm", mid=mid + "a"))
+        st = await _invoke(graph, _upsert(text, from_me=from_me, mid=mid + "b"))
+        return st, cal, evo
+
+    st, cal, evo = await _pending_then("sim", from_me=True, mid="own")
+    check("[owner] the owner's yes runs the write", cal.n("create") == 1)
+
+    st, cal, evo = await _pending_then("sim", from_me=False, mid="oth")
+    check("[owner] someone else's yes does NOT run the write", cal.n("create") == 0)
+    check("[owner] and is answered with silence", not st.get("reply_body"))
+    check("[owner] the proposal stays on the table", bool(st.get("pending_action")))
+    check("[owner] the listening window stays open", st.get("llm_state") == "keep_listening")
+
+    # The silent hold must not resend the previous turn's message — reply_body is per-turn
+    # scratch that only `reason` refreshes, and `reason` does not run on this path.
+    sent = [c for c in evo.sent] if hasattr(evo, "sent") else []
+    check("[owner] a hold sends nothing at all", len(sent) <= 1)
+
+    # --- 5. ...but everyone is still heard: the fixing loop --------------------------------
+    deps, evo, stub, cal, graph = make_toolenv()
+    stub.script = [
+        {"actions": [{"task": "calendar.create", "title": "Dinner",
+                      "start": "2026-09-14T19:00:00-03:00", "confirmed": False}]},
+        # the correction comes back as a corrected proposal
+        {"actions": [{"task": "calendar.create", "title": "Dinner",
+                      "start": "2026-09-14T19:00:00-03:00",
+                      "location": "Rua X 42", "confirmed": False}]},
+    ]
+    await _invoke(graph, _upsert("@mary schedule dinner friday 7pm", mid="f1"))
+    st = await _invoke(graph, _upsert("the location is Rua X 42", from_me=False, mid="f2"))
+    check("[fix-loop] a correction from anyone reaches the model",
+          len(stub.calls) >= 2)
+    check("[fix-loop] it stays in the calendar domain", st.get("domain") == "calendar")
+    check("[fix-loop] the corrected proposal replaces the pending",
+          (st.get("pending_action") or {}).get("location") == "Rua X 42")
+
+    # Chit-chat from a third party must not drop the proposal — that was how the owner's later
+    # "yes" ended up with nothing to resolve, so the model simply re-proposed.
+    deps, evo, stub, cal, graph = make_toolenv()
+    stub.script = [{"actions": [{"task": "calendar.create", "title": "Dinner",
+                                 "start": "2026-09-14T19:00:00-03:00", "confirmed": False}]},
+                   {"message": None}, {"message": "done"}]
+    await _invoke(graph, _upsert("@mary schedule dinner friday 7pm", mid="c1"))
+    await _invoke(graph, _upsert("ídolo máximo", from_me=False, mid="c2"))
+    st = await _invoke(graph, _upsert("pode agendar", from_me=True, mid="c3"))
+    check("[fix-loop] the proposal survives unrelated chatter", cal.n("create") == 1)
+
+    # --- 6. a transient failure is REPORTED, not re-asked ---------------------------------
+    deps, evo, stub, cal, graph = make_toolenv()
+    cal.responses["create"] = {"ok": False, "error": "transient",
+                               "summary": "calendar.create failed: transient"}
+    stub.script = [{"actions": [{"task": "calendar.create", "title": "Dinner",
+                                 "start": "2026-09-14T19:00:00-03:00", "confirmed": False}]},
+                   {"message": "should not be needed"}]
+    await _invoke(graph, _upsert("@mary schedule dinner friday 7pm", mid="t1"))
+    st = await _invoke(graph, _upsert("sim", from_me=True, mid="t2"))
+    body = st.get("reply_body") or ""
+    check("[honest] the failure is reported in words", "Google" in body)
+    check("[honest] it is NOT the confirmation question again", "Posso agendar" not in body)
+    check("[honest] the dead proposal is dropped", st.get("pending_action") is None)
+
+    # --- 7. the backstop: never the same question twice -----------------------------------
+    deps, evo, stub, cal, graph = make_toolenv()
+    action = {"task": "calendar.create", "title": "Dinner",
+              "start": "2026-09-14T19:00:00-03:00", "confirmed": False}
+    stub.script = [{"actions": [dict(action)]}, {"actions": [dict(action)]}]
+    st1 = await _invoke(graph, _upsert("@mary schedule dinner friday 7pm", mid="r1"))
+    first = st1.get("reply_body")
+    st2 = await _invoke(graph, _upsert("what about it", from_me=False, mid="r2"))
+    check("[no-repeat] the first confirmation is sent", bool(first))
+    check("[no-repeat] an identical second one is suppressed", not st2.get("reply_body"))
+    check("[no-repeat] and the proposal is still live", bool(st2.get("pending_action")))
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -718,4 +887,5 @@ if __name__ == "__main__":
     asyncio.run(graph_checks())
     asyncio.run(render_checks())
     asyncio.run(calendar_checks())
+    asyncio.run(confirmation_checks())
     _finish()
