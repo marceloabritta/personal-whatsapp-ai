@@ -876,6 +876,122 @@ async def confirmation_checks() -> None:
     check("[no-repeat] and the proposal is still live", bool(st2.get("pending_action")))
 
 
+# ================= P6 — presence semantics: false/""/[] are INSTRUCTIONS ====================
+#
+# Optional fields are omitted from `required` rather than wrapped anyOf:[T,null] (the union cap),
+# so the handler reads them with .get() — which made `false`, `""` and `[]` indistinguishable
+# from "not sent" to a truthiness test. Two layers each had their own rule and disagreed:
+# `virtual: false` built an EMPTY patch that silently did nothing, while `attendees: []` built a
+# patch that silently removed every guest after a confirmation that named no change at all.
+
+async def presence_checks() -> None:
+    print("\nStep-3 P6 — presence semantics + post-condition")
+    from app.skills.calendar_format import compose_update
+    from app.tools.calendar import GoogleCalendarService, changes, provided
+
+    # --- the single presence rule ---------------------------------------------------------
+    for val in (False, "", [], 0):
+        check(f"[provided] {val!r} counts as SENT", provided({"virtual": val}, "virtual"))
+    check("[provided] a missing key is absent", not provided({}, "virtual"))
+    check("[provided] an explicit null is absent", not provided({"virtual": None}, "virtual"))
+
+    BEFORE = {"title": "Sync", "start": "2026-09-13T12:00:00-03:00",
+              "location": "Sala 5", "attendees": ["a@x.com"],
+              "meet_link": "https://meet.google.com/abc-defg-hij"}
+
+    # --- the change-set -------------------------------------------------------------------
+    def one(action):
+        c = changes(action, BEFORE)
+        return c[0] if len(c) == 1 else c
+
+    check("[changes] virtual:false is a CLEAR", one({"virtual": False})["kind"] == "clear")
+    check("[changes] location:'' is a CLEAR", one({"location": ""})["kind"] == "clear")
+    check("[changes] attendees:[] is a CLEAR", one({"attendees": []})["kind"] == "clear")
+    check("[changes] a new location is a SET", one({"location": "Rua X"})["kind"] == "set")
+    check("[changes] an unchanged value is not a change", changes({"location": "Sala 5"}, BEFORE) == [])
+    check("[changes] the same time spelled differently is not a change",
+          changes({"start": "2026-09-13T15:00:00+00:00"}, BEFORE) == [])
+    check("[changes] virtual:true when a Meet already exists is not a change",
+          changes({"virtual": True}, BEFORE) == [])
+    check("[changes] an absent field is never a change", changes({"event_id": "E1"}, BEFORE) == [])
+
+    # --- the wire body --------------------------------------------------------------------
+    svc = GoogleCalendarService(Settings())
+    body, conf = svc._body_from({"virtual": False})
+    check("[body] virtual:false sends conferenceData:null", body.get("conferenceData", "MISSING") is None)
+    check("[body] ...and asks for the conference intent 'remove'", conf == "remove")
+    body, conf = svc._body_from({"virtual": True})
+    check("[body] virtual:true still creates a Meet", conf == "create")
+    body, _ = svc._body_from({"location": ""})
+    check("[body] location:'' clears the location", body.get("location") == "")
+    body, _ = svc._body_from({"attendees": []})
+    check("[body] attendees:[] clears the guests", body.get("attendees") == [])
+    body, _ = svc._body_from({"event_id": "E1"})
+    check("[body] a change-less action builds an EMPTY body", body == {})
+
+    # --- the confirmation names every removal ---------------------------------------------
+    st = {"session_lang": "pt", "seen_events": {"E1": BEFORE}}
+    for name, action, expect in (
+        ("the Meet", {"event_id": "E1", "virtual": False}, "Remover chamada de vídeo"),
+        ("the location", {"event_id": "E1", "location": ""}, "Remover local"),
+        ("the guests", {"event_id": "E1", "attendees": []}, "Remover todos os convidados"),
+        ("the title", {"event_id": "E1", "title": ""}, "Remover título"),
+    ):
+        msg = compose_update({"task": "calendar.update", **action}, st) or ""
+        check(f"[confirm] removing {name} is stated in words", expect in msg)
+    check("[confirm] a change-less update falls to the model, not a blank ask",
+          compose_update({"task": "calendar.update", "event_id": "E1",
+                          "location": "Sala 5"}, st) is None)
+
+    # --- the post-condition: verify the RESPONSE, not the request -------------------------
+    # The live failure: Google returned 200 for the Meet removal with the Meet still attached,
+    # and we reported "Alterado".
+    def _svc_returning(ev):
+        class Req:
+            def execute(self_inner): return ev
+        class Events:
+            def get(self_inner, **kw): return Req()
+            def patch(self_inner, **kw): return Req()
+        class Fake:
+            def events(self_inner): return Events()
+        s = GoogleCalendarService(Settings())
+        s._svc = Fake()
+        return s
+
+    still_meeting = {"id": "E1", "summary": "Sync", "hangoutLink": "https://meet.google.com/x",
+                     "start": {"dateTime": "2026-09-13T12:00:00-03:00"},
+                     "end": {"dateTime": "2026-09-13T13:00:00-03:00"}}
+    r = await _svc_returning(still_meeting).run("update", {"event_id": "E1", "virtual": False})
+    check("[verify] a Meet that survived the patch is a FAILURE", not r["ok"])
+    check("[verify] ...named as not_applied", r.get("error") == "not_applied")
+    check("[verify] ...and says what did not apply", "video call still attached" in r["summary"])
+
+    gone = dict(still_meeting); gone.pop("hangoutLink")
+    r = await _svc_returning(gone).run("update", {"event_id": "E1", "virtual": False})
+    check("[verify] a Meet that really went is a success", r["ok"])
+
+    r = await _svc_returning(still_meeting).run("update", {"event_id": "E1"})
+    check("[verify] an empty patch is refused before Google is called",
+          (not r["ok"]) and r.get("error") == "no_change")
+
+    # create: describe what came BACK, never what was asked for
+    class InsertOnly:
+        def insert(self, **kw):
+            class Req:
+                def execute(self_inner):
+                    return {"id": "E9", "summary": "Sync", "htmlLink": "http://l",
+                            "start": kw["body"].get("start"), "end": kw["body"].get("end")}
+            return Req()
+    class FakeIns:
+        def events(self): return InsertOnly()
+    s = GoogleCalendarService(Settings()); s._svc = FakeIns()
+    r = await s.run("create", {"title": "Sync", "start": "2026-09-14T10:00:00-03:00",
+                               "virtual": True})
+    check("[verify] a Meet that was never created is NOT called a video call",
+          "Video call (Google Meet)" not in r["summary"])
+    check("[verify] ...and the miss is stated", "NOT CREATED" in r["summary"].upper())
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -888,4 +1004,5 @@ if __name__ == "__main__":
     asyncio.run(render_checks())
     asyncio.run(calendar_checks())
     asyncio.run(confirmation_checks())
+    asyncio.run(presence_checks())
     _finish()

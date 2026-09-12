@@ -12,6 +12,8 @@ its `message` is null. Confirmations read from the action (create) or the cached
 `ActionResult.data`. Unsupported languages fall back to the model (see LANGS + the respond node)."""
 from __future__ import annotations
 
+from ..tools.calendar import changes
+
 from datetime import datetime
 
 LANGS = {"pt", "en", "es"}
@@ -40,6 +42,8 @@ _L = {
         "event": "(evento)",
         "failed_transient": "Não consegui falar com o Google agora. Quer que eu tente de novo?",
         "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local", "u_guests": "Adicionar",
+        "u_video_off": "Remover chamada de vídeo", "u_where_off": "Remover local",
+        "u_guests_off": "Remover todos os convidados", "u_title_off": "Remover título",
     },
     "en": {
         "confirm_create": "Confirming", "confirm_update": "Confirming this change",
@@ -54,6 +58,8 @@ _L = {
         "event": "(event)",
         "failed_transient": "I couldn't reach Google just now. Want me to try again?",
         "u_title": "New title", "u_time": "New time", "u_where": "New location", "u_guests": "Add",
+        "u_video_off": "Remove video call", "u_where_off": "Remove location",
+        "u_guests_off": "Remove all guests", "u_title_off": "Remove title",
     },
     "es": {
         "confirm_create": "Confirmando", "confirm_update": "Confirmando el cambio",
@@ -67,6 +73,8 @@ _L = {
         "event": "(evento)",
         "failed_transient": "No pude conectar con Google ahora. ¿Lo intento de nuevo?",
         "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación", "u_guests": "Añadir",
+        "u_video_off": "Quitar videollamada", "u_where_off": "Quitar ubicación",
+        "u_guests_off": "Quitar todos los invitados", "u_title_off": "Quitar título",
     },
 }
 
@@ -125,7 +133,14 @@ def compose_create(action: dict, state: dict) -> str | None:
 
 def compose_update(action: dict, state: dict) -> str | None:
     """Identify the event (its CURRENT title + time) and list WHAT is changing, so the owner can
-    tell exactly what he's approving. New values come from the action, old from the cached event."""
+    tell exactly what he's approving.
+
+    The change-set is NOT recomputed here. It comes from tools.calendar.changes — the same
+    function the body builder's presence rule is built on — because this file having its own
+    idea of "what is changing" is precisely what broke: it tested truthiness, so `virtual: false`,
+    `location: ""` and `attendees: []` all read as "not sent" and were silently left out. The
+    worst of those still patched Google, so the owner approved an unnamed change that removed
+    every guest from the meeting."""
     lang = _lang(state); L = _L[lang]
     ev = (state.get("seen_events") or {}).get(action.get("event_id")) or {}
     header = ev.get("title") or action.get("title")
@@ -136,25 +151,35 @@ def compose_update(action: dict, state: dict) -> str | None:
     if ev.get("start"):
         lines.append(_dt(ev["start"], lang))
 
-    changes: list[str] = []
-    if action.get("title") and action["title"] != ev.get("title"):
-        changes.append(f"{L['u_title']}: {action['title']}")
-    if action.get("start") and action["start"] != ev.get("start"):
-        changes.append(f"{L['u_time']}: {_dt(action['start'], lang)}")
-    if action.get("virtual"):
-        changes.append(L["video"])
-    elif action.get("location") and action["location"] != ev.get("location"):
-        changes.append(f"{L['u_where']}: {action['location']}")
-    if action.get("attendees"):
-        added = [a for a in action["attendees"] if a not in (ev.get("attendees") or [])]
-        if added:  # same shape as create/delete: a Participantes label + one email per line
-            changes.append(L["participants"])
-            changes.extend(added)
+    described: list[str] = []
+    for ch in changes(action, ev):
+        described.extend(_describe_change(ch, L, lang))
 
-    if changes:
-        lines += [""] + changes
-    lines += ["", L["ask_update"]]
+    if not described:
+        # Nothing identifiable is changing. Saying "Posso alterar?" over an empty list asks the
+        # owner to approve a blank; let the model explain instead.
+        return None
+
+    lines += [""] + described + ["", L["ask_update"]]
     return _joined(lines)
+
+
+def _describe_change(ch: dict, L: dict, lang: str) -> list[str]:
+    """One change-set entry → the line(s) the owner reads. Removals get their own words."""
+    f, kind, new = ch["field"], ch["kind"], ch["new"]
+    if f == "virtual":
+        return [L["video"] if new else L["u_video_off"]]
+    if f == "title":
+        return [L["u_title_off"]] if kind == "clear" else [f"{L['u_title']}: {new}"]
+    if f == "location":
+        return [L["u_where_off"]] if kind == "clear" else [f"{L['u_where']}: {new}"]
+    if f in ("start", "end"):
+        return [f"{L['u_time']}: {_dt(new, lang)}"]
+    if f == "attendees":
+        if kind == "clear":
+            return [L["u_guests_off"]]
+        return [L["participants"], *new]
+    return []
 
 
 def compose_delete(action: dict, state: dict) -> str | None:
