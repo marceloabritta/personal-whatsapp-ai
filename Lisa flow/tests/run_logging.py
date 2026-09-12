@@ -102,7 +102,7 @@ class FakeEvolution:
         self.sent: list = []
         self.history = history or []
 
-    async def send_text(self, number, text):
+    async def send_text(self, number, text, *, quoted=None):
         mid = f"echo{len(self.sent)}"
         self.sent.append((number, text))
         return mid

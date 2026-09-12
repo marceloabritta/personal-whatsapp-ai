@@ -37,8 +37,11 @@ _CLASSIFY_SYSTEM = (
     "guests/attendees; adding or removing a guest; adding a video call). A short follow-up that "
     "acts on an event just discussed in the conversation — \"add Ana as a guest and rename it\", "
     "\"sim, crie\", \"muda pra 16h\" — is calendar.\n"
+    '- "setup": {owner} configuring the assistant itself — which chats have their voice notes '
+    "transcribed automatically, and in which direction; listing, changing or removing those "
+    'chats. Only ever offered in {owner}\'s chat with himself.\n'
     '- "web": anything else — general questions, chit-chat, or looking something up online.\n'
-    'Respond ONLY as JSON: {"domain": "calendar"} or {"domain": "web"}.'
+    'Respond ONLY as JSON, e.g. {"domain": "calendar"}.'
 )
 
 
@@ -88,11 +91,16 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     every calendar request the lexicon didn't recognise on the general skill.)
 
     Imported lazily so this module has no import cycle with the skills registry."""
-    from . import SKILLS
+    from . import SKILLS, routable
 
     text = state.get("text") or ""
-    # 1. An explicit calendar signal always wins — even to switch INTO calendar mid-loop.
-    for name, skill in SKILLS.items():
+    # Skills that only exist in the owner's chat with himself are invisible elsewhere — checked
+    # before anything else, so neither a matcher nor the classifier can reach them.
+    allowed = routable(state, SKILLS)
+
+    # 1. An explicit matcher signal always wins — even to switch domain mid-loop.
+    for name in allowed:
+        skill = SKILLS[name]
         if skill.matcher is not None and skill.matcher(text) == "yes":
             return name, "matcher"
 
@@ -101,14 +109,14 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     #    conversation it belongs to instead of being re-decided from scratch. A fresh @mary tag
     #    opens a new loop (loop_domain was cleared on the reset), so it re-decides below.
     loop_domain = state.get("loop_domain")
-    if loop_domain and loop_domain in SKILLS and not state.get("loop_opened"):
+    if loop_domain and loop_domain in allowed and not state.get("loop_opened"):
         return loop_domain, "loop"
 
     # 3. Not obviously calendar and not inside a loop → ask the cheap classifier.
     if reasoner is None:
         return settings.default_domain, "default"
     try:
-        return await classify_domain(state, list(SKILLS), reasoner, settings), "classifier"
+        return await classify_domain(state, allowed, reasoner, settings), "classifier"
     except Exception as exc:  # any classifier/transport error → safe default
         log.warning("domain classifier failed (%s); defaulting to %s", exc, settings.default_domain)
         return settings.default_domain, "default"

@@ -29,6 +29,85 @@ def is_audio_message(msg: dict | None) -> bool:
     return "audioMessage" in msg or "pttMessage" in msg
 
 
+def audio_seconds(msg: dict | None) -> float | None:
+    """Declared length of a voice note, in seconds, or None. Read from the payload (not the
+    provider), so the auto path can skip an over-long clip BEFORE paying to transcribe it."""
+    if not msg:
+        return None
+    node = msg.get("audioMessage") or msg.get("pttMessage") or {}
+    try:
+        return float(node.get("seconds"))
+    except (TypeError, ValueError):
+        return None
+
+
+def chat_key(jid: str | None) -> str:
+    """A chat JID normalised to the stable key the roster stores.
+
+    The local part identifies the chat in both shapes: a phone number for a 1:1
+    (`5511999@s.whatsapp.net`), the group id for a group (`1203…@g.us`). A device suffix
+    (`:12`) is dropped — the same chat can arrive with or without one."""
+    local = (jid or "").split("@")[0]
+    return local.split(":")[0].strip().lower()
+
+
+def chat_kind(jid: str | None) -> str:
+    """"group" | "contact" — which kind of chat this JID names."""
+    return "group" if (jid or "").endswith("@g.us") else "contact"
+
+
+def _vcard_number(vcard: str) -> str:
+    """The WhatsApp id from a vCard's TEL line.
+
+    WhatsApp writes the account id into the TEL parameters, which is the authoritative source:
+
+        TEL;type=CELL;type=VOICE;waid=5511976004417:+55 11 97600-4417
+
+    Prefer `waid`; fall back to the digits of the printed number when a card was exported by a
+    client that omits it. Returns "" when nothing usable is present."""
+    for line in (vcard or "").splitlines():
+        if not line.upper().startswith("TEL"):
+            continue
+        params, _, value = line.partition(":")
+        for part in params.split(";"):
+            k, _, v = part.partition("=")
+            if k.strip().lower() == "waid" and v.strip():
+                return "".join(c for c in v if c.isdigit())
+        digits = "".join(c for c in value if c.isdigit())
+        if digits:
+            return digits
+    return ""
+
+
+def contact_cards(msg: dict | None) -> list[dict]:
+    """Every contact card forwarded in this message, as [{name, number}].
+
+    A card carries no text, so `extract_text` returns "" for it — this is the only way the
+    graph learns a card was sent. Both shapes are read: `contactMessage` (one card) and
+    `contactsArrayMessage` (several forwarded at once). Cards whose vCard yields no number are
+    dropped: a card we cannot key on is not a candidate, and guessing is what this whole path
+    exists to avoid."""
+    if not msg:
+        return []
+    nodes = []
+    if msg.get("contactMessage"):
+        nodes.append(msg["contactMessage"])
+    arr = msg.get("contactsArrayMessage") or {}
+    nodes.extend(arr.get("contacts") or [])
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        number = _vcard_number(node.get("vcard") or "")
+        if not number or number in seen:
+            continue
+        seen.add(number)
+        out.append({"name": (node.get("displayName") or "").strip(), "number": number})
+    return out
+
+
 def get_quoted(data: dict | None) -> dict | None:
     """The message this one replies to, or None. Pass the whole webhook `data` object.
 

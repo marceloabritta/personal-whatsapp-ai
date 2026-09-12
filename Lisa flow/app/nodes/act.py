@@ -53,7 +53,11 @@ async def act_node(
         if reaper is not None:
             reaper.offer(state.get("loop_id"))
     else:
-        sessions.open(jid)  # refresh the window TTL
+        # A setup loop holds a longer window: finding a contact and forwarding their card means
+        # leaving this chat, which takes far more than the conversational TTL.
+        ttl = (settings.setup_window_seconds
+               if state.get("loop_domain") == "setup" else None)
+        sessions.open(jid, ttl)  # refresh the window TTL
 
     # activation record (prompt_version stitched here so _record stays dependency-free)
     usage = state.get("usage") or {}

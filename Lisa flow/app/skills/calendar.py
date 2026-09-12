@@ -85,6 +85,17 @@ def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     return "no"
 
 
+def calendar_resolve_gate(verb: str, inputs: dict, state: dict):
+    """(patched_inputs, error) — update/delete must target an event surfaced by a prior search
+    in THIS loop. Moved verbatim out of the execute node, which used to hardcode it; behaviour
+    is unchanged, the rule simply belongs to the skill that owns it."""
+    if verb in ("update", "delete") and inputs.get("event_id") not in (state.get("seen_event_ids") or []):
+        return None, {"error": "unresolved_id",
+                      "summary": f"Cannot {verb}: that event was not found via a prior search — "
+                                 f"run find first, then {verb} the id it returns."}
+    return inputs, None
+
+
 CALENDAR = Skill(
     name="calendar",
     kind="local",
@@ -112,6 +123,7 @@ CALENDAR = Skill(
         "find": LLMReadback(),
     },
     matcher=calendar_matcher,
+    resolve_gate=calendar_resolve_gate,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",
     effort="medium",

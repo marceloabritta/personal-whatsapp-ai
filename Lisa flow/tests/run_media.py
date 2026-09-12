@@ -70,7 +70,7 @@ class MediaEvolution:
         self.history = history or []
         self._media = media or {}
 
-    async def send_text(self, number, text):
+    async def send_text(self, number, text, *, quoted=None):
         self.sent.append((number, text))
         return f"echo{len(self.sent)}"
 

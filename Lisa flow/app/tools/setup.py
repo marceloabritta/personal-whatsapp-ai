@@ -1,0 +1,237 @@
+"""The setup tool — CRUD over the auto-transcription roster.
+
+One handler behind the `execute` node. It never raises into the graph: every failure comes back
+as an ActionResult with `ok=False` and a classified `error`, so the reply path can speak
+truthfully about what happened (the same contract tools/calendar.py honours).
+
+What this handler does NOT decide: whether the chat is the owner's own (the resolve gate, in
+skills/setup.py, refuses everything else), whether the owner approved (the confirm policy), or
+how the result reads as a message (the render policy). It reads and writes rows.
+
+The prose below is the model's whole briefing for this domain."""
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from .. import chatfind
+from ..roster import make_rule, normalize_direction
+from ..whatsapp import chat_kind
+from .base import ActionResult
+
+log = logging.getLogger("mary.setup")
+
+DESCRIBE = ("Configure which chats have their voice notes transcribed automatically — "
+            "{owner_name}'s setup, available only in his chat with himself.")
+
+GUIDANCE = """You are running SETUP: {owner_name} is configuring how his assistant behaves. This only ever happens in his chat with himself, so there is no one else in the conversation and no one else to consider.
+
+One thing is configurable today: **Transcription** — which chats get their voice notes transcribed automatically, and in which direction. A chat is set to one of exactly three directions, and you always write them in these words:
+
+- **inbound** — audio the other person sends
+- **outbound** — audio {owner_name} sends
+- **in & out** — both (send `direction: "both"` in an action; write "in & out" in your message)
+
+How a chat is named, and this is not negotiable:
+
+- **A contact is added by forwarding their contact card.** When a card arrives you will see a line like `[contact card: Mãe · 5511976004417]` in the transcript, and the number in it is the `chat_key`. If {owner_name} asks to add a person WITHOUT sending a card, ask him to forward the card — never look a person up by name, and never type a phone number he did not send you.
+- **A group is added by name.** Call `setup.resolve` with what he called it. It returns real groups from his chat list, most recently active first. If it returns more than one, show them numbered with their last activity and ask which; never pick for him.
+
+Working with the list:
+
+- `setup.list` shows what is enrolled, contacts and groups under separate titles but numbered in one continuous sequence. Those numbers are handles: after a list, "edit 5 to outbound" or "remove 2" targets a row by `ordinal`. Pass the number he said as `ordinal` — do not try to reconstruct a chat_key from it.
+- Opening setup with nothing else to do: show the menu and the current list together, so he sees the state immediately.
+
+Confirmation. `enroll`, `update` and `remove` all change his configuration, so they need his go-ahead. Emit the action with `confirmed: false` and say nothing about it — the system composes the confirmation question, shows it to him, and runs the action itself when he agrees. Never claim something is registered before it has run; a result line tells you it happened.
+
+Keep every message short. State what changed, or ask the one question you need."""
+
+# The setup items. A second item (quiet hours, reply language) drops in here.
+ITEMS = [
+    {"key": "transcription", "title": "Transcription",
+     "summary": "Auto-transcribe voice notes in chats you choose."},
+]
+
+_DIRECTION_HELP = 'direction must be one of: inbound, outbound, both (shown as "in & out")'
+
+
+class RosterService:
+    """Local handler for the six setup verbs. `roster` and `evolution` are attached after
+    construction by deps (the skills fan-out builds handlers from settings alone)."""
+
+    _VERBS = ("menu", "list", "resolve", "enroll", "update", "remove")
+
+    def __init__(self, settings, *, roster: Any = None, evolution: Any = None) -> None:
+        self.s = settings
+        self.roster = roster
+        self.evolution = evolution
+        self._groups_cache: Optional[list[dict]] = None
+
+    async def run(self, verb: str, inputs: dict) -> ActionResult:
+        if verb not in self._VERBS:
+            return {"ok": False, "error": "unknown_verb", "summary": f"no setup verb {verb!r}"}
+        if self.roster is None:
+            return {"ok": False, "error": "store_unavailable",
+                    "summary": "Setup is not available — the roster is not configured."}
+        try:
+            return await getattr(self, f"_{verb}")(inputs or {})
+        except Exception as exc:  # never raise into the graph
+            log.exception("setup.%s failed: %s", verb, exc)
+            return {"ok": False, "error": "store_unavailable",
+                    "summary": f"Could not complete setup.{verb} — the change was not saved."}
+
+    # --- reads ---------------------------------------------------------------------------
+    async def _menu(self, inputs: dict) -> ActionResult:
+        return {"ok": True, "data": {"items": list(ITEMS)},
+                "summary": "Setup items: " + ", ".join(i["title"] for i in ITEMS)}
+
+    async def _list(self, inputs: dict) -> ActionResult:
+        """Every rule, split by kind and numbered continuously. The ordinals are published in
+        `data` so the execute node can remember them — that is what makes "edit 5" resolvable."""
+        await self._sync()
+        rules = self.roster.snapshot()
+        contacts = [r for r in rules if r.get("kind") != "group"]
+        groups = [r for r in rules if r.get("kind") == "group"]
+
+        ordinals: dict[str, str] = {}
+        numbered_c, numbered_g, n = [], [], 0
+        for bucket, out in ((contacts, numbered_c), (groups, numbered_g)):
+            for rule in bucket:
+                n += 1
+                ordinals[str(n)] = rule["chat_key"]
+                out.append({**rule, "n": n})
+
+        total = len(rules)
+        return {
+            "ok": True,
+            "data": {"contacts": numbered_c, "groups": numbered_g, "ordinals": ordinals,
+                     "seen_keys": [r["chat_key"] for r in rules], "total": total},
+            "summary": (f"{total} chat(s) enrolled: "
+                        + "; ".join(f"{r['n']}. {r.get('label') or r['chat_key']} "
+                                    f"({r['direction']})" for r in numbered_c + numbered_g)
+                        if total else "Nothing is enrolled for auto-transcription yet."),
+        }
+
+    async def _resolve(self, inputs: dict) -> ActionResult:
+        """Find GROUPS by name. Contacts are never resolved here — they arrive as a card."""
+        if self.evolution is None:
+            return {"ok": False, "error": "evolution_unavailable",
+                    "summary": "Could not read the chat list."}
+        groups = await self._groups()
+        if groups is None:
+            return {"ok": False, "error": "evolution_unavailable",
+                    "summary": "Could not read your group list from WhatsApp just now."}
+        if not groups:
+            return {"ok": False, "error": "no_groups",
+                    "summary": "No groups found in your chat list."}
+
+        query = (inputs.get("query") or "").strip()
+        found = chatfind.rank(query, groups, limit=self.s.setup_group_candidates)
+        cands = [{"n": i + 1, "chat_key": g["chat_key"], "chat_jid": g.get("chat_jid") or "",
+                  "label": g.get("label") or g["chat_key"], "kind": "group",
+                  "last_ts": g.get("last_ts") or 0, "size": g.get("size")}
+                 for i, g in enumerate(found["candidates"])]
+
+        head = (f'{len(cands)} group(s) match "{query}", most recently active first: '
+                if found["matched"] else
+                "No group matched that name. Your most recently active groups, in order: ")
+        return {
+            "ok": True,
+            "data": {"candidates": cands, "matched": found["matched"],
+                     "seen_keys": [c["chat_key"] for c in cands]},
+            "summary": head + "; ".join(
+                f"{c['n']}. {c['label']}"
+                + (f" ({c['size']} people)" if c.get("size") else "") for c in cands),
+        }
+
+    # --- writes --------------------------------------------------------------------------
+    async def _enroll(self, inputs: dict) -> ActionResult:
+        key = (inputs.get("chat_key") or "").strip()
+        direction = normalize_direction(inputs.get("direction"))
+        if not key:
+            return {"ok": False, "error": "unresolved_id",
+                    "summary": "No chat to enrol — forward a contact card, or name a group first."}
+        if direction is None:
+            return {"ok": False, "error": "invalid_direction", "summary": _DIRECTION_HELP}
+
+        await self._sync()
+        existing = self.roster.get(key)
+        jid = inputs.get("chat_jid") or (existing or {}).get("chat_jid") or self._jid_for(key)
+        rule = make_rule(
+            chat_key=key, chat_jid=jid, direction=direction,
+            kind=(existing or {}).get("kind") or chat_kind(jid),
+            label=inputs.get("label") or (existing or {}).get("label"),
+            alt_key=(existing or {}).get("alt_key") or inputs.get("alt_key"),
+        )
+        await self.roster.upsert(rule)
+        label = rule.get("label") or key
+        # Re-adding an existing chat is an edit, not an error: "add Mãe as in & out" when she is
+        # already inbound is plainly a direction change, and saying so is more useful than a
+        # refusal.
+        changed = bool(existing) and existing.get("direction") != direction
+        return {"ok": True,
+                "data": {**rule, "existed": bool(existing), "changed": changed,
+                         "seen_keys": [key]},
+                "summary": (f"{label} updated to {direction}." if existing
+                            else f"{label} enrolled ({direction}).")}
+
+    async def _update(self, inputs: dict) -> ActionResult:
+        key = (inputs.get("chat_key") or "").strip()
+        direction = normalize_direction(inputs.get("direction"))
+        if direction is None:
+            return {"ok": False, "error": "invalid_direction", "summary": _DIRECTION_HELP}
+        await self._sync()
+        before = self.roster.get(key)
+        if before is None:
+            return {"ok": False, "error": "not_found",
+                    "summary": "That chat is not on the list."}
+        after = await self.roster.set_direction(key, direction)
+        label = after.get("label") or key
+        return {"ok": True,
+                "data": {**after, "from": before["direction"], "to": direction,
+                         "seen_keys": [key]},
+                "summary": f"{label}: {before['direction']} -> {direction}."}
+
+    async def _remove(self, inputs: dict) -> ActionResult:
+        key = (inputs.get("chat_key") or "").strip()
+        await self._sync()
+        gone = await self.roster.remove(key)
+        if gone is None:
+            return {"ok": False, "error": "not_found",
+                    "summary": "That chat is not on the list."}
+        remaining = self.roster.snapshot()
+        label = gone.get("label") or key
+        return {"ok": True,
+                "data": {**gone, "remaining": remaining, "removed": True},
+                "summary": f"{label} removed. {len(remaining)} chat(s) still enrolled."}
+
+    # --- helpers -------------------------------------------------------------------------
+    async def _sync(self) -> None:
+        """Make sure the snapshot is current before a read or a write decides anything."""
+        try:
+            await self.roster.refresh(force=True)
+        except Exception as exc:  # a stale snapshot beats a failed turn
+            log.warning("roster refresh before setup op failed: %s", exc)
+
+    async def _groups(self) -> Optional[list[dict]]:
+        """The owner's groups with subjects and last activity, cached for this handler's life
+        within a loop. None when Evolution could not be read at all."""
+        if self._groups_cache is not None:
+            return self._groups_cache
+        chats = await self.evolution.find_chats()
+        groups = await self.evolution.fetch_groups()
+        if not chats and not groups:
+            return None
+        self._groups_cache = chatfind.merge_groups(chats, groups)
+        return self._groups_cache
+
+    def _jid_for(self, key: str) -> str:
+        """Best-known JID for a key we are enrolling. A group id is only ever a group JID; a
+        contact key is a phone number."""
+        for row in (self._groups_cache or []):
+            if row.get("chat_key") == key and row.get("chat_jid"):
+                return row["chat_jid"]
+        return f"{key}@g.us" if len(key) > 15 and "-" in key else f"{key}@s.whatsapp.net"
+
+    def forget_groups(self) -> None:
+        self._groups_cache = None

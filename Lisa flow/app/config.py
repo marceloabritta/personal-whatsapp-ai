@@ -88,6 +88,25 @@ class Settings(BaseSettings):
     media_max_item_bytes: int = 15_000_000       # per-file ceiling before a marker fallback
     media_request_budget_bytes: int = 28_000_000 # total media/turn — headroom under Claude's 32MB
 
+    # Auto-transcription — the roster-driven ambient path (app/roster.py + nodes/auto_transcribe).
+    # Ships OFF, the way MEDIA_ENABLED did: turn it on per service once it has been watched live.
+    auto_transcribe_enabled: bool = False
+    auto_transcribe_max_seconds: int = 600    # skip clips longer than this (declared length)
+    auto_transcribe_daily_cap: int = 40       # per-chat transcripts/day; 0 = no cap
+    auto_transcribe_report_failures: bool = False  # ambient output stays quiet when it fails
+    auto_transcribe_quote_reply: bool = True  # reply attached to the audio; off = plain message
+    roster_cache_ttl: float = 30.0            # seconds before the gate's snapshot re-reads
+
+    # Setup — the self-chat configuration skill (app/skills/setup.py).
+    setup_enabled: bool = True
+    # The listening window while a setup loop is open. Leaving the chat, finding a contact and
+    # forwarding their card takes far longer than the 60s conversational window.
+    setup_window_seconds: int = 300
+    setup_group_candidates: int = 5           # groups offered when nothing matches well
+    # The owner's own JID, for recognising his chat with himself. Derived from Evolution at boot
+    # when left empty (see main.py lifespan).
+    owner_jid: str = ""
+
     # Google Calendar tool — OAuth2 refresh-token client on the owner's own account.
     google_client_id: str = ""
     google_client_secret: str = ""
@@ -111,7 +130,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-09-12-calendar-presence"
+    prompt_version: str = "2026-09-12-auto-transcription"
 
     @property
     def review_settle_window(self) -> float:
@@ -119,6 +138,14 @@ class Settings(BaseSettings):
         a grace margin — long enough that the window has truly expired AND the log writer has
         flushed the loop's last events."""
         return float(self.loop_ttl_seconds + self.review_settle_seconds)
+
+    @property
+    def owner_key(self) -> str:
+        """The owner's chat key — what `is_self_chat` compares against. "" when unconfigured,
+        which makes every chat non-self and keeps setup unreachable rather than open."""
+        from .whatsapp import chat_key
+
+        return chat_key(self.owner_jid)
 
     @property
     def tags(self) -> list[str]:

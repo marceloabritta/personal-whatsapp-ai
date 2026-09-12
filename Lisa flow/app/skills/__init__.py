@@ -13,10 +13,12 @@ from .base import Skill, count_optionals, count_unions
 from .calendar import CALENDAR
 from .confirm import ConfirmPolicy
 from .render import LLMReadback, Programmatic
+from .setup import SETUP
 from .web import WEB
 
 SKILLS: dict[str, Skill] = {
     "calendar": CALENDAR,
+    "setup": SETUP,
     "web": WEB,
 }
 
@@ -133,6 +135,20 @@ def render_policies(skills: dict = SKILLS) -> dict[str, Any]:
     return {name: skill.render for name, skill in skills.items()}
 
 
+def resolve_gates(skills: dict = SKILLS) -> dict[str, Any]:
+    """{domain: gate|None} — the execute node's tool-safety rule, owned per skill."""
+    return {name: skill.resolve_gate for name, skill in skills.items()
+            if skill.resolve_gate is not None}
+
+
+def routable(state: dict, skills: dict = SKILLS) -> list[str]:
+    """The domains this turn may be routed to. A `only_self_chat` skill is invisible everywhere
+    but the owner's chat with himself — so a classifier miss can never land a configuration turn
+    in a contact's conversation."""
+    self_chat = bool(state.get("is_self_chat"))
+    return [n for n, sk in skills.items() if self_chat or not sk.only_self_chat]
+
+
 def server_tools_for(domain: str, settings, skills: dict = SKILLS):
     """The native Anthropic tool defs for a domain, or None. Resolves a builder(settings)."""
     st = skills[domain].server_tools
@@ -157,6 +173,7 @@ __all__ = [
     "SKILLS", "Skill", "ConfirmPolicy", "LLMReadback", "Programmatic",
     "count_unions", "count_optionals",
     "output_schema_for", "has_actions", "system_prompt_for",
-    "handlers", "confirm_policies", "render_policies", "server_tools_for",
+    "handlers", "confirm_policies", "render_policies", "resolve_gates", "routable",
+    "server_tools_for",
     "reason_runtime_for",
 ]

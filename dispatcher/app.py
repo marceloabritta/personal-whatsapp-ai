@@ -6,6 +6,7 @@ ownership) and forwards the *raw, unmodified* payload to the flow that owns the 
 
     @lisa                              ─▶  Lisa flow   (LangGraph brain, :8000)
     (untagged)                         ─▶  the chat's current owner-flow, if its window is live
+    (any voice note)                   ─▶  AUTO_TRANSCRIBE_URL, additionally, if configured
 
 Adding a new experimental flow is one line: drop another (tags, url) route below (or wire it
 via env) and point a fresh @tag at it — the core @lisa flow keeps running, untouched, so a
@@ -47,6 +48,13 @@ def extract_text(msg: dict | None) -> str:
         or (msg.get("videoMessage") or {}).get("caption")
         or ""
     )
+
+
+def is_audio_message(msg: dict | None) -> bool:
+    """True for a WhatsApp voice note (copied from Lisa flow/app/whatsapp.py)."""
+    if not msg:
+        return False
+    return "audioMessage" in msg or "pttMessage" in msg
 
 
 _LEADING_MARKERS = "*_~ \t\r\n"
@@ -106,6 +114,11 @@ class Config:
         mary_url = os.getenv("MARY_URL")
         if mary_url:
             self.routes.append((_tags(os.getenv("MARY_TAGS", "@mary")), mary_url))
+        # Automatic transcription needs to see voice notes that carry NO tag and open no window,
+        # which every rule below would otherwise drop. When this is wired, audio is additionally
+        # forwarded to that flow — which decides for itself whether the chat is enrolled. Leave
+        # it unset and the dispatcher behaves exactly as it did before.
+        self.auto_transcribe_url = os.getenv("AUTO_TRANSCRIBE_URL") or None
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
@@ -182,6 +195,7 @@ async def health() -> dict:
         "ok": True,
         "service": "dispatcher",
         "routes": [{"tags": t, "url": u} for t, u in cfg.routes],
+        "auto_transcribe_url": cfg.auto_transcribe_url,
         "window_ttl": cfg.window_ttl,
     }
 
@@ -203,13 +217,26 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     text = extract_text(data.get("message")).strip()
 
     owners: OwnerStore = app.state.owners
+    # Forwarded already this request, so a message matching two rules is POSTed once.
+    forwarded: set[str] = set()
+
+    # 0) AUDIO always reaches the auto-transcription flow — tagged or not, window or not. It
+    #    deliberately does NOT claim ownership of the chat: transcribing a voice note is not a
+    #    conversation, and it must not steer where the chat's next untagged message goes. The
+    #    flow itself decides whether that chat is enrolled; a voice note from anywhere else
+    #    costs one POST and stops at its gate.
+    if cfg.auto_transcribe_url and is_audio_message(data.get("message")):
+        background.add_task(_forward, cfg.auto_transcribe_url, body)
+        forwarded.add(cfg.auto_transcribe_url)
+        log.info('{"route":"audio","jid":"%s","url":"%s"}', jid, cfg.auto_transcribe_url)
 
     # 1) OWNER summon by tag → (re)assign ownership and forward.
     if from_me:
         url = cfg.route_for_tag(text)
         if url:
             await owners.set(jid, url)
-            background.add_task(_forward, url, body)
+            if url not in forwarded:
+                background.add_task(_forward, url, body)
             log.info('{"route":"tag","jid":"%s","url":"%s"}', jid, url)
             return Response(status_code=200)
 
@@ -219,10 +246,12 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
         # Refresh the window on genuine conversation, but never on a flow's own echo.
         if not is_own_message(text, cfg.owner_name):
             await owners.set(jid, url)
-        background.add_task(_forward, url, body)
+        if url not in forwarded:
+            background.add_task(_forward, url, body)
         log.info('{"route":"window","jid":"%s","url":"%s"}', jid, url)
         return Response(status_code=200)
 
-    # 3) No tag, no open window → nothing to do.
-    log.info('{"route":"drop","jid":"%s","from_me":%s}', jid, str(from_me).lower())
+    # 3) No tag, no open window → nothing to do (the audio rule above may still have fired).
+    if not forwarded:
+        log.info('{"route":"drop","jid":"%s","from_me":%s}', jid, str(from_me).lower())
     return Response(status_code=200)
