@@ -54,21 +54,37 @@ class Budget:
         return "breach"
 
 
-# Deliberately set NEAR today's medians rather than at an aspiration: a budget half the traffic
-# breaches ranks nothing. Tighten once the first report shows where the real tail is.
-# Baselines when these were chosen (120 turns, prompt_version 2026-08-05-programmatic-calendar):
-# replies p50 7.3s / p90 25.4s; silences p50 12.7s / p90 39.5s.
+# RECALIBRATED from the first full run (126 turns), per task class and per turn kind. The v1
+# numbers were guesses anchored on the pooled median and turned out far too tight for everything
+# except calendar_write — they fired on the majority of traffic, which ranks nothing:
+#
+#   task            measured p50 / p90     v1 over-budget     v2 over-budget
+#   calendar_write       7.0 / 16.2          4 of 67  (6%)     unchanged — well calibrated
+#   ack (reply)         13.0 / 43.9          5 of  8 (63%)     good 15 / slow 30
+#   silence             12.7 / 39.5         26 of 36 (72%)     good 15 / slow 30
+#   transcription       20.2 / 48.1          5 of  5 (100%)    see the audio note below
+#   web_lookup          39.9 / 196.8         4 of  4 (100%)    good 30 / slow 60
+#
+# The rule these follow: a budget should fire on the TAIL, not on the median. Anything that flags
+# more than about a fifth of its own traffic is measuring the baseline, not a fault.
 BUDGETS: dict[str, Budget] = {
-    "ack":             Budget(good_s=8,  slow_s=20),
+    "ack":             Budget(good_s=15, slow_s=30),
     "calendar_read":   Budget(good_s=12, slow_s=25),
     "calendar_write":  Budget(good_s=20, slow_s=40),
-    "transcription":   Budget(good_s=15, slow_s=30, per_audio_second=0.3),
-    "web_lookup":      Budget(good_s=20, slow_s=40),
-    "web_research":    Budget(good_s=35, slow_s=60),
+    # Transcription genuinely scales with the clip. v1 never actually scaled: the audio length was
+    # looked up by the ACTIVATION message id, but the clip is the message that one REPLIES to, so
+    # the lookup missed every time and the budget collapsed to a flat 15s — which is why all five
+    # breached. The lookup is fixed in review/store.py; the flat part is raised to match the
+    # measured floor.
+    "transcription":   Budget(good_s=20, slow_s=40, per_audio_second=0.5),
+    "web_lookup":      Budget(good_s=30, slow_s=60),
+    "web_research":    Budget(good_s=45, slow_s=90),
 }
 
-# Silence is scored against this regardless of what the conversation was about.
-SILENCE_BUDGET = Budget(good_s=8, slow_s=20)
+# Silence is scored against this regardless of what the conversation was about. Still stricter
+# than any reply budget — producing nothing should never be slow — but no longer firing on the
+# median, which was 12.7s against a v1 budget of 8s.
+SILENCE_BUDGET = Budget(good_s=15, slow_s=30)
 
 
 @dataclass(frozen=True)

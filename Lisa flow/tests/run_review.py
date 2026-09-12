@@ -39,10 +39,24 @@ def test_pure() -> None:
     print("A. pure functions (no DB, no key)")
 
     # -- vocabulary --
-    check("16 judge codes", len(tx.JUDGE_CODES) == 16)
+    check("19 judge codes", len(tx.JUDGE_CODES) == 19)
     check("6 timing codes", len(tx.TIMING_CODES) == 6)
     check("families do not overlap", not (set(tx.JUDGE_CODES) & set(tx.TIMING_CODES)))
     check("every code has a description", all(tx.ALL_CODES.values()))
+    # v2 codes, each added because the first run fragmented ONE real failure across several
+    # vaguer codes (a denied capability landed in wrong_domain, ignored_context AND a free-text
+    # proposal), or because a code was acting as a magnet for a fault it does not describe
+    # (every single claimed_undone was really "had approval and re-asked instead of acting").
+    for code in ("false_refusal", "ignored_approval", "incomplete_message"):
+        check(f"v2 code present: {code}", code in tx.JUDGE_CODES)
+    check("claimed_undone now excludes the failure-to-act case",
+          "was done" in tx.JUDGE_CODES["claimed_undone"].lower())
+    check("wrong_details now excludes mere omission",
+          "incomplete_message" in tx.JUDGE_CODES["wrong_details"])
+    check("unclear_reply now excludes mere omission",
+          "incomplete_message" in tx.JUDGE_CODES["unclear_reply"])
+    check("false_refusal is pointed at instead of wrong_domain",
+          "wrong_domain" in tx.JUDGE_CODES["false_refusal"])
 
     # -- schema: the Anthropic output_config rejects >16 anyOf/array params --
     def unions(o) -> int:
@@ -81,6 +95,8 @@ def test_pure() -> None:
     check("prompt says not to judge speed", "do not judge speed" in sysprompt.lower())
     check("prompt lists every judge code", all(c in sysprompt for c in tx.JUDGE_CODES))
     check("prompt frames silence as legitimate", "silence is a real" in sysprompt.lower())
+    check("prompt asks for the MOST SPECIFIC code", "most specifically" in sysprompt.lower())
+    check("prompt forbids double-filing one fault", "one code per fault" in sysprompt.lower())
 
     # -- transcript rendering --
     lines = [{"who": "Marcelo", "text": f"m{i}"} for i in range(10)]
@@ -95,12 +111,21 @@ def test_pure() -> None:
     # -- banding --
     ack = BUDGETS["ack"]
     check("ack: 5s is good", ack.band(5) == "good")
-    check("ack: 15s is slow", ack.band(15) == "slow")
-    check("ack: 25s is a breach", ack.band(25) == "breach")
+    check("ack: 22s is slow", ack.band(22) == "slow")
+    check("ack: 35s is a breach", ack.band(35) == "breach")
+    # The v1 budgets fired on the median (63-100% of traffic per class), which ranks nothing.
+    # These are set off the measured p50/p90 so they catch the tail instead.
+    check("ack no longer fires on its own median (13.0s)", ack.band(13.0) == "good")
+    check("silence no longer fires on its own median (12.7s)",
+          SILENCE_BUDGET.band(12.7) == "good")
+    check("web_lookup no longer fires on its own median (39.9s)",
+          BUDGETS["web_lookup"].band(39.9) != "breach")
+    check("calendar_write, already well calibrated, is unchanged",
+          (BUDGETS["calendar_write"].good_s, BUDGETS["calendar_write"].slow_s) == (20, 40))
     check("boundaries are inclusive", ack.band(ack.good_s) == "good" and ack.band(ack.slow_s) == "slow")
     check("audio scales the transcription budget",
           BUDGETS["transcription"].band(40, audio_sec=120) == "good"
-          and BUDGETS["transcription"].band(40) == "breach")
+          and BUDGETS["transcription"].band(40) == "slow")
     check("research gets more room than an ack",
           BUDGETS["web_research"].good_s > BUDGETS["ack"].good_s)
 
@@ -108,10 +133,10 @@ def test_pure() -> None:
     fast = score_timing(Turn(silent=False, reply_ts=1000, last_human_ts=995), "ack")
     check("a fast reply files nothing", fast.gaps == [] and fast.band == "good")
 
-    slow = score_timing(Turn(silent=False, reply_ts=1030, last_human_ts=1000), "ack")
+    slow = score_timing(Turn(silent=False, reply_ts=1040, last_human_ts=1000), "ack")
     check("a slow reply files slow_reply/major", ("slow_reply", "major") in slow.gaps)
 
-    quiet = score_timing(Turn(silent=True, reply_ts=1030, last_human_ts=1000), "web_research")
+    quiet = score_timing(Turn(silent=True, reply_ts=1040, last_human_ts=1000), "web_research")
     check("a slow SILENCE is not excused by the task",
           ("slow_silence", "major") in quiet.gaps)
     check("silence ignores the task budget", SILENCE_BUDGET.slow_s < BUDGETS["web_research"].slow_s)

@@ -23,20 +23,34 @@ JUDGE_CODES: dict[str, str] = {
     "closed_too_early": "Stepped out of the conversation while a task was still unfinished.",
     # doing the thing
     "repeat_confirmation": "Asked for a confirmation that had already been given earlier in the chat.",
+    "ignored_approval": "The go-ahead was given and she asked again or stalled instead of acting. "
+                        "Use this for a failure to ACT on a yes; use claimed_undone only when she "
+                        "said the thing WAS done.",
     "acted_without_confirm": "Created, changed or deleted something without being given approval.",
     "wrong_action": "Right intent, but the wrong operation or the wrong item.",
-    "wrong_details": "Right operation, but wrong date, time, title, location or people.",
-    "claimed_undone": "Said something was done when the chat gives no sign that it was.",
+    "wrong_details": "A value the owner GAVE was changed, dropped or invented — a wrong date, a "
+                     "missing end time, a made-up hour, the wrong weekday. Not for a reply that "
+                     "merely leaves information out; that is incomplete_message.",
+    "claimed_undone": "Stated that something WAS done when the chat gives no sign it was. Only "
+                      "when a completion was actually claimed.",
     # understanding
+    "false_refusal": "Said she cannot do something she can in fact do — read an image or a PDF, "
+                     "search the web, transcribe a voice note, work the calendar. Check the "
+                     "capability list before using this, and use it instead of wrong_domain or "
+                     "ignored_context when the fault is a denied capability.",
     "ignored_context": "Missed or contradicted something plainly stated earlier in the chat.",
     "misread_request": "Answered a different question from the one that was asked.",
     "redid_handled": "Re-did a request that an earlier reply had already closed out.",
-    "wrong_domain": "Treated the ask as the wrong kind of task entirely.",
+    "wrong_domain": "Treated the ask as the wrong kind of task entirely — not merely refusing it.",
     # how it reads
     "wrong_language": "Wrote in a different language from the one the conversation is in.",
     "too_verbose": "Over-explained, or volunteered extras nobody asked for.",
+    "incomplete_message": "Left out something the reader needed: a detail that was asked for, WHAT "
+                          "a confirmation is actually changing, a link that was the point of the "
+                          "request. The message is clear but missing a piece.",
     "bad_format": "Formatting or structure that reads badly as a WhatsApp message.",
-    "unclear_reply": "Ambiguous or confusing to the person reading it.",
+    "unclear_reply": "Genuinely ambiguous or confusing to read. Not for a message that is clear "
+                     "but incomplete; that is incomplete_message.",
 }
 
 # --- what the timing scorer assigns, by arithmetic --------------------------

@@ -15,6 +15,9 @@ from typing import Any, Optional
 log = logging.getLogger("mary.review.store")
 
 _AI = "AI Assistant"
+# How the context node labels a line it transcribed, e.g. "Marcelo (voice message — transcribed)".
+# The clip's own id is what lisa_log.transcripts is keyed on.
+_VOICE = "voice message"
 
 
 def _is_human(who: Optional[str]) -> bool:
@@ -108,6 +111,7 @@ class ReviewStore:
 
         lines: list[dict] = []          # transcript so far, oldest first
         last_human: Optional[dict] = None
+        last_audio_id: Optional[str] = None
         turns: list[dict] = []
 
         for e in events:
@@ -121,6 +125,11 @@ class ReviewStore:
                 lines.append(line)
                 if _is_human(e["who"]) and line["wa_ts"]:
                     last_human = line
+                # The voice note is usually the message being REPLIED to, not the activation
+                # message — so keying the duration lookup on the activation id (as this did)
+                # missed every time and the transcription budget silently never scaled.
+                if _VOICE in (e["who"] or "") and e["wa_message_id"]:
+                    last_audio_id = e["wa_message_id"]
                 continue
 
             if e["label"] != "record":
@@ -145,6 +154,7 @@ class ReviewStore:
                 "overtaken": bool(
                     last_human and activation_id and last_human.get("wa_id") != activation_id
                 ),
+                "audio_id": last_audio_id,
                 "model_ms": p.get("latency_ms"),
                 "delivery": p.get("delivery_result"),
                 "turn_error": p.get("error_category"),
