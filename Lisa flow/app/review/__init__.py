@@ -80,7 +80,7 @@ class Reviewer:
                 last_human_ts=turn["last_human_ts"],
                 error=turn["error"],
                 delivery=turn["delivery"],
-                audio_sec=audio.get(turn.get("last_human_id")),
+                audio_sec=audio.get(turn.get("audio_id")),
             ),
             task_class,
         )
@@ -109,7 +109,7 @@ class Reviewer:
 
     async def _audio_for(self, turns: list[dict]) -> dict:
         try:
-            return await self.store.audio_seconds([t.get("last_human_id") for t in turns])
+            return await self.store.audio_seconds([t.get("audio_id") for t in turns])
         except Exception:  # the transcripts table is a nicety, not a dependency
             return {}
 
