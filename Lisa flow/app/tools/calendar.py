@@ -41,6 +41,76 @@ _BACKOFF_BASE = 0.25  # 0.25s, then 0.5s
 # `find` will surface it, so "no match" returns empty instead of the whole calendar.
 _MATCH_THRESHOLD = 0.6
 
+# --- one presence rule, one change-set -----------------------------------------------------
+#
+# Optional fields are omitted from the schema's `required` rather than wrapped as anyOf:[T,null]
+# (the union cap), so the handler reads them with .get(). That made `false`, `""` and `[]` look
+# exactly like "not sent" to any truthiness test — and they are the opposite: they are the
+# instructions "turn this off", "clear this", "remove them all".
+#
+# The damage came from having TWO implementations of "what is changing" — the body builder here
+# and the confirmation composer in skills/calendar_format.py — each with its own presence rule.
+# They disagreed in both directions: `virtual: false` built an EMPTY patch that silently did
+# nothing, while `attendees: []` built a patch that silently removed every guest from an event
+# after a confirmation that mentioned no change at all.
+#
+# So presence is decided in exactly one place, and the change-set is computed once and consumed
+# by both layers.
+
+CHANGE_FIELDS = ("title", "start", "end", "virtual", "location", "attendees")
+
+
+def provided(inp: dict, key: str) -> bool:
+    """Did the model actually send this field? false / "" / [] / 0 all count as SENT."""
+    return isinstance(inp, dict) and key in inp and inp[key] is not None
+
+
+def _same_dt(a: str | None, b: str | None) -> bool:
+    """Compare two ISO instants by value, not by spelling — Google echoes its own offset format,
+    so a string compare reports a time change that isn't one."""
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    try:
+        return datetime.fromisoformat(a) == datetime.fromisoformat(b)
+    except ValueError:
+        return False
+
+
+def changes(action: dict, before: dict | None = None) -> list[dict]:
+    """Every field this action actually changes: [{field, kind, new, old}].
+
+    `kind` is "set" for a new value, "clear" for removing one ("", [], virtual:false). When
+    `before` (a cached event view) is given, fields whose new value equals the current one are
+    dropped, so a confirmation never lists a change that isn't one. This is THE definition of
+    the change-set — the body builder and the confirmation composer both read it."""
+    before = before or {}
+    out: list[dict] = []
+    for f in CHANGE_FIELDS:
+        if not provided(action, f):
+            continue
+        new = action[f]
+        old = before.get(f)
+        if f == "virtual":
+            # There is no "virtual" on a stored event; a Meet link is the observable form.
+            has_meet = bool(before.get("meet_link")) if "meet_link" in before else None
+            if has_meet is not None and bool(new) == has_meet:
+                continue
+            out.append({"field": f, "kind": "set" if new else "clear", "new": bool(new), "old": has_meet})
+            continue
+        if f in ("start", "end"):
+            if _same_dt(new, old):
+                continue
+        elif f == "attendees":
+            if set(new or []) == set(old or []):
+                continue
+        elif new == old:
+            continue
+        out.append({"field": f, "kind": "clear" if new in ("", []) else "set",
+                    "new": new, "old": old})
+    return out
+
 # Fixed English labels for the agenda layout, so a listing reads the same regardless of the
 # container's locale (strftime("%A"/"%b") would follow the server locale).
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -214,30 +284,39 @@ class GoogleCalendarService:
         builder serves create (full) and update (partial patch)."""
         body = dict(base or {})
         tz = self.s.calendar_timezone
-        if inp.get("title") is not None:
+        if provided(inp, "title"):
             body["summary"] = inp["title"]
-        if inp.get("start"):
+        if provided(inp, "start"):
             body["start"] = {"dateTime": inp["start"], "timeZone": tz}
             end = inp.get("end")
             if not end:
                 dur = inp.get("duration_min") or self.s.default_meeting_minutes
                 end = self._plus_minutes(inp["start"], dur)
             body["end"] = {"dateTime": end, "timeZone": tz}
-        elif inp.get("end"):
+        elif provided(inp, "end"):
             body["end"] = {"dateTime": inp["end"], "timeZone": tz}
-        want_meet = False
-        if inp.get("virtual"):
+
+        # Conference INTENT, not a "want a meet" boolean. Removing a Meet is a real instruction
+        # with its own wire form (conferenceData: null), and BOTH forms are ignored by Google
+        # unless conferenceDataVersion=1 rides with the request — which used to be attached only
+        # when creating one, so a removal was dropped on the floor even once it was built.
+        conference: str | None = None
+        if provided(inp, "virtual") and inp["virtual"]:
             body["location"] = None  # video wins over a place
-            want_meet = True
+            conference = "create"
             body["conferenceData"] = {"createRequest": {
                 "requestId": uuid.uuid4().hex,
                 "conferenceSolutionKey": {"type": "hangoutsMeet"},
             }}
-        elif inp.get("location") is not None:
-            body["location"] = inp["location"]
-        if inp.get("attendees") is not None:
+        else:
+            if provided(inp, "virtual"):   # explicitly false → drop the video call
+                body["conferenceData"] = None
+                conference = "remove"
+            if provided(inp, "location"):
+                body["location"] = inp["location"]
+        if provided(inp, "attendees"):
             body["attendees"] = [{"email": e} for e in inp["attendees"]]
-        return body, want_meet
+        return body, conference
 
     @staticmethod
     def _send_updates(inp: dict) -> str:
@@ -249,9 +328,10 @@ class GoogleCalendarService:
         if not inp.get("title") or not inp.get("start"):
             return {"ok": False, "error": "validation",
                     "summary": "create needs a title and a start time."}
-        body, want_meet = self._body_from(inp)
+        body, conference = self._body_from(inp)
+        want_meet = conference == "create"
         kw = dict(calendarId=self._cal(), body=body, sendUpdates=self._send_updates(inp))
-        if want_meet:
+        if conference:
             kw["conferenceDataVersion"] = 1
         # Idempotency across the retry in `run`. The key is minted ONCE PER run() call, so a
         # replayed insert reuses it and Google rejects the duplicate (409) instead of
@@ -275,7 +355,15 @@ class GoogleCalendarService:
         # The read-back summary carries what the model needs to render the "Scheduled:" message:
         # the ISO start (it formats date/time), where (Video call vs a place — NOT the Meet URL,
         # per the message spec), guest count, and the EVENT link.
-        where = "Video call (Google Meet)" if want_meet else (view["location"] or "no location")
+        # Describe what Google RETURNED, never what we asked for. Conference creation is async
+        # and can fail, and this used to read `want_meet` — so a create whose Meet never
+        # materialised still reported "Video call (Google Meet)".
+        if meet:
+            where = "Video call (Google Meet)"
+        elif want_meet:
+            where = "video call REQUESTED BUT NOT CREATED"
+        else:
+            where = view["location"] or "no location"
         parts = [f"Created '{view['title']}'", f"start {view['start']}", where]
         n = len(inp.get("attendees") or [])
         if n:
@@ -375,15 +463,51 @@ class GoogleCalendarService:
                 inp = {**inp, "duration_min": mins}
             except (KeyError, ValueError):
                 pass
-        body, want_meet = self._body_from(inp)
+        body, conference = self._body_from(inp)
+        if not body:
+            # An empty patch is a guaranteed lie: Google returns 200 and the unchanged event, and
+            # we would report "Updated". This is exactly how `virtual: false` used to behave.
+            return {"ok": False, "error": "no_change",
+                    "summary": "update had nothing to change — say what should be different."}
+
         kw = dict(calendarId=self._cal(), eventId=eid, body=body,
                   sendUpdates=self._send_updates(inp))
-        if want_meet:
+        if conference:
             kw["conferenceDataVersion"] = 1
         ev = self._service().events().patch(**kw).execute()
         view = self._event_view(ev)
+        meet = self._meet_link(ev)
+
+        # Verify against the RESPONSE. A 200 only says Google accepted the request, not that it
+        # did what was asked — the removal of a Meet came back 200 with the Meet still attached.
+        missed = self._unapplied(inp, view, meet)
+        if missed:
+            return {"ok": False, "error": "not_applied",
+                    "summary": f"Google accepted the change but did not apply: {', '.join(missed)}.",
+                    "data": {**view, "meet_link": meet}}
+
         return {"ok": True, "summary": f"Updated '{view['title']}' → {self._fmt(view['start'])}",
-                "data": {**view, "meet_link": self._meet_link(ev)}}
+                "data": {**view, "meet_link": meet}}
+
+    @staticmethod
+    def _unapplied(inp: dict, view: dict, meet: str | None) -> list[str]:
+        """Which requested changes are NOT visible in the event Google returned."""
+        missed: list[str] = []
+        if provided(inp, "virtual"):
+            if inp["virtual"] and not meet:
+                missed.append("video call not created")
+            elif not inp["virtual"] and meet:
+                missed.append("video call still attached")
+        if provided(inp, "title") and (view.get("title") or "") != inp["title"]:
+            missed.append("title")
+        if provided(inp, "location") and not inp.get("virtual"):
+            if (view.get("location") or "") != inp["location"]:
+                missed.append("location")
+        if provided(inp, "attendees") and set(view.get("attendees") or []) != set(inp["attendees"]):
+            missed.append("guests")
+        if provided(inp, "start") and not _same_dt(view.get("start"), inp["start"]):
+            missed.append("start time")
+        return missed
 
     def _delete(self, inp: dict) -> ActionResult:
         eid = inp.get("event_id")
