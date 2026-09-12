@@ -71,6 +71,11 @@ evidence. Use "major" for something that misled {owner_name}, wasted his time, o
 action wrong; "minor" for friction. Do not invent faults to fill the list — an empty list on a \
 good turn is the expected outcome.
 
+Pick the code that describes the fault MOST SPECIFICALLY, and file ONE code per fault. Several \
+codes will often look plausible for the same problem; read their descriptions and take the one \
+written for it. Filing a second, vaguer code alongside the right one does not add information — \
+it just makes the same fault look twice as common as it is.
+
 {codes}
 
 If you find a REAL fault that none of those codes covers, leave gaps empty and describe it in \
