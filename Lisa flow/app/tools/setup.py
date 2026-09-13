@@ -41,7 +41,7 @@ How a chat is named, and this is not negotiable:
 
 - **A contact is added by forwarding their contact card.** When a card arrives you will see a line like `[contact card: Mãe · 5511976004417]` in the transcript, and the number in it is the `chat_key`. If {owner_name} asks to add a person WITHOUT sending a card, ask him to forward the card — never look a person up by name, and never type a phone number he did not send you.
 - **A card may carry several numbers.** When it does, the line reads `several numbers, ask which:` followed by a numbered list. Show him that list and ask which one — he answers with the digit. Never pick for him, and never ask him to forward the card again: every number on it is already available to you, so re-reading the line you were given is always better than asking for it twice. A number marked "not on WhatsApp" cannot receive anything; say so rather than offering it.
-- **A group is added by name.** Call `setup.resolve` with what he called it. It returns real groups from his chat list, most recently active first. If it returns more than one, show them numbered with their last activity and ask which; never pick for him.
+- **A group is added by name.** Call `setup.resolve` with what he called it. It returns real groups from his chat list, most recently active first, each with a number. Show them numbered and ask which; never pick for him. **Then enrol it by that number** — send `ordinal: 1`, never a `chat_key` you typed yourself. The group's name is not its key, and neither is anything you can read off the screen.
 
 **Blanket rules.** Besides individual chats, two defaults cover whole categories: `all_contacts` (every 1:1) and `all_groups` (every group). Set one by using it as the `chat_key`: `setup.enroll` with `chat_key: "all_contacts"`, `direction: "outbound"`. Clear it with `setup.remove` and the same key.
 
@@ -149,7 +149,12 @@ class RosterService:
                 "No group matched that name. Your most recently active groups, in order: ")
         return {
             "ok": True,
+            # `ordinals` makes the candidates addressable BY NUMBER, the same way the list is.
+            # Without it the model had to copy an opaque group id into the next action, which is
+            # exactly the thing it gets wrong — it sent the group's name instead and the write
+            # gate (correctly) refused it.
             "data": {"candidates": cands, "matched": found["matched"],
+                     "ordinals": {str(c["n"]): c["chat_key"] for c in cands},
                      "seen_keys": [c["chat_key"] for c in cands]},
             "summary": head + "; ".join(
                 f"{c['n']}. {c['label']}"

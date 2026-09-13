@@ -8,6 +8,8 @@ Only two languages render programmatically (en/pt), matching the calendar format
 else falls back to the model (see nodes/respond.py)."""
 from __future__ import annotations
 
+import unicodedata
+
 from ..roster import (
     ALL_CONTACTS, ALL_GROUPS, BOTH, DIRECTION_CHOICES, INBOUND, OUTBOUND, SCOPE_KIND,
 )
@@ -54,17 +56,57 @@ def _view(state: dict, key: str) -> dict:
     return (state.get("seen_chats") or {}).get(key) or {}
 
 
-def target_key(action: dict, state: dict) -> str:
-    """The chat this action targets, resolving an ordinal the same way the execute gate will.
+def fold(text: str) -> str:
+    """Casefold + strip accents, for comparing a label the model echoed back against the one it
+    was given ("Família Marciana" vs "familia marciana")."""
+    text = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in text if not unicodedata.combining(c)).casefold().strip()
 
-    The gate runs at EXECUTE, which is after the confirmation is composed — so without this the
-    question would be written before the number had been resolved, and would name no one. The
-    owner has to read the name he is approving, so the resolution happens in both places against
-    the same list."""
+
+def resolve_target(action: dict, state: dict) -> tuple[str, str | None]:
+    """(chat_key, ambiguous_label) — which chat this action targets.
+
+    Three ways in, in priority order, and NONE of them require the model to carry an opaque id:
+      1. `ordinal`   — the number printed on the last list or resolve;
+      2. `chat_key`  — a key already surfaced this loop (a parsed card, a resolved group);
+      3. a LABEL where a key was expected — resolved against the chats surfaced this loop.
+
+    (3) exists because asking a model to copy "5511941261921-1363718480" across turns is the one
+    place this design still did that, and it sent the group's NAME instead. The name is
+    resolvable, so it is resolved — but only when it matches exactly one surfaced chat. Two
+    chats with the same name come back as ambiguous rather than a coin toss.
+
+    Used by BOTH the execute gate and the confirmation composer, so the chat named in the
+    question is always the chat that gets written."""
     ordinal = (action or {}).get("ordinal")
     if ordinal is not None:
-        return (state.get("listed_chats") or {}).get(str(ordinal)) or ""
-    return ((action or {}).get("chat_key") or "").strip()
+        return (state.get("listed_chats") or {}).get(str(ordinal)) or "", None
+
+    key = ((action or {}).get("chat_key") or "").strip()
+    if not key:
+        return "", None
+    seen_keys = state.get("seen_chat_keys") or []
+    if key in seen_keys:
+        return key, None
+
+    seen_chats = state.get("seen_chats") or {}
+    wanted = fold(key)
+    hits = [k for k, v in seen_chats.items()
+            if wanted and fold((v or {}).get("label") or "") == wanted]
+    if len(hits) == 1:
+        return hits[0], None
+    if len(hits) > 1:
+        return "", key
+    return key, None  # unknown; the gate reports it
+
+
+def target_key(action: dict, state: dict) -> str:
+    """The chat this action targets, resolved the same way the execute gate will.
+
+    The gate runs at EXECUTE, after the confirmation is composed — so without resolving here too,
+    the question would be written before the number had been resolved and would name no one."""
+    key, _ = resolve_target(action, state)
+    return key
 
 
 # --- confirmations (composed by the confirm node, before anything is written) ---------------

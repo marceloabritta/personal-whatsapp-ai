@@ -767,10 +767,99 @@ async def p12_layout():
           body_en.splitlines()[3] == "_line two_")
 
 
+
+
+# ============ P13 — the group enrolment that failed live ==================================
+#
+# 2026-09-12: resolving "familia marciana" worked, but the enrol that followed sent the group's
+# NAME as chat_key instead of the id the resolver returned. The write gate refused it
+# (unresolved_id, correctly), the retry then tripped the duplicate-confirmation suppressor, and
+# the conversation dead-ended in silence. Group resolve was the ONE path still asking the model
+# to carry an opaque id across turns.
+
+LIVE_GROUPS_STATE = {
+    "is_self_chat": True,
+    "listed_chats": {"1": "5511941261921-1363718480", "2": "5511941261921-1365590692"},
+    "seen_chat_keys": ["5511941261921-1363718480", "5511941261921-1365590692"],
+    "seen_chats": {
+        "5511941261921-1363718480": {"chat_key": "5511941261921-1363718480",
+                                     "label": "Fam\u00edlia Marciana", "kind": "group",
+                                     "chat_jid": "5511941261921-1363718480@g.us"},
+        "5511941261921-1365590692": {"chat_key": "5511941261921-1365590692",
+                                     "label": "Fam\u00edlia SP", "kind": "group",
+                                     "chat_jid": "5511941261921-1365590692@g.us"},
+    },
+}
+
+
+async def p13_group_enrolment():
+    print("P13 — the group enrolment that failed live")
+
+    # The exact action the model emitted.
+    action = {"task": "setup.enroll", "chat_key": "Fam\u00edlia Marciana", "confirmed": False,
+              "direction": "both"}
+    patched, err = setup_resolve_gate("enroll", action, LIVE_GROUPS_STATE)
+    check("the group NAME resolves to the id the resolver returned",
+          err is None and patched["chat_key"] == "5511941261921-1363718480",
+          detail=str(err or patched.get("chat_key")))
+    check("and the write is enriched with the group's jid and kind",
+          patched.get("chat_jid") == "5511941261921-1363718480@g.us"
+          and patched.get("kind") == "group")
+    check("accents and case do not matter",
+          setup_resolve_gate("enroll", {"chat_key": "familia marciana", "direction": "both"},
+                             LIVE_GROUPS_STATE)[0]["chat_key"] == "5511941261921-1363718480")
+    check("the confirmation names the group, and says it is one",
+          "Fam\u00edlia Marciana" in compose_enroll(action, LIVE_GROUPS_STATE)
+          and "(group)" in compose_enroll(action, LIVE_GROUPS_STATE),
+          detail=compose_enroll(action, LIVE_GROUPS_STATE))
+
+    # The preferred path: the resolver now numbers its candidates like the list does.
+    check("enrolling by the number from the resolve works",
+          setup_resolve_gate("enroll", {"ordinal": 2, "direction": "inbound"},
+                             LIVE_GROUPS_STATE)[0]["chat_key"] == "5511941261921-1365590692")
+
+    # The rail is intact: only chats surfaced THIS loop, and never a coin toss.
+    _, err = setup_resolve_gate("enroll", {"chat_key": "Some Other Group", "direction": "both"},
+                                LIVE_GROUPS_STATE)
+    check("a name that was never surfaced is still refused",
+          err and err["error"] == "unresolved_id")
+    dup = {"is_self_chat": True, "seen_chat_keys": ["a", "b"], "listed_chats": {},
+           "seen_chats": {"a": {"label": "Fam\u00edlia"}, "b": {"label": "Fam\u00edlia"}}}
+    _, err = setup_resolve_gate("enroll", {"chat_key": "Fam\u00edlia", "direction": "both"}, dup)
+    check("two chats with the same name ask for the number instead of guessing",
+          err and "number" in err["summary"], detail=str(err))
+    _, err = setup_resolve_gate("enroll", {"chat_key": "Fam\u00edlia Marciana", "direction": "both"},
+                                {"is_self_chat": False})
+    check("and none of this works outside the self-chat",
+          err and err["error"] == "not_self_chat")
+
+    # The resolver publishes ordinals, which is what makes "1" addressable at all.
+    chats = [{"kind": "group", "key": "g1", "jid": "g1@g.us", "label": "Fam\u00edlia Marciana",
+              "last_ts": 1789215672},
+             {"kind": "group", "key": "g2", "jid": "g2@g.us", "label": "Fam\u00edlia SP",
+              "last_ts": 1788899006}]
+    ev = FakeEvolution(chats=chats, groups=[{"key": "g1", "jid": "g1@g.us",
+                                             "label": "Fam\u00edlia Marciana", "size": 9},
+                                            {"key": "g2", "jid": "g2@g.us",
+                                             "label": "Fam\u00edlia SP", "size": 4}])
+    r = Roster()
+    from app.tools.setup import RosterService
+    svc = RosterService(Settings(MARY_TRIGGER_TAG="@lisa"), roster=r, evolution=ev)
+    res = await svc.run("resolve", {"query": "familia marciana"})
+    check("a group resolve publishes ordinals for its candidates",
+          res["data"]["ordinals"] == {"1": "g1", "2": "g2"}, detail=str(res["data"].get("ordinals")))
+    check("the better name match leads, recency notwithstanding",
+          res["data"]["candidates"][0]["label"] == "Fam\u00edlia Marciana")
+
+    from app.tools.setup import GUIDANCE
+    check("the model is told to enrol a group BY NUMBER",
+          "ordinal: 1" in GUIDANCE and "never a `chat_key` you typed yourself" in GUIDANCE)
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
                p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
-               p10_live_regressions, p11_scopes, p12_layout):
+               p10_live_regressions, p11_scopes, p12_layout, p13_group_enrolment):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]

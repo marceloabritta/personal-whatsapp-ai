@@ -25,7 +25,7 @@ from .base import Skill
 from .confirm import FlagConfirm
 from .render import LLMReadback, Programmatic
 from .setup_format import (
-    compose_enroll, compose_remove, compose_update,
+    compose_enroll, compose_remove, compose_update, resolve_target,
     fmt_enroll, fmt_failure, fmt_list, fmt_menu, fmt_remove, fmt_update,
 )
 
@@ -79,24 +79,24 @@ def setup_resolve_gate(verb: str, inputs: dict, state: dict):
     if verb not in _WRITE_VERBS:
         return inputs, None
 
-    listed = state.get("listed_chats") or {}
+    # A blanket rule names no chat, so there is nothing to have surfaced: "all contacts" is
+    # always a valid target. Normalised here so the handler sees the canonical key.
+    scope = normalize_scope(inputs.get("chat_key"))
+    if scope and inputs.get("ordinal") is None:
+        return {**{k: v for k, v in inputs.items() if k != "ordinal"}, "chat_key": scope}, None
+
     seen_keys = state.get("seen_chat_keys") or []
     seen_chats = state.get("seen_chats") or {}
 
-    key = (inputs.get("chat_key") or "").strip()
-    ordinal = inputs.get("ordinal")
-
-    # A blanket rule names no chat, so there is nothing to have surfaced: "all contacts" is
-    # always a valid target. Normalised here so the handler sees the canonical key.
-    scope = normalize_scope(key)
-    if scope and ordinal is None:
-        return {**{k: v for k, v in inputs.items() if k != "ordinal"}, "chat_key": scope}, None
-    if ordinal is not None:  # the ordinal wins — it is what the owner actually typed
-        key = listed.get(str(ordinal)) or ""
-        if not key:
-            return None, {"error": "unresolved_id",
-                          "summary": f"There is no {ordinal} on the current list — "
-                                     f"show the list again, then use the number it prints."}
+    key, ambiguous = resolve_target(inputs, state)
+    if ambiguous:
+        return None, {"error": "unresolved_id",
+                      "summary": f"More than one chat here is called {ambiguous!r} — say its "
+                                 f"number from the list instead."}
+    if inputs.get("ordinal") is not None and not key:
+        return None, {"error": "unresolved_id",
+                      "summary": f"There is no {inputs['ordinal']} on the current list — "
+                                 f"show the list again, then use the number it prints."}
     if not key:
         return None, {"error": "unresolved_id",
                       "summary": "No chat named. Forward a contact card, name a group, or use "
