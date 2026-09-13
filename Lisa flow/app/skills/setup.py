@@ -26,7 +26,7 @@ from .confirm import FlagConfirm
 from .render import LLMReadback, Programmatic
 from .setup_format import (
     compose_enroll, compose_remove, compose_update, resolve_target,
-    fmt_enroll, fmt_failure, fmt_list, fmt_menu, fmt_remove, fmt_update,
+    fmt_enroll, fmt_failure, fmt_help, fmt_list, fmt_menu, fmt_remove, fmt_update,
 )
 
 # Explicit configuration words only. Deliberately narrow: "transcreve esse áudio" is a
@@ -123,7 +123,7 @@ SETUP = Skill(
     kind="local",
     describe=DESCRIBE,
     guidance=GUIDANCE,
-    verbs=["menu", "list", "resolve", "enroll", "update", "remove"],
+    verbs=["menu", "help", "list", "resolve", "enroll", "update", "remove"],
     schemas=SETUP_TASK_SCHEMAS,
     handler_cls=RosterService,
     # Every write waits for the owner's go-ahead, and the question he answers is composed in
@@ -137,6 +137,7 @@ SETUP = Skill(
     # judgment, so that one keeps the model.
     render={
         "menu": Programmatic(fmt_menu, on_failure=fmt_failure),
+        "help": Programmatic(fmt_help, on_failure=fmt_failure),
         "list": Programmatic(fmt_list, on_failure=fmt_failure),
         "enroll": Programmatic(fmt_enroll, on_failure=fmt_failure),
         "update": Programmatic(fmt_update, on_failure=fmt_failure),

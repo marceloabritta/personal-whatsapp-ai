@@ -38,7 +38,7 @@ from app.skills import (  # noqa: E402
 )
 from app.skills.setup import setup_matcher, setup_resolve_gate  # noqa: E402
 from app.skills.setup_format import (  # noqa: E402
-    compose_enroll, direction_choices, fmt_list, fmt_menu,
+    compose_enroll, direction_choices, fmt_help, fmt_list, fmt_menu,
 )
 from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
@@ -354,8 +354,10 @@ async def p5_setup_structure():
     print("P5 — the setup skill's shape")
     sc = output_schema_for("setup")
     tasks = {b["properties"]["task"]["const"] for b in sc["properties"]["actions"]["items"]["anyOf"]}
-    check("setup exposes exactly its six verbs",
-          tasks == {f"setup.{v}" for v in ("menu", "list", "resolve", "enroll", "update", "remove")})
+    check("setup exposes exactly its seven verbs",
+          tasks == {f"setup.{v}" for v in
+                    ("menu", "help", "list", "resolve", "enroll", "update", "remove")},
+          detail=str(sorted(tasks)))
     check("schema is under the 16-union cap", count_unions(sc) <= 16, detail=str(count_unions(sc)))
     check("schema is under the 24-optional cap", count_optionals(sc) <= 24,
           detail=str(count_optionals(sc)))
@@ -988,11 +990,58 @@ async def p15_enroll_target():
           "LEAVE `chat_key` OUT" in GUIDANCE and "never invent a value" in GUIDANCE)
 
 
+# ============ P16 — "add" answers with the whole how-to, once ============================
+#
+# Saying "add" got a one-line back-and-forth that never mentioned the blanket rules, and was
+# re-improvised differently each time. There is exactly one correct answer to "how do I add
+# something", so it is written in code and delivered as a single message.
+
+async def p16_help():
+    print("P16 — the one-message how-to")
+    out = fmt_help([], {})
+    check("it is ONE message, not a question back", "?" not in out.split("\n")[0])
+    check("it covers adding a contact by card",
+          "contact card" in out and "*A contact*" in out)
+    check("it covers adding a group by name", "*A group*" in out and "tell me the name" in out)
+    check("it covers the blanket rules, which nothing else advertises",
+          "*Everyone at once*" in out and "all contacts" in out and "all groups" in out)
+    check("it explains that blanket and per-chat ADD UP",
+          "on top of anything you set" in out)
+    check("it lists the three directions, numbered",
+          "1. *inbound*" in out and "2. *outbound*" in out and "3. *in & out*" in out)
+    check("and it says how to change things later", "use the number on the row" in out)
+
+    pt = fmt_help([], {"session_lang": "pt"})
+    check("Portuguese gets the same structure, fully localised",
+          "Como adicionar" in pt and "cart\u00e3o de contato" in pt
+          and "todos os contatos" in pt and "Para mudar ou remover" in pt)
+    check("the direction labels stay untranslated even in Portuguese",
+          "inbound" in pt and "outbound" in pt and "in & out" in pt)
+
+    sc = output_schema_for("setup")
+    tasks = {b["properties"]["task"]["const"] for b in sc["properties"]["actions"]["items"]["anyOf"]}
+    check("help is a real verb the model can call", "setup.help" in tasks)
+    check("the schema is still inside the caps",
+          count_unions(sc) <= 16 and count_optionals(sc) <= 24,
+          detail=f"{count_unions(sc)} unions / {count_optionals(sc)} optionals")
+
+    r = Roster()
+    from app.tools.setup import RosterService
+    svc = RosterService(Settings(MARY_TRIGGER_TAG="@lisa"), roster=r)
+    res = await svc.run("help", {})
+    check("the handler serves it without touching the roster", res["ok"])
+
+    from app.tools.setup import GUIDANCE
+    check("the model is told to call it and write nothing itself",
+          "call `setup.help` and NOTHING else" in GUIDANCE
+          and "Do not write that explanation yourself" in GUIDANCE)
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
                p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
                p10_live_regressions, p11_scopes, p12_layout, p13_group_enrolment,
-               p14_setup_starts_clean, p15_enroll_target):
+               p14_setup_starts_clean, p15_enroll_target, p16_help):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]

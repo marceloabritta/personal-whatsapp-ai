@@ -35,6 +35,10 @@ def _verb(required: list[str], properties: dict) -> dict:
 # menu — what can be configured. No inputs.
 MENU = _verb([], {})
 
+# help — the one-message how-to: the three ways to add something, and the three directions.
+# No inputs: it is the same answer every time, which is the point of it being a verb at all.
+HELP = _verb([], {})
+
 # list — what is enrolled right now. `item` scopes it to one setup item (only "transcription"
 # exists today) and is optional because the bare list is the useful default.
 LIST = _verb([], {"item": _STR})
@@ -67,6 +71,6 @@ UPDATE = _verb(
 REMOVE = _verb([], {"ordinal": _INT, "chat_key": _STR, "confirmed": _CONFIRMED})
 
 SETUP_TASK_SCHEMAS = {
-    "menu": MENU, "list": LIST, "resolve": RESOLVE,
+    "menu": MENU, "help": HELP, "list": LIST, "resolve": RESOLVE,
     "enroll": ENROLL, "update": UPDATE, "remove": REMOVE,
 }

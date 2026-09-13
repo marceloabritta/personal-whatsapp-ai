@@ -244,6 +244,49 @@ def fmt_list(results: list, state: dict) -> str:
     return "\n".join(lines)
 
 
+def fmt_help(results: list, state: dict) -> str:
+    """The whole how-to, in ONE message.
+
+    Written in code rather than left to the model, because "how do I add something" has exactly
+    one correct answer and it should not be re-improvised — half of it, differently worded, on
+    each attempt. Covers all three ways in, because the blanket rules are invisible otherwise:
+    nothing about the chat list hints that "all contacts" is a thing you can say."""
+    pt = _lang(state) == "pt"
+    if pt:
+        return "\n".join([
+            "Como adicionar:", "",
+            "*Um contato*",
+            "Me encaminhe o cartão de contato dele. Eu leio o número do cartão.", "",
+            "*Um grupo*",
+            'Me diga o nome — por exemplo "grupo Família Marciana".',
+            "Se houver mais de um parecido, eu listo numerado e você escolhe o número.", "",
+            "*Todos de uma vez*",
+            'Diga "todos os contatos" ou "todos os grupos" com a direção —',
+            'por exemplo "todos os contatos outbound".',
+            "Vale para toda conversa daquele tipo, somando com o que você já configurou",
+            "para uma conversa específica.", "",
+            "*A direção é sempre uma destas:*",
+            direction_choices("pt"), "",
+            'Para mudar ou remover depois, diga "lista" e use o número da linha.',
+        ])
+    return "\n".join([
+        "How to add:", "",
+        "*A contact*",
+        "Forward me their contact card. I read the number straight off the card.", "",
+        "*A group*",
+        'Just tell me the name — e.g. "group Família Marciana".',
+        "If more than one matches, I list them numbered and you pick the number.", "",
+        "*Everyone at once*",
+        'Say "all contacts" or "all groups" with a direction —',
+        'e.g. "all contacts outbound".',
+        "That covers every chat of that kind, on top of anything you set for an",
+        "individual chat.", "",
+        "*Direction is always one of:*",
+        direction_choices("en"), "",
+        'To change or remove later, say "list" and use the number on the row.',
+    ])
+
+
 def fmt_menu(results: list, state: dict) -> str:
     """The menu. Every word localised — an English "Setup." bolted onto a Portuguese sentence is
     what made the opening message change language halfway through."""

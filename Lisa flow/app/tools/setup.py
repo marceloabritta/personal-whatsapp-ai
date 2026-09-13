@@ -47,6 +47,8 @@ How a chat is named, and this is not negotiable:
 
 A chat's own rule and the blanket rule for its kind ADD UP — either one covering a direction is enough. So "all_contacts: outbound" plus "Mãe: in & out" means everyone gets {owner_name}'s audio written out, and Mãe's own audio comes back as well. Setting a chat does NOT switch the blanket rule off for it. If {owner_name} asks for something that would need a chat EXCLUDED from a blanket rule, say plainly that it is not possible yet — clearing the blanket rule is the only way — rather than pretending it worked.
 
+**When he asks to add something without saying what** — "add", "how do I add a group", "how does this work" — call `setup.help` and NOTHING else. It answers with the whole how-to in one message: the contact card, the group name, the blanket rules, and the three directions. Do not write that explanation yourself and do not give him half of it; the verb exists so the answer is the same every time.
+
 Working with the list:
 
 - `setup.list` shows everything configured — blanket rules, then contacts, then groups, under separate titles but numbered in one continuous sequence. Those numbers are handles: after a list, "edit 5 to outbound" or "remove 2" targets a row by `ordinal`. Pass the number he said as `ordinal` — do not try to reconstruct a chat_key from it.
@@ -69,7 +71,7 @@ class RosterService:
     """Local handler for the six setup verbs. `roster` and `evolution` are attached after
     construction by deps (the skills fan-out builds handlers from settings alone)."""
 
-    _VERBS = ("menu", "list", "resolve", "enroll", "update", "remove")
+    _VERBS = ("menu", "help", "list", "resolve", "enroll", "update", "remove")
 
     def __init__(self, settings, *, roster: Any = None, evolution: Any = None) -> None:
         self.s = settings
@@ -94,6 +96,11 @@ class RosterService:
     async def _menu(self, inputs: dict) -> ActionResult:
         return {"ok": True, "data": {"items": list(ITEMS)},
                 "summary": "Setup items: " + ", ".join(i["title"] for i in ITEMS)}
+
+    async def _help(self, inputs: dict) -> ActionResult:
+        return {"ok": True, "data": {"help": True},
+                "summary": "Explained the three ways to add: a contact card, a group name, "
+                           "or all contacts / all groups."}
 
     async def _list(self, inputs: dict) -> ActionResult:
         """Everything configured, numbered continuously across all three sections — blanket
