@@ -856,10 +856,79 @@ async def p13_group_enrolment():
           "ordinal: 1" in GUIDANCE and "never a `chat_key` you typed yourself" in GUIDANCE)
 
 
+# ============ P14 — a setup tag starts from nothing =======================================
+#
+# 2026-09-13: "@lisa setup" in a self-chat whose recent history was a previous, abandoned setup
+# attempt came back mid-flow — first model call emitted setup.resolve for a group named in that
+# old session, then proposed an enroll with chat_key "". Configuring the assistant is a form,
+# not a conversation with history.
+
+def _history(texts):
+    return [{"id": f"h{i}", "from_me": True, "text": t, "push_name": "Marcelo",
+             "ts": 1730000000 + i, "is_audio": False, "media_type": "text",
+             "media_mimetype": None, "media_filename": None, "contact_cards": []}
+            for i, t in enumerate(texts)]
+
+
+OLD_ATTEMPT = ["@lisa setup", "1", "group name familia marciana", "1", "in&out", "yes",
+               "the name is correct", "1", "Bbzao enrolled"]
+
+
+async def p14_setup_starts_clean():
+    print("P14 — a setup tag starts from nothing")
+    ev = FakeEvolution()
+    ev.history[OWNER_JID] = _history(OLD_ATTEMPT)
+    reasoner = StubReasoner([{"actions": [{"task": "setup.list"}]}])
+    deps, graph, ev, tr, roster = build(evolution=ev, reasoner=reasoner)
+
+    st = await invoke(graph, text_upsert("@lisa setup", mid="NEW1"))
+    check("only the triggering message is ingested",
+          st.get("context_message_ids") == ["NEW1"], detail=str(st.get("context_message_ids")))
+    seen = [m for m in (st.get("messages") or []) if getattr(m, "type", "") != "ai"]
+    content = getattr(seen[0], "content", "") if seen else ""
+    check("the turn handed to the model is just that message",
+          content == "Marcelo: @lisa setup", detail=repr(content))
+    check("none of the abandoned attempt reaches the model",
+          "familia marciana" not in str(reasoner.calls[0]["messages"]).lower()
+          and "in&out" not in str(reasoner.calls[0]["messages"]))
+    check("the cursor still skips the whole backlog",
+          st.get("last_whatsapp_message_id") == "h8",
+          detail=str(st.get("last_whatsapp_message_id")))
+
+    # A continuation inside the loop still sees what happens IN the loop.
+    ev.history[OWNER_JID].append(_history(["x"] * 10)[9])  # a later, unrelated message
+    reasoner.replies.append({"actions": []})
+    st = await invoke(graph, text_upsert("1", mid="NEW2"))
+    check("a continuation is not wiped — the loop keeps its own messages",
+          any("@lisa setup" in str(getattr(m, "content", ""))
+              for m in (st.get("messages") or [])))
+
+    # Everything else still seeds history as before.
+    ev2 = FakeEvolution()
+    ev2.history[OWNER_JID] = _history(["earlier chatter", "more chatter"])
+    r2 = StubReasoner([{"actions": []}])
+    deps2, graph2, ev2, _, _ = build(evolution=ev2, reasoner=r2)
+    st = await invoke(graph2, text_upsert("@lisa what did I say earlier?", mid="Q1"))
+    check("a NON-setup tag still gets the usual history window",
+          len(st.get("context_message_ids") or []) > 1,
+          detail=str(st.get("context_message_ids")))
+
+    # And a setup tag in someone else's chat is not a setup tag at all.
+    ev3 = FakeEvolution()
+    ev3.history[MAE_JID] = _history(["oi", "tudo bem"])
+    r3 = StubReasoner([{"actions": []}])
+    deps3, graph3, ev3, _, _ = build(evolution=ev3, reasoner=r3)
+    st = await invoke(graph3, text_upsert("@lisa setup", mid="C1", jid=MAE_JID), jid=MAE_JID)
+    check("outside the self-chat the history seeds normally",
+          len(st.get("context_message_ids") or []) > 1,
+          detail=str(st.get("context_message_ids")))
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
                p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
-               p10_live_regressions, p11_scopes, p12_layout, p13_group_enrolment):
+               p10_live_regressions, p11_scopes, p12_layout, p13_group_enrolment,
+               p14_setup_starts_clean):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]

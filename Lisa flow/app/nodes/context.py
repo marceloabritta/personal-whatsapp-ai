@@ -13,6 +13,7 @@ import asyncio
 from langchain_core.messages import RemoveMessage
 
 from ..identity import is_own_message
+from ..skills.setup import setup_matcher
 from ..state import MessageState
 from ..trace import Trace
 from ..whatsapp import build_labeled_transcript, label_for
@@ -232,8 +233,23 @@ async def context_node(
     # A fresh @mary tag opens a new loop → start from a clean context window.
     reset = state.get("trigger") == "tag"
 
+    # ...except for SETUP, which starts from nothing at all. Configuring the assistant is not a
+    # conversation with history: it is a form. Seeding the usual 30 messages replayed the
+    # PREVIOUS setup attempt, and the model picked it up mid-flow — a fresh "@lisa setup" came
+    # back already asking which direction for a group named in an earlier, abandoned session,
+    # then proposed a write with an empty chat_key. So a setup tag seeds only the message that
+    # opened it; everything the flow needs (a card, a group, the list) is surfaced within the
+    # loop itself. Recognised programmatically, by the same matcher the router uses, because
+    # `route` has not run yet at this point.
+    setup_open = bool(
+        reset and state.get("tag") and state.get("is_self_chat")
+        and setup_matcher(state.get("text") or "") == "yes"
+    )
+
     records = await evolution.fetch_history(jid)  # oldest → newest
-    if reset or not state.get("initialized"):
+    if setup_open:
+        new = []  # the race guard below supplies the triggering message itself
+    elif reset or not state.get("initialized"):
         new = records[-window:]
     else:
         new = _after_cursor(records, state.get("last_whatsapp_message_id"), window)
@@ -285,6 +301,11 @@ async def context_node(
     transcript = build_labeled_transcript(new, owner)
     ids = [r["id"] for r in new if r.get("id")]
     newest = ids[-1] if ids else state.get("last_whatsapp_message_id")
+    if setup_open and records:
+        # Seeding nothing must not leave the cursor behind the backlog: without this the next
+        # turn would read everything after the old cursor and hand back the very history this
+        # branch exists to skip.
+        newest = records[-1]["id"]
 
     # Compositional reply-to-audio: the owner referenced a voice note that isn't in the window.
     # Transcribe it and inject one explicit line — no speaker-label guessing about who spoke it.
@@ -312,7 +333,7 @@ async def context_node(
     trace.code(
         tid, node="context", loop_id=loop_id,
         initialized=bool(state.get("initialized")),
-        reset=reset, ingested=len(new), context_message_ids=ids,
+        reset=reset, setup_open=setup_open, ingested=len(new), context_message_ids=ids,
     )
 
     update: dict = {
