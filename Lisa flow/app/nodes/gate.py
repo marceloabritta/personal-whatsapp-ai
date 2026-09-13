@@ -33,7 +33,8 @@ def gate_node(state: MessageState, *, sessions, roster=None, settings=None,
     if state.get("is_audio") and roster is not None and settings is not None \
             and settings.auto_transcribe_enabled and settings.transcription_enabled:
         rule = roster.should_transcribe(
-            [state.get("chat_key"), state.get("alt_key")], bool(state["from_me"])
+            [state.get("chat_key"), state.get("alt_key")], bool(state["from_me"]),
+            state.get("chat_kind") or "contact",
         )
         if rule:
             # A listening window open on this chat means Lisa is mid-conversation here: post the

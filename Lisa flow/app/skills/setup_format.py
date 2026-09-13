@@ -8,7 +8,9 @@ Only two languages render programmatically (en/pt), matching the calendar format
 else falls back to the model (see nodes/respond.py)."""
 from __future__ import annotations
 
-from ..roster import BOTH, DIRECTION_CHOICES, INBOUND, OUTBOUND
+from ..roster import (
+    ALL_CONTACTS, ALL_GROUPS, BOTH, DIRECTION_CHOICES, INBOUND, OUTBOUND, SCOPE_KIND,
+)
 
 LANGS = ("en", "pt")
 
@@ -19,6 +21,25 @@ LABEL = {INBOUND: "inbound", OUTBOUND: "outbound", BOTH: "in & out"}
 
 def label_of(direction: str | None) -> str:
     return LABEL.get(direction or "", direction or "?")
+
+
+# Blanket rules read as plain English rows, not as keys.
+SCOPE_LABEL = {
+    "en": {ALL_CONTACTS: "All contacts", ALL_GROUPS: "All groups"},
+    "pt": {ALL_CONTACTS: "Todos os contatos", ALL_GROUPS: "Todos os grupos"},
+}
+
+
+def scope_label(key: str, lang: str = "en") -> str:
+    table = SCOPE_LABEL["pt" if (lang or "en").startswith("pt") else "en"]
+    return table.get(key, key)
+
+
+def row_label(rule: dict, lang: str = "en") -> str:
+    """What a row is called in the list and in a confirmation."""
+    if rule.get("kind") == SCOPE_KIND:
+        return scope_label(rule["chat_key"], lang)
+    return rule.get("label") or rule.get("chat_key") or "?"
 
 
 def _lang(state: dict) -> str:
@@ -50,6 +71,15 @@ def target_key(action: dict, state: dict) -> str:
 
 def compose_enroll(action: dict, state: dict) -> str:
     key = target_key(action, state)
+    lang = _lang(state)
+    if key in (ALL_CONTACTS, ALL_GROUPS):
+        name = scope_label(key, lang)
+        d = label_of(action.get("direction"))
+        if lang == "pt":
+            return (f"Confirmar — *{name}*: transcrever *{d}* em todas essas conversas, "
+                    f"inclusive as que não estão na lista. Aplico?")
+        return (f"Confirm — *{name}*: auto-transcribe *{d}* across all of them, including chats "
+                f"not on the list. Apply it?")
     view = _view(state, key)
     name = action.get("label") or _name(view, key)
     kind = view.get("kind") or "contact"
@@ -84,6 +114,11 @@ def compose_update(action: dict, state: dict) -> str:
 
 def compose_remove(action: dict, state: dict) -> str:
     key = target_key(action, state)
+    if key in (ALL_CONTACTS, ALL_GROUPS):
+        name = scope_label(key, _lang(state))
+        return (f"Limpar *{name}*? Só as conversas listadas continuam."
+                if _lang(state) == "pt" else
+                f"Clear *{name}*? Only the chats on the list keep being transcribed.")
     view = _view(state, key)
     name = _name(view, key)
     n = _ordinal_of(state, key, action)
@@ -114,35 +149,47 @@ def _ordinal_lookup(state: dict, key: str) -> str:
 # --- result rendering -----------------------------------------------------------------------
 
 def fmt_list(results: list, state: dict) -> str:
-    """The roster, contacts and groups under separate titles, numbered in ONE sequence.
+    """Everything configured: blanket rules, then contacts, then groups — each titled, all
+    numbered in ONE sequence so any row can be edited or removed by its number.
 
-    The continuous numbering is what makes "edit 5" unambiguous, and the titles are what make it
-    readable — so the sections are cosmetic and the numbers are the handle."""
+    The blanket section is listed FIRST because it explains the rest: with "All contacts:
+    outbound" set, a contact that appears nowhere below is still having your audio written out."""
     data = (results[0].get("data") or {}) if results else {}
+    scopes = data.get("scopes") or []
     contacts = data.get("contacts") or []
     groups = data.get("groups") or []
     pt = _lang(state) == "pt"
-    if not contacts and not groups:
+    lang = "pt" if pt else "en"
+    if not scopes and not contacts and not groups:
         return ("Transcrição — nada configurado ainda.\n\n"
                 "Para adicionar um contato, me encaminhe o cartão dele. "
-                "Para um grupo, é só dizer o nome." if pt else
-                "Transcription — nothing enrolled yet.\n\n"
+                "Para um grupo, é só dizer o nome.\n"
+                'Ou ligue para todos de uma vez: "todos os contatos, outbound".' if pt else
+                "Transcription — nothing configured yet.\n\n"
                 "To add a contact, forward me their contact card. "
-                "To add a group, just tell me its name.")
+                "To add a group, just tell me its name.\n"
+                'Or set them all at once: "all contacts, outbound".')
 
+    rows = scopes + contacts + groups
     total = len(contacts) + len(groups)
     head = (f"Transcrição — {total} conversa(s)" if pt else
             f"Transcription — {total} chat{'s' if total != 1 else ''}")
-    width = max((len(r.get("label") or r["chat_key"]) for r in contacts + groups), default=0)
+    if scopes:
+        head += (" + regras gerais" if pt else " + blanket rules")
+    width = max((len(row_label(r, lang)) for r in rows), default=0)
     lines = [head]
-    for title, bucket in ((("Contatos" if pt else "Contacts"), contacts),
-                          (("Grupos" if pt else "Groups"), groups)):
+    sections = (
+        (("Todos" if pt else "Everyone"), scopes),
+        (("Contatos" if pt else "Contacts"), contacts),
+        (("Grupos" if pt else "Groups"), groups),
+    )
+    for title, bucket in sections:
         if not bucket:
             continue  # an empty section is omitted, not printed empty
         lines.append("")
         lines.append(f"*{title}*")
         for r in bucket:
-            name = r.get("label") or r["chat_key"]
+            name = row_label(r, lang)
             lines.append(f"{r['n']:>2}. {name.ljust(width)}   {label_of(r.get('direction'))}")
     lines.append("")
     lines.append('Diga "edita 1 pra in & out" ou "remove 2".' if pt else
@@ -177,7 +224,7 @@ def direction_choices(lang: str = "en") -> str:
 
 def fmt_enroll(results: list, state: dict) -> str:
     data = (results[0].get("data") or {}) if results else {}
-    name = data.get("label") or data.get("chat_key") or "?"
+    name = row_label(data, _lang(state)) if data.get("chat_key") else "?"
     d = label_of(data.get("direction"))
     pt = _lang(state) == "pt"
     return f"Pronto. {name} → {d}." if pt else f"Done. {name} → {d}."
@@ -185,7 +232,7 @@ def fmt_enroll(results: list, state: dict) -> str:
 
 def fmt_update(results: list, state: dict) -> str:
     data = (results[0].get("data") or {}) if results else {}
-    name = data.get("label") or data.get("chat_key") or "?"
+    name = row_label(data, _lang(state)) if data.get("chat_key") else "?"
     d = label_of(data.get("to") or data.get("direction"))
     pt = _lang(state) == "pt"
     return f"Pronto. {name} → {d}." if pt else f"Done. {name} → {d}."
@@ -194,18 +241,23 @@ def fmt_update(results: list, state: dict) -> str:
 def fmt_remove(results: list, state: dict) -> str:
     """A delete reports what went, then re-lists — the receipt, and the new numbering."""
     data = (results[0].get("data") or {}) if results else {}
-    name = data.get("label") or data.get("chat_key") or "?"
+    name = row_label(data, _lang(state)) if data.get("chat_key") else "?"
     pt = _lang(state) == "pt"
     head = (f"Removido. {name} saiu da lista." if pt else
             f"Removed. {name} is off the list.")
     remaining = data.get("remaining") or []
-    if not remaining:
+    scopes = data.get("scopes") or []
+    if not remaining and not scopes:
         return head
-    contacts, groups, n = [], [], 0
+    numbered_s, contacts, groups, n = [], [], [], 0
+    for rule in scopes:
+        n += 1
+        numbered_s.append({**rule, "n": n})
     for rule in remaining:
         n += 1
         (groups if rule.get("kind") == "group" else contacts).append({**rule, "n": n})
-    relist = fmt_list([{"data": {"contacts": contacts, "groups": groups}}], state)
+    relist = fmt_list([{"data": {"scopes": numbered_s, "contacts": contacts,
+                                 "groups": groups}}], state)
     return f"{head}\n\n{relist}"
 
 

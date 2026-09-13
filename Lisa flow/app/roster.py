@@ -43,10 +43,38 @@ DIRECTION_ALIASES = {
 # The numbered choice, in the fixed order it is always presented in.
 DIRECTION_CHOICES = ((1, INBOUND), (2, OUTBOUND), (3, BOTH))
 
+# Blanket rules. These are not chats — they are the default for a whole KIND of chat, stored as
+# rows with kind="scope" so there is one table, one snapshot and one code path.
+ALL_CONTACTS = "all_contacts"
+ALL_GROUPS = "all_groups"
+SCOPE_KEYS = (ALL_CONTACTS, ALL_GROUPS)
+SCOPE_ALIASES = {
+    "all_contacts": ALL_CONTACTS, "all contacts": ALL_CONTACTS, "all chats": ALL_CONTACTS,
+    "contacts": ALL_CONTACTS, "everyone": ALL_CONTACTS, "todos os contatos": ALL_CONTACTS,
+    "all_groups": ALL_GROUPS, "all groups": ALL_GROUPS, "groups": ALL_GROUPS,
+    "todos os grupos": ALL_GROUPS,
+}
+SCOPE_KIND = "scope"
+
+
+def normalize_scope(value: str | None) -> Optional[str]:
+    """A blanket-rule key, or None when this is an ordinary chat key."""
+    return SCOPE_ALIASES.get((value or "").strip().lower())
+
+
+def scope_for_kind(kind: str) -> str:
+    return ALL_GROUPS if kind == "group" else ALL_CONTACTS
+
 
 def normalize_direction(value: str | None) -> Optional[str]:
     """A direction as stored, or None when it is not one of the three."""
     return DIRECTION_ALIASES.get((value or "").strip().lower())
+
+
+def make_scope(key: str, direction: str) -> dict:
+    """A blanket rule row. It names no chat, so it carries no JID and no label."""
+    return {"chat_key": key, "chat_jid": "", "alt_key": None, "label": None,
+            "kind": SCOPE_KIND, "direction": direction}
 
 
 def make_rule(*, chat_key: str, chat_jid: str, direction: str, kind: str = "contact",
@@ -70,12 +98,18 @@ class Roster:
         self._task: asyncio.Task | None = None
 
     # --- the hot path (pure, no I/O) ------------------------------------------------------
-    def should_transcribe(self, keys: list[str] | tuple, from_me: bool) -> Optional[dict]:
+    def should_transcribe(self, keys: list[str] | tuple, from_me: bool,
+                          kind: str = "contact") -> Optional[dict]:
         """The rule covering this chat and direction, or None.
 
         `keys` are the chat's identities — its own key plus the `@lid`/phone twin Evolution
         reports as `remoteJidAlt`, since a 1:1 persists inbound under one and outbound under the
-        other. Called from the gate on every audio message: no awaits, no exceptions."""
+        other. Called from the gate on every audio message: no awaits, no exceptions.
+
+        A chat's own rule and the blanket rule for its kind COMPOSE — either one covering the
+        direction is enough. That is what makes "all contacts: outbound, and Mãe: in & out" mean
+        what it reads like: everyone gets my audio written out, and Mãe's comes back too. An
+        override would instead have silently switched the blanket rule off for Mãe."""
         if not self._ready:
             return None
         want = OUTBOUND if from_me else INBOUND
@@ -83,16 +117,24 @@ class Roster:
             if not key:
                 continue
             rule = self._index.get(key)
-            if rule and rule["direction"] in (want, BOTH):
+            if rule and rule.get("kind") != SCOPE_KIND and rule["direction"] in (want, BOTH):
                 return rule
+        scope = self._rules.get(scope_for_kind(kind))
+        if scope and scope["direction"] in (want, BOTH):
+            return scope
         return None
 
     def snapshot(self) -> list[dict]:
-        """Every rule, for the setup flow's list. Sorted by label within kind."""
+        """Every CHAT rule, for the setup flow's list. Sorted by label within kind.
+        Blanket rules are excluded — they are not chats; see `scopes()`."""
         return sorted(
-            self._rules.values(),
+            (r for r in self._rules.values() if r.get("kind") != SCOPE_KIND),
             key=lambda r: (r.get("kind") != "contact", (r.get("label") or r["chat_key"]).lower()),
         )
+
+    def scopes(self) -> list[dict]:
+        """The blanket rules that are set, in a fixed order (contacts, then groups)."""
+        return [self._rules[k] for k in SCOPE_KEYS if k in self._rules]
 
     def get(self, chat_key: str) -> Optional[dict]:
         return self._rules.get(chat_key)

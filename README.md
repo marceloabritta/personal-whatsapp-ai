@@ -42,7 +42,11 @@ Configure it from the chat with yourself — nowhere else:
 Add a **contact** by forwarding their contact card (the number is read from the vCard, never
 guessed); add a **group** by name (matched against your own chat list, most recently active
 first). Each chat is set to **inbound** (what they send), **outbound** (what you send), or
-**in & out**. `setup` also lists what is active — contacts and groups titled separately but
+**in & out**.
+
+Two blanket rules cover whole categories: **all contacts** and **all groups**, each with its own
+direction. A chat's own rule and the blanket rule for its kind add up, so "all contacts:
+outbound" plus "Mãe: in & out" writes out your audio for everyone and brings Mãe's back too. `setup` also lists what is active — contacts and groups titled separately but
 numbered in one sequence, so "edit 2 to outbound" or "remove 5" is enough — and every change
 is confirmed before it is written.
 

@@ -27,14 +27,19 @@ from app.echoes import InMemoryEchoes  # noqa: E402
 from app.graph import build_graph  # noqa: E402
 from app.intent import detect_language  # noqa: E402
 from app.nodes.context import _card_line, _collect_cards  # noqa: E402
-from app.roster import DailyCap, Roster, make_rule, normalize_direction  # noqa: E402
+from app.roster import (  # noqa: E402
+    ALL_CONTACTS, ALL_GROUPS, DailyCap, Roster, make_rule, make_scope,
+    normalize_direction, normalize_scope,
+)
 from app.sessions import InMemorySessions  # noqa: E402
 from app.skills import (  # noqa: E402
     SKILLS, confirm_policies, count_optionals, count_unions, handlers,
     output_schema_for, render_policies, resolve_gates, routable,
 )
 from app.skills.setup import setup_matcher, setup_resolve_gate  # noqa: E402
-from app.skills.setup_format import direction_choices, fmt_list, fmt_menu  # noqa: E402
+from app.skills.setup_format import (  # noqa: E402
+    compose_enroll, direction_choices, fmt_list, fmt_menu,
+)
 from app.threads import make_thread_id  # noqa: E402
 from app.trace import build_trace  # noqa: E402
 from app.transcribe_reply import inline_body  # noqa: E402
@@ -463,7 +468,7 @@ async def p8_crud():
     st = await turn(text_upsert("@lisa setup", mid="s1"))
     check("setup routes in the self-chat", st.get("domain") == "setup")
     check("the empty list is rendered in code",
-          "nothing enrolled yet" in (st.get("reply") or "").lower(),
+          "nothing configured yet" in (st.get("reply") or "").lower(),
           detail=(st.get("reply") or "")[:60])
 
     # 2. a forwarded card, then the enrol proposal
@@ -631,7 +636,7 @@ async def p10_live_regressions():
     check("setup opens in English despite a Portuguese history",
           st.get("session_lang") == "en", detail=str(st.get("session_lang")))
     check("and the reply really is the English rendering",
-          "nothing enrolled yet" in (st.get("reply") or "").lower(),
+          "nothing configured yet" in (st.get("reply") or "").lower(),
           detail=(st.get("reply") or "")[:60])
 
     reasoner2 = StubReasoner([{"actions": [{"task": "setup.list"}]},
@@ -664,10 +669,108 @@ async def p10_live_regressions():
           "never ask him to forward the card again" in GUIDANCE)
 
 
+
+
+# ============ P11 — blanket rules (all contacts / all groups) =============================
+
+async def p11_scopes():
+    print("P11 — blanket rules")
+    r = Roster()
+    # The exact arrangement asked for: help everyone by writing out MY audio, and get Mãe's back.
+    await r.upsert(make_scope(ALL_CONTACTS, "outbound"))
+    await r.upsert(make_rule(chat_key="mae", chat_jid="mae@s.whatsapp.net", direction="both",
+                             label="Mãe"))
+    check("a chat not on the list still gets the blanket direction",
+          (r.should_transcribe(["zzz"], True, "contact") or {}).get("chat_key") == ALL_CONTACTS)
+    check("and NOT the direction the blanket rule excludes",
+          r.should_transcribe(["zzz"], False, "contact") is None)
+    check("the chat's own rule adds to it rather than replacing it",
+          bool(r.should_transcribe(["mae"], False, "contact"))
+          and bool(r.should_transcribe(["mae"], True, "contact")))
+    check("its own rule is what matches, so the trace names the chat",
+          (r.should_transcribe(["mae"], False, "contact") or {}).get("chat_key") == "mae")
+    check("a contacts blanket rule does not leak into groups",
+          r.should_transcribe(["g1"], True, "group") is None)
+    await r.upsert(make_scope(ALL_GROUPS, "inbound"))
+    check("groups take their own blanket rule",
+          (r.should_transcribe(["g1"], False, "group") or {}).get("chat_key") == ALL_GROUPS)
+    check("the two blanket rules are independent",
+          r.should_transcribe(["g1"], True, "group") is None)
+
+    check("blanket rules are kept out of the CHAT list",
+          [x["chat_key"] for x in r.snapshot()] == ["mae"])
+    check("and listed in their own fixed order",
+          [x["chat_key"] for x in r.scopes()] == [ALL_CONTACTS, ALL_GROUPS])
+    check("plain names resolve to the reserved keys",
+          normalize_scope("all chats") == ALL_CONTACTS
+          and normalize_scope("todos os grupos") == ALL_GROUPS
+          and normalize_scope("M\u00e3e") is None)
+
+    await r.remove(ALL_CONTACTS)
+    check("clearing a blanket rule stops covering unlisted chats",
+          r.should_transcribe(["zzz"], True, "contact") is None)
+    check("but leaves the individual chats alone",
+          bool(r.should_transcribe(["mae"], True, "contact")))
+
+    # Through the handler + the write gate.
+    from app.tools.setup import RosterService
+    r2 = Roster()
+    svc = RosterService(Settings(MARY_TRIGGER_TAG="@lisa"), roster=r2)
+    res = await svc.run("enroll", {"chat_key": "all_contacts", "direction": "outbound"})
+    check("a blanket rule is set through the normal enroll verb", res["ok"])
+    check("and stored as a scope, not a chat", (r2.get(ALL_CONTACTS) or {}).get("kind") == "scope")
+    patched, err = setup_resolve_gate("enroll", {"chat_key": "all chats", "direction": "outbound"},
+                                      {"is_self_chat": True})
+    check("a blanket rule needs nothing surfaced first — it names no chat",
+          err is None and patched["chat_key"] == ALL_CONTACTS)
+    _, err = setup_resolve_gate("enroll", {"chat_key": "all chats", "direction": "outbound"},
+                                {"is_self_chat": False})
+    check("but it is still refused outside the self-chat", err and err["error"] == "not_self_chat")
+
+    await svc.run("enroll", {"chat_key": "mae", "direction": "both", "label": "M\u00e3e"})
+    listed = await svc.run("list", {})
+    check("the list numbers blanket rules FIRST, then chats",
+          listed["data"]["ordinals"] == {"1": ALL_CONTACTS, "2": "mae"},
+          detail=str(listed["data"]["ordinals"]))
+    out = fmt_list([listed], {})
+    check("the list gives blanket rules their own section",
+          "*Everyone*" in out and "All contacts" in out, detail=out[:80])
+    check("and still numbers continuously into the contacts", " 2. M\u00e3e" in out)
+    check("the header flags that blanket rules are in play", "blanket rules" in out)
+
+    conf = compose_enroll({"chat_key": ALL_CONTACTS, "direction": "outbound"}, {})
+    check("the confirmation spells out that it covers unlisted chats",
+          "not on the list" in conf, detail=conf)
+    check("a blanket rule reads as a name, never as a key", "all_contacts" not in conf)
+
+    from app.tools.setup import GUIDANCE
+    check("the model is told the two compose rather than override",
+          "ADD UP" in GUIDANCE)
+    check("and told to be honest that excluding one chat is not possible yet",
+          "EXCLUDED" in GUIDANCE)
+
+
+# ============ P12 — the transcript layout ================================================
+
+async def p12_layout():
+    print("P12 — transcript layout")
+    body = inline_body("linha um\nlinha dois", "pt")
+    check("Portuguese leads with Transcri\u00e7\u00e3o:", body.startswith("Transcri\u00e7\u00e3o:\n\n"),
+          detail=repr(body[:24]))
+    body_en = inline_body("line one\nline two", "en")
+    check("English leads with Transcription:", body_en.startswith("Transcription:\n\n"),
+          detail=repr(body_en[:24]))
+    check("the old preamble is gone", "Here is the transcribed audio" not in body_en)
+    check("the transcript still follows after a blank line, in italic",
+          body_en.splitlines()[2] == "_line one_", detail=repr(body_en.splitlines()[:3]))
+    check("every line is italicised on its own (italic does not span breaks)",
+          body_en.splitlines()[3] == "_line two_")
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
                p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
-               p10_live_regressions):
+               p10_live_regressions, p11_scopes, p12_layout):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]

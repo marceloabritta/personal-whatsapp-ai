@@ -18,6 +18,7 @@ from __future__ import annotations
 import difflib
 import unicodedata
 
+from ..roster import normalize_scope
 from ..tools.setup import DESCRIBE, GUIDANCE, RosterService
 from ..tools.setup_schemas import SETUP_TASK_SCHEMAS
 from .base import Skill
@@ -84,6 +85,12 @@ def setup_resolve_gate(verb: str, inputs: dict, state: dict):
 
     key = (inputs.get("chat_key") or "").strip()
     ordinal = inputs.get("ordinal")
+
+    # A blanket rule names no chat, so there is nothing to have surfaced: "all contacts" is
+    # always a valid target. Normalised here so the handler sees the canonical key.
+    scope = normalize_scope(key)
+    if scope and ordinal is None:
+        return {**{k: v for k, v in inputs.items() if k != "ordinal"}, "chat_key": scope}, None
     if ordinal is not None:  # the ordinal wins — it is what the owner actually typed
         key = listed.get(str(ordinal)) or ""
         if not key:

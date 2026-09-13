@@ -23,14 +23,14 @@ from .identity import frame
 # Per-language reply copy (matched to the transcript's detected language; en fallback).
 MESSAGES = {
     "en": {
-        "prefix": "Here is the transcribed audio:",
+        "prefix": "Transcription:",
         "long": "The audio is long, so I put the transcript in a file. Here it is.",
         "empty": "I transcribed it, but no speech came through (silent or very short audio).",
         "failed": "I couldn't transcribe that audio — the download or transcription failed. "
                   "Want me to try again?",
     },
     "pt": {
-        "prefix": "Aqui está o áudio transcrito:",
+        "prefix": "Transcrição:",
         "long": "O áudio é longo, então coloquei a transcrição em um arquivo. Aqui está.",
         "empty": "Transcrevi, mas não saiu nenhuma fala (áudio silencioso ou muito curto).",
         "failed": "Não consegui transcrever esse áudio — o download ou a transcrição falhou. "

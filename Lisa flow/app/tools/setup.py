@@ -15,14 +15,17 @@ import logging
 from typing import Any, Optional
 
 from .. import chatfind
-from ..roster import make_rule, normalize_direction
+from ..roster import (
+    SCOPE_KIND, make_rule, make_scope, normalize_direction, normalize_scope,
+)
 from ..whatsapp import chat_kind
 from .base import ActionResult
 
 log = logging.getLogger("mary.setup")
 
-DESCRIBE = ("Configure which chats have their voice notes transcribed automatically — "
-            "{owner_name}'s setup, available only in his chat with himself.")
+DESCRIBE = ("Configure which chats have their voice notes transcribed automatically — one at a "
+            "time, or all contacts / all groups at once. {owner_name}'s setup, available only in "
+            "his chat with himself.")
 
 GUIDANCE = """You are running SETUP: {owner_name} is configuring how his assistant behaves. This only ever happens in his chat with himself, so there is no one else in the conversation and no one else to consider.
 
@@ -40,9 +43,13 @@ How a chat is named, and this is not negotiable:
 - **A card may carry several numbers.** When it does, the line reads `several numbers, ask which:` followed by a numbered list. Show him that list and ask which one — he answers with the digit. Never pick for him, and never ask him to forward the card again: every number on it is already available to you, so re-reading the line you were given is always better than asking for it twice. A number marked "not on WhatsApp" cannot receive anything; say so rather than offering it.
 - **A group is added by name.** Call `setup.resolve` with what he called it. It returns real groups from his chat list, most recently active first. If it returns more than one, show them numbered with their last activity and ask which; never pick for him.
 
+**Blanket rules.** Besides individual chats, two defaults cover whole categories: `all_contacts` (every 1:1) and `all_groups` (every group). Set one by using it as the `chat_key`: `setup.enroll` with `chat_key: "all_contacts"`, `direction: "outbound"`. Clear it with `setup.remove` and the same key.
+
+A chat's own rule and the blanket rule for its kind ADD UP — either one covering a direction is enough. So "all_contacts: outbound" plus "Mãe: in & out" means everyone gets {owner_name}'s audio written out, and Mãe's own audio comes back as well. Setting a chat does NOT switch the blanket rule off for it. If {owner_name} asks for something that would need a chat EXCLUDED from a blanket rule, say plainly that it is not possible yet — clearing the blanket rule is the only way — rather than pretending it worked.
+
 Working with the list:
 
-- `setup.list` shows what is enrolled, contacts and groups under separate titles but numbered in one continuous sequence. Those numbers are handles: after a list, "edit 5 to outbound" or "remove 2" targets a row by `ordinal`. Pass the number he said as `ordinal` — do not try to reconstruct a chat_key from it.
+- `setup.list` shows everything configured — blanket rules, then contacts, then groups, under separate titles but numbered in one continuous sequence. Those numbers are handles: after a list, "edit 5 to outbound" or "remove 2" targets a row by `ordinal`. Pass the number he said as `ordinal` — do not try to reconstruct a chat_key from it.
 - Opening setup with nothing else to do: show the menu and the current list together, so he sees the state immediately.
 
 Confirmation. `enroll`, `update` and `remove` all change his configuration, so they need his go-ahead. Emit the action with `confirmed: false` and say nothing about it — the system composes the confirmation question, shows it to him, and runs the action itself when he agrees. Never claim something is registered before it has run; a result line tells you it happened.
@@ -52,7 +59,7 @@ Keep every message short. State what changed, or ask the one question you need."
 # The setup items. A second item (quiet hours, reply language) drops in here.
 ITEMS = [
     {"key": "transcription", "title": "Transcription",
-     "summary": "Auto-transcribe voice notes in chats you choose."},
+     "summary": "Auto-transcribe voice notes — per chat, or across all contacts / all groups."},
 ]
 
 _DIRECTION_HELP = 'direction must be one of: inbound, outbound, both (shown as "in & out")'
@@ -89,30 +96,32 @@ class RosterService:
                 "summary": "Setup items: " + ", ".join(i["title"] for i in ITEMS)}
 
     async def _list(self, inputs: dict) -> ActionResult:
-        """Every rule, split by kind and numbered continuously. The ordinals are published in
-        `data` so the execute node can remember them — that is what makes "edit 5" resolvable."""
+        """Everything configured, numbered continuously across all three sections — blanket
+        rules first, then contacts, then groups. The ordinals are published in `data` so the
+        execute node can remember them; that is what makes "edit 5" resolvable."""
         await self._sync()
+        scopes = self.roster.scopes()
         rules = self.roster.snapshot()
         contacts = [r for r in rules if r.get("kind") != "group"]
         groups = [r for r in rules if r.get("kind") == "group"]
 
         ordinals: dict[str, str] = {}
-        numbered_c, numbered_g, n = [], [], 0
-        for bucket, out in ((contacts, numbered_c), (groups, numbered_g)):
+        numbered_s, numbered_c, numbered_g, n = [], [], [], 0
+        for bucket, out in ((scopes, numbered_s), (contacts, numbered_c), (groups, numbered_g)):
             for rule in bucket:
                 n += 1
                 ordinals[str(n)] = rule["chat_key"]
                 out.append({**rule, "n": n})
 
-        total = len(rules)
+        every = numbered_s + numbered_c + numbered_g
         return {
             "ok": True,
-            "data": {"contacts": numbered_c, "groups": numbered_g, "ordinals": ordinals,
-                     "seen_keys": [r["chat_key"] for r in rules], "total": total},
-            "summary": (f"{total} chat(s) enrolled: "
-                        + "; ".join(f"{r['n']}. {r.get('label') or r['chat_key']} "
-                                    f"({r['direction']})" for r in numbered_c + numbered_g)
-                        if total else "Nothing is enrolled for auto-transcription yet."),
+            "data": {"scopes": numbered_s, "contacts": numbered_c, "groups": numbered_g,
+                     "ordinals": ordinals, "seen_keys": [r["chat_key"] for r in scopes + rules],
+                     "total": len(rules), "scope_total": len(scopes)},
+            "summary": ("; ".join(f"{r['n']}. {r.get('label') or r['chat_key']} "
+                                  f"({r['direction']})" for r in every)
+                        if every else "Nothing is configured for auto-transcription yet."),
         }
 
     async def _resolve(self, inputs: dict) -> ActionResult:
@@ -151,6 +160,19 @@ class RosterService:
     async def _enroll(self, inputs: dict) -> ActionResult:
         key = (inputs.get("chat_key") or "").strip()
         direction = normalize_direction(inputs.get("direction"))
+        scope = normalize_scope(key)
+        if scope:
+            # A blanket rule: the default for a whole KIND of chat. It names no chat, so none of
+            # the resolution below applies.
+            if direction is None:
+                return {"ok": False, "error": "invalid_direction", "summary": _DIRECTION_HELP}
+            await self._sync()
+            existed = self.roster.get(scope)
+            rule = make_scope(scope, direction)
+            await self.roster.upsert(rule)
+            return {"ok": True,
+                    "data": {**rule, "existed": bool(existed), "seen_keys": [scope]},
+                    "summary": f"{scope} set to {direction}."}
         if not key:
             return {"ok": False, "error": "unresolved_id",
                     "summary": "No chat to enrol — forward a contact card, or name a group first."}
@@ -179,7 +201,7 @@ class RosterService:
                             else f"{label} enrolled ({direction}).")}
 
     async def _update(self, inputs: dict) -> ActionResult:
-        key = (inputs.get("chat_key") or "").strip()
+        key = normalize_scope(inputs.get("chat_key")) or (inputs.get("chat_key") or "").strip()
         direction = normalize_direction(inputs.get("direction"))
         if direction is None:
             return {"ok": False, "error": "invalid_direction", "summary": _DIRECTION_HELP}
@@ -196,7 +218,7 @@ class RosterService:
                 "summary": f"{label}: {before['direction']} -> {direction}."}
 
     async def _remove(self, inputs: dict) -> ActionResult:
-        key = (inputs.get("chat_key") or "").strip()
+        key = normalize_scope(inputs.get("chat_key")) or (inputs.get("chat_key") or "").strip()
         await self._sync()
         gone = await self.roster.remove(key)
         if gone is None:
@@ -204,6 +226,11 @@ class RosterService:
                     "summary": "That chat is not on the list."}
         remaining = self.roster.snapshot()
         label = gone.get("label") or key
+        if gone.get("kind") == SCOPE_KIND:
+            return {"ok": True,
+                    "data": {**gone, "remaining": remaining, "scopes": self.roster.scopes(),
+                             "removed": True},
+                    "summary": f"{key} cleared."}
         return {"ok": True,
                 "data": {**gone, "remaining": remaining, "removed": True},
                 "summary": f"{label} removed. {len(remaining)} chat(s) still enrolled."}
