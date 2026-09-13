@@ -196,11 +196,13 @@ def _ordinal_lookup(state: dict, key: str) -> str:
 # --- result rendering -----------------------------------------------------------------------
 
 def fmt_list(results: list, state: dict) -> str:
-    """Everything configured: blanket rules, then contacts, then groups — each titled, all
-    numbered in ONE sequence so any row can be edited or removed by its number.
+    """What is configured.
 
-    The blanket section is listed FIRST because it explains the rest: with "All contacts:
-    outbound" set, a contact that appears nowhere below is still having your audio written out."""
+    The blanket rules sit ABOVE the list as two plain lines, each shown only when it is set,
+    because they are not chats and numbering them would push the chats off 1. The chats are then
+    numbered in one sequence across Contacts and Groups, so any row can be edited or removed by
+    its number; a blanket rule is edited by name ("all contacts inbound"), which is already the
+    shortest way to say it."""
     data = (results[0].get("data") or {}) if results else {}
     scopes = data.get("scopes") or []
     contacts = data.get("contacts") or []
@@ -217,20 +219,17 @@ def fmt_list(results: list, state: dict) -> str:
                 "To add a group, just tell me its name.\n"
                 'Or set them all at once: "all contacts, outbound".')
 
-    rows = scopes + contacts + groups
-    total = len(contacts) + len(groups)
-    head = (f"Transcrição — {total} conversa(s)" if pt else
-            f"Transcription — {total} chat{'s' if total != 1 else ''}")
+    lines = ["*Transcrição*" if pt else "*Transcription*"]
+
+    # The blanket rules, one line each, only when set.
     if scopes:
-        head += (" + regras gerais" if pt else " + blanket rules")
-    width = max((len(row_label(r, lang)) for r in rows), default=0)
-    lines = [head]
-    sections = (
-        (("Todos" if pt else "Everyone"), scopes),
-        (("Contatos" if pt else "Contacts"), contacts),
-        (("Grupos" if pt else "Groups"), groups),
-    )
-    for title, bucket in sections:
+        lines.append("")
+        for rule in scopes:
+            lines.append(f"{scope_label(rule['chat_key'], lang)} - {label_of(rule.get('direction'))}")
+
+    width = max((len(row_label(r, lang)) for r in contacts + groups), default=0)
+    for title, bucket in ((("Contatos" if pt else "Contacts"), contacts),
+                          (("Grupos" if pt else "Groups"), groups)):
         if not bucket:
             continue  # an empty section is omitted, not printed empty
         lines.append("")
@@ -238,9 +237,10 @@ def fmt_list(results: list, state: dict) -> str:
         for r in bucket:
             name = row_label(r, lang)
             lines.append(f"{r['n']:>2}. {name.ljust(width)}   {label_of(r.get('direction'))}")
+
     lines.append("")
-    lines.append('Diga "edita 1 pra in & out" ou "remove 2".' if pt else
-                 'Say "edit 1 to in & out" or "remove 2".')
+    lines.append('Diga "edita 1 pra in & out", "remove 2", ou "todos os contatos inbound".' if pt
+                 else 'Say "edit 1 to in & out", "remove 2", or "all contacts inbound".')
     return "\n".join(lines)
 
 
@@ -339,14 +339,11 @@ def fmt_remove(results: list, state: dict) -> str:
     scopes = data.get("scopes") or []
     if not remaining and not scopes:
         return head
-    numbered_s, contacts, groups, n = [], [], [], 0
-    for rule in scopes:
-        n += 1
-        numbered_s.append({**rule, "n": n})
+    contacts, groups, n = [], [], 0
     for rule in remaining:
         n += 1
         (groups if rule.get("kind") == "group" else contacts).append({**rule, "n": n})
-    relist = fmt_list([{"data": {"scopes": numbered_s, "contacts": contacts,
+    relist = fmt_list([{"data": {"scopes": scopes, "contacts": contacts,
                                  "groups": groups}}], state)
     return f"{head}\n\n{relist}"
 

@@ -549,7 +549,7 @@ async def p9_list_render():
             "groups": [{"n": 3, "chat_key": "c", "label": "Casa Abritta", "direction": "inbound",
                         "kind": "group"}]}
     out = fmt_list([{"data": data}], {})
-    check("the header counts the chats", out.startswith("Transcription — 3 chats"))
+    check("it is headed as the transcription list", out.startswith("*Transcription*"))
     check("contacts are titled", "*Contacts*" in out)
     check("groups are titled", "*Groups*" in out)
     check("the group continues the contacts' numbering", " 3. Casa Abritta" in out)
@@ -731,14 +731,17 @@ async def p11_scopes():
 
     await svc.run("enroll", {"chat_key": "mae", "direction": "both", "label": "M\u00e3e"})
     listed = await svc.run("list", {})
-    check("the list numbers blanket rules FIRST, then chats",
-          listed["data"]["ordinals"] == {"1": ALL_CONTACTS, "2": "mae"},
-          detail=str(listed["data"]["ordinals"]))
+    check("ONLY chats are numbered — a blanket rule is named, not numbered",
+          listed["data"]["ordinals"] == {"1": "mae"}, detail=str(listed["data"]["ordinals"]))
     out = fmt_list([listed], {})
-    check("the list gives blanket rules their own section",
-          "*Everyone*" in out and "All contacts" in out, detail=out[:80])
-    check("and still numbers continuously into the contacts", " 2. M\u00e3e" in out)
-    check("the header flags that blanket rules are in play", "blanket rules" in out)
+    check("a set blanket rule is one plain line above the list",
+          "All contacts - outbound" in out, detail=out[:90])
+    check("numbering starts at 1 on the chats", " 1. M\u00e3e" in out)
+    check("the blanket line is not inside a section header",
+          "*Everyone*" not in out)
+    check("an UNSET blanket rule prints no line at all", "All groups" not in out)
+    check("the hint shows both ways to change something",
+          'remove 2' in out and 'all contacts inbound' in out)
 
     conf = compose_enroll({"chat_key": ALL_CONTACTS, "direction": "outbound"}, {})
     check("the confirmation spells out that it covers unlisted chats",

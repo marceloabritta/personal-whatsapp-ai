@@ -112,22 +112,27 @@ class RosterService:
         contacts = [r for r in rules if r.get("kind") != "group"]
         groups = [r for r in rules if r.get("kind") == "group"]
 
+        # Only CHATS are numbered. A blanket rule is named, not numbered — "all contacts" is
+        # already the shortest way to say it, and keeping it out of the sequence means the
+        # numbers line up with the chats they belong to.
         ordinals: dict[str, str] = {}
-        numbered_s, numbered_c, numbered_g, n = [], [], [], 0
-        for bucket, out in ((scopes, numbered_s), (contacts, numbered_c), (groups, numbered_g)):
+        numbered_c, numbered_g, n = [], [], 0
+        for bucket, out in ((contacts, numbered_c), (groups, numbered_g)):
             for rule in bucket:
                 n += 1
                 ordinals[str(n)] = rule["chat_key"]
                 out.append({**rule, "n": n})
 
-        every = numbered_s + numbered_c + numbered_g
+        every = list(scopes) + numbered_c + numbered_g
         return {
             "ok": True,
-            "data": {"scopes": numbered_s, "contacts": numbered_c, "groups": numbered_g,
+            "data": {"scopes": list(scopes), "contacts": numbered_c, "groups": numbered_g,
                      "ordinals": ordinals, "seen_keys": [r["chat_key"] for r in scopes + rules],
                      "total": len(rules), "scope_total": len(scopes)},
-            "summary": ("; ".join(f"{r['n']}. {r.get('label') or r['chat_key']} "
-                                  f"({r['direction']})" for r in every)
+            "summary": ("; ".join(
+                            (f"{r['n']}. " if r.get("n") else "")
+                            + f"{r.get('label') or r['chat_key']} ({r['direction']})"
+                            for r in every)
                         if every else "Nothing is configured for auto-transcription yet."),
         }
 
