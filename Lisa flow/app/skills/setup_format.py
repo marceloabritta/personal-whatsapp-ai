@@ -82,22 +82,27 @@ def resolve_target(action: dict, state: dict) -> tuple[str, str | None]:
     if ordinal is not None:
         return (state.get("listed_chats") or {}).get(str(ordinal)) or "", None
 
-    key = ((action or {}).get("chat_key") or "").strip()
-    if not key:
-        return "", None
     seen_keys = state.get("seen_chat_keys") or []
-    if key in seen_keys:
+    seen_chats = state.get("seen_chats") or {}
+
+    key = ((action or {}).get("chat_key") or "").strip()
+    if key and key in seen_keys:
         return key, None
 
-    seen_chats = state.get("seen_chats") or {}
-    wanted = fold(key)
-    hits = [k for k, v in seen_chats.items()
-            if wanted and fold((v or {}).get("label") or "") == wanted]
-    if len(hits) == 1:
-        return hits[0], None
-    if len(hits) > 1:
-        return "", key
-    return key, None  # unknown; the gate reports it
+    # Fall back to the NAME — from chat_key when a label was put there, or from the `label`
+    # field, which the model often fills correctly even when it fumbles the key.
+    for candidate in (key, ((action or {}).get("label") or "").strip()):
+        wanted = fold(candidate)
+        if not wanted:
+            continue
+        hits = [k for k, v in seen_chats.items()
+                if fold((v or {}).get("label") or "") == wanted]
+        if len(hits) == 1:
+            return hits[0], None
+        if len(hits) > 1:
+            return "", candidate
+
+    return key, None  # nothing resolved; the gate reports it
 
 
 def target_key(action: dict, state: dict) -> str:

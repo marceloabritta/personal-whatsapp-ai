@@ -853,7 +853,7 @@ async def p13_group_enrolment():
 
     from app.tools.setup import GUIDANCE
     check("the model is told to enrol a group BY NUMBER",
-          "ordinal: 1" in GUIDANCE and "never a `chat_key` you typed yourself" in GUIDANCE)
+          "ordinal: 1" in GUIDANCE and "LEAVE `chat_key` OUT" in GUIDANCE)
 
 
 # ============ P14 — a setup tag starts from nothing =======================================
@@ -924,11 +924,75 @@ async def p14_setup_starts_clean():
           detail=str(st.get("context_message_ids")))
 
 
+# ============ P15 — the enroll schema forced an invented key ==============================
+#
+# 2026-09-13, two failures at the same final step. `chat_key` was REQUIRED on setup.enroll, so
+# the enforced JSON left no way to enrol by ordinal without filling it — the model sent
+# "__resolve_ordinal_1__" once and "" the next time, and the write gate refused both. A required
+# field the caller cannot legitimately fill is a trap, not a contract.
+
+async def p15_enroll_target():
+    print("P15 — enrolling without inventing a key")
+    st = LIVE_GROUPS_STATE
+    key1 = "5511941261921-1363718480"
+
+    b = [x for x in output_schema_for("setup")["properties"]["actions"]["items"]["anyOf"]
+         if x["properties"]["task"]["const"] == "setup.enroll"][0]
+    check("enroll no longer REQUIRES a chat_key",
+          "chat_key" not in b["required"], detail=str(b["required"]))
+    check("only the direction is genuinely required",
+          set(b["required"]) == {"task", "direction"}, detail=str(b["required"]))
+    check("and it can be targeted by ordinal", "ordinal" in b["properties"])
+
+    # The two actions that actually failed.
+    patched, err = setup_resolve_gate(
+        "enroll", {"chat_key": "__resolve_ordinal_1__", "label": "Fam\u00edlia Marciana",
+                   "direction": "both"}, st)
+    check("a placeholder key falls back to the label the model got right",
+          err is None and patched["chat_key"] == key1, detail=str(err or patched.get("chat_key")))
+    patched, err = setup_resolve_gate("enroll", {"ordinal": 1, "direction": "both"}, st)
+    check("an ordinal with NO chat_key at all now works",
+          err is None and patched["chat_key"] == key1)
+    patched, err = setup_resolve_gate(
+        "enroll", {"chat_key": "", "label": "Fam\u00edlia SP", "direction": "inbound"}, st)
+    check("an empty key falls back to the label too",
+          err is None and patched["chat_key"] == "5511941261921-1365590692")
+
+    # The rail did not soften.
+    _, err = setup_resolve_gate("enroll", {"chat_key": "__nope__", "direction": "both"}, st)
+    check("a key AND label that resolve to nothing are still refused",
+          err and err["error"] == "unresolved_id")
+    _, err = setup_resolve_gate("enroll", {"label": "Never Seen", "direction": "both"}, st)
+    check("a label for a chat never surfaced is still refused",
+          err and err["error"] == "unresolved_id")
+    _, err = setup_resolve_gate("enroll", {"direction": "both"}, st)
+    check("naming nothing whatsoever is still refused",
+          err and err["error"] == "unresolved_id")
+    dup = {"is_self_chat": True, "seen_chat_keys": ["a", "b"], "listed_chats": {},
+           "seen_chats": {"a": {"label": "Fam\u00edlia"}, "b": {"label": "Fam\u00edlia"}}}
+    _, err = setup_resolve_gate("enroll", {"label": "Fam\u00edlia", "direction": "both"}, dup)
+    check("an ambiguous label still asks rather than guessing", err and "number" in err["summary"])
+
+    check("the confirmation still names the right group",
+          "Fam\u00edlia Marciana" in compose_enroll(
+              {"chat_key": "__resolve_ordinal_1__", "label": "Fam\u00edlia Marciana",
+               "direction": "both"}, st))
+
+    sc = output_schema_for("setup")
+    check("the schema is still inside Anthropic's caps",
+          count_unions(sc) <= 16 and count_optionals(sc) <= 24,
+          detail=f"{count_unions(sc)} unions / {count_optionals(sc)} optionals")
+
+    from app.tools.setup import GUIDANCE
+    check("the model is told to leave chat_key out entirely",
+          "LEAVE `chat_key` OUT" in GUIDANCE and "never invent a value" in GUIDANCE)
+
+
 async def main() -> None:
     for fn in (p1_roster, p2_auto, p3_delivery, p4_window, p5_setup_structure,
                p6_cards_and_groups, p7_gates, p8_crud, p9_list_render,
                p10_live_regressions, p11_scopes, p12_layout, p13_group_enrolment,
-               p14_setup_starts_clean):
+               p14_setup_starts_clean, p15_enroll_target):
         await fn()
         print()
     total = _checks["pass"] + _checks["fail"]

@@ -43,10 +43,18 @@ LIST = _verb([], {"item": _STR})
 # added from a forwarded card. An empty query is valid and means "show me my recent groups".
 RESOLVE = _verb([], {"query": _STR})
 
-# enroll — add a chat. `chat_key` must have been surfaced this loop (card, resolve, or list).
+# enroll — add a chat. Target it the same three ways `update` and `remove` allow: an `ordinal`
+# from the last list or resolve, a `chat_key` surfaced this loop, or the `label` it was shown
+# under. Only `direction` is required.
+#
+# `chat_key` USED to be required, and that was the bug behind two live failures: the enforced
+# schema left the model no way to enrol by ordinal without inventing a value for chat_key, so it
+# sent "__resolve_ordinal_1__" once and "" the next time. A required field the caller cannot
+# legitimately fill is a trap, not a contract.
 ENROLL = _verb(
-    ["chat_key", "direction"],
-    {"chat_key": _STR, "direction": _DIRECTION, "label": _STR, "confirmed": _CONFIRMED},
+    ["direction"],
+    {"ordinal": _INT, "chat_key": _STR, "direction": _DIRECTION, "label": _STR,
+     "confirmed": _CONFIRMED},
 )
 
 # update — change a rule's direction. Target by ordinal from the last list, or by chat_key.
