@@ -412,14 +412,20 @@ class GoogleCalendarService:
         # Write the dates when either side moved, or when the kind itself is flipping.
         flips = provided(inp, "all_day") and all_day != bool(prev.get("all_day"))
         if new_start or new_end or flips:
+            # events.patch MERGES nested objects: writing {dateTime} over a stored {date}
+            # leaves BOTH set and Google answers 400 "Invalid start time". So a kind flip has
+            # to null the field it is replacing. Only on a patch — an insert has nothing to
+            # merge with, and nulls there are noise.
+            clear = {"dateTime": None, "timeZone": None} if existing is not None else {}
+            clear_date = {"date": None} if existing is not None else {}
             if all_day:
                 first = as_day(new_start or prev.get("start") or "")
                 if first:   # nothing to anchor on (a flip against an event we never read) —
                     last = as_day(new_end) if new_end else self._default_last_day(first, prev)
                     if last < first:
                         last = first    # a backwards span is a typo, not a zero-day event
-                    body["start"] = {"date": first}          # no timeZone — an all-day
-                    body["end"] = {"date": to_wire_end(last)}  # event has no zone at all
+                    body["start"] = {"date": first, **clear}       # no timeZone — an all-day
+                    body["end"] = {"date": to_wire_end(last), **clear}  # has no zone at all
             else:
                 start = new_start or prev.get("start") or ""
                 if is_date_only(start):   # all-day -> timed, and no hour was given
@@ -429,8 +435,8 @@ class GoogleCalendarService:
                 else:
                     dur = inp.get("duration_min") or self.s.default_meeting_minutes
                     end = self._plus_minutes(start, dur)
-                body["start"] = {"dateTime": start, "timeZone": tz}
-                body["end"] = {"dateTime": end, "timeZone": tz}
+                body["start"] = {"dateTime": start, "timeZone": tz, **clear_date}
+                body["end"] = {"dateTime": end, "timeZone": tz, **clear_date}
 
         # Conference INTENT, not a "want a meet" boolean. Removing a Meet is a real instruction
         # with its own wire form (conferenceData: null), and BOTH forms are ignored by Google

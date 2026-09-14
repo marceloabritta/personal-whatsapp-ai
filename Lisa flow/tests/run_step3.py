@@ -1051,16 +1051,33 @@ async def allday_checks() -> None:
     prev_allday = {"all_day": True, "start": "2026-09-14", "end": "2026-09-16"}
     b, _ = svc._body_from({"all_day": False}, existing=prev_allday)
     check("[flip] all-day -> timed writes both sides as dateTime",
-          "dateTime" in b["start"] and "dateTime" in b["end"] and "date" not in b["start"])
+          b["start"].get("dateTime") and b["end"].get("dateTime")
+          and b["start"].get("date", "MISSING") is None)
     b, _ = svc._body_from({"all_day": True},
                           existing={"all_day": False, "start": "2026-09-14T15:00:00-03:00"})
     check("[flip] timed -> all-day writes both sides as date",
-          b["start"] == {"date": "2026-09-14"} and "date" in b["end"])
+          b["start"].get("date") == "2026-09-14" and b["end"].get("date"))
+
+    # --- patch-merge: a kind flip must NULL the field it replaces -------------------------
+    # Google's events.patch merges nested objects, so writing {dateTime} over a stored {date}
+    # leaves both set and the API answers 400 "Invalid start time". Caught in production, not
+    # by a fake — a stub that just records kwargs cannot model the merge.
+    b, _ = svc._body_from({"all_day": False}, existing=prev_allday)
+    check("[merge] all-day -> timed nulls the stored `date`",
+          b["start"].get("date", "MISSING") is None and b["end"].get("date", "MISSING") is None)
+    b, _ = svc._body_from({"all_day": True},
+                          existing={"all_day": False, "start": "2026-09-14T15:00:00-03:00"})
+    check("[merge] timed -> all-day nulls the stored `dateTime`/`timeZone`",
+          b["start"].get("dateTime", "MISSING") is None
+          and b["start"].get("timeZone", "MISSING") is None)
+    b, _ = svc._body_from({"title": "T", "start": "2026-09-14"})
+    check("[merge] a CREATE carries no null keys — nothing to merge with",
+          "dateTime" not in b["start"] and "timeZone" not in b["start"])
 
     # --- 12. THE REGRESSION: moving a trip must not collapse it ---------------------------
     b, _ = svc._body_from({"start": "2026-09-20"}, existing=prev_allday)
     check("[regression] moving a 3-day event keeps 3 days",
-          b["start"] == {"date": "2026-09-20"} and b["end"] == {"date": "2026-09-23"})
+          b["start"].get("date") == "2026-09-20" and b["end"].get("date") == "2026-09-23")
 
     # --- 11. the view hides Google's exclusive end ----------------------------------------
     v = svc._event_view({"id": "E1", "summary": "Trip",
