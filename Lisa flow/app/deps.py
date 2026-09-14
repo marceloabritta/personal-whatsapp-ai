@@ -12,7 +12,10 @@ from .echoes import InMemoryEchoes, RedisEchoes
 from .reasoning import build_reasoner
 from .roster import DailyCap, Roster
 from .sessions import InMemorySessions, RedisSessions
-from .skills import confirm_policies, handlers, render_policies, resolve_gates
+from .directory import Directory
+from .skills import (
+    confirm_policies, handlers, render_policies, resolve_gates, side_effect_verbs,
+)
 from .transcription import build_transcriber
 from .trace import Trace, build_trace
 
@@ -35,6 +38,8 @@ class Deps:
     confirm_policies: dict = None   # {domain: ConfirmPolicy|None} for the confirm node
     render_policies: dict = None    # {domain: RenderPolicy|None} for the respond node
     resolve_gates: dict = None      # {domain: gate} — the execute node's tool-safety rules
+    side_effects: dict = None       # {domain: {verb}} — the confirm node's strip list
+    directory: Any = None           # the address book (app/directory.py); None = contacts off
     # Auto-transcription. `roster` is read by the gate on every voice note (pure, no I/O) and
     # written by the setup skill; `caps` is the per-chat daily ceiling.
     roster: Any = None
@@ -74,6 +79,17 @@ def build_deps(settings: Settings | None = None) -> Deps:
     caps = DailyCap(settings.auto_transcribe_daily_cap)
 
     tools = handlers(settings)
+
+    # The address book. Built only when the feature is on AND its own refresh token is present —
+    # contacts never borrows the calendar token, so a bad mint cannot take the calendar down.
+    directory = None
+    if settings.contacts_enabled and settings.google_contacts_refresh_token:
+        from .tools.people import GooglePeople
+
+        directory = Directory(settings, people=GooglePeople(settings))
+        cal = tools.get("calendar")
+        if cal is not None:
+            cal.directory = directory
     # The setup handler needs the roster it edits and the client it searches chats with. The
     # skills fan-out builds handlers from settings alone, so they are attached here — the same
     # way the transcript store is attached to the transcription service.
@@ -97,6 +113,8 @@ def build_deps(settings: Settings | None = None) -> Deps:
         confirm_policies=confirm_policies(),
         render_policies=render_policies(),
         resolve_gates=resolve_gates(),
+        side_effects=side_effect_verbs(),
+        directory=directory,
         roster=roster,
         caps=caps,
     )

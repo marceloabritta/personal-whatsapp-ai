@@ -13,11 +13,33 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from ..state import MessageState
 from ..trace import Trace
 
 log = logging.getLogger("mary.confirm")
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _verb_of(action: dict) -> str:
+    return (action or {}).get("task", "").partition(".")[2]
+
+
+def _grounded(action: dict, turn_text: str) -> bool:
+    """Is this side effect's address actually present in the conversation?
+
+    The exact analogue of the resolved-id gate ("no invented ids reach Google"), applied HERE
+    rather than in a resolve_gate, because a side-effect verb is stripped before the action loop
+    and so never reaches the execute node where those gates run. Without it `remember` would be the
+    first mutating verb in the codebase with neither a confirmation nor a gate, and a hallucinated
+    pair would land in the owner's real address book unchallenged."""
+    email = (action.get("email") or "").strip().lower()
+    if not email or not _EMAIL_RE.fullmatch(email):
+        return False
+    return email in (turn_text or "").lower()
 
 
 def _signature(action: dict, text: str) -> str:
@@ -27,7 +49,8 @@ def _signature(action: dict, text: str) -> str:
 
 
 async def confirm_node(
-    state: MessageState, *, confirm_policies: dict, settings, reasoner, trace: Trace
+    state: MessageState, *, confirm_policies: dict, settings, reasoner, trace: Trace,
+    side_effects: dict | None = None, tools: dict | None = None, directory=None,
 ) -> dict:
     tid = state["trace_id"]
     domain = state.get("domain") or ""
@@ -35,6 +58,16 @@ async def confirm_node(
     actions = state.get("actions") or []
     hops = int(state.get("tool_hops") or 0)
     ctx = {"settings": settings, "reasoner": reasoner}
+
+    # --- side-effect verbs: stripped BEFORE the loop, gated here, never executed ------------
+    # They must not gate, render, produce an observation or reach `respond`, so they leave the
+    # action list entirely. Stripping first also keeps them out of the routing decision below.
+    verbs = (side_effects or {}).get(domain) or set()
+    stripped = [a for a in actions if _verb_of(a) in verbs]
+    actions = [a for a in actions if _verb_of(a) not in verbs]
+    turn_text = state.get("turn_text") or state.get("text") or ""
+    dropped = [a for a in stripped if not _grounded(a, turn_text)]
+    stripped = [a for a in stripped if _grounded(a, turn_text)]
 
     approved: list = []
     observations: list = []
@@ -53,7 +86,10 @@ async def confirm_node(
             approved.append(action)
             continue
         # A write awaiting go-ahead: compose the confirmation in code and hold it as pending.
-        composed = policy.compose(action, state) if pending is None else None
+        # The node's RETURN value is invisible to code running inside the node, so the composer is
+        # handed the stripped pairs directly rather than being expected to read what we return.
+        composed = (policy.compose(action, {**state, "side_effects": stripped})
+                    if pending is None else None)
         if composed:
             pending, ask_message = action, composed
         else:
@@ -75,7 +111,8 @@ async def confirm_node(
     else:
         route = "act"
 
-    update: dict = {"actions": approved, "tool_hops": hops, "confirm_route": route}
+    update: dict = {"actions": approved, "tool_hops": hops, "confirm_route": route,
+                    "side_effects": stripped}
     if observations:
         update["messages"] = observations
     repeated = False
@@ -102,13 +139,50 @@ async def confirm_node(
             update["pending_action"] = pending
             update["reply_body"] = ask_message
             update["last_confirm_sig"] = sig
+    elif ask_message and approved:
+        # The routing bug this used to hide: `if approved: route = "execute"` above wins, and the
+        # composed confirmation was thrown away with nothing storing the pending — so a find/list
+        # batched with a create silently lost the question. Store it regardless of routing; the
+        # owner's yes next turn resolves it.
+        sig = _signature(pending, ask_message)
+        if sig != state.get("last_confirm_sig"):
+            update["pending_action"] = pending
+            update["last_confirm_sig"] = sig
+
+    # A side effect batched with a gated write RIDES WITH THE PROPOSAL and fires only on the
+    # owner's yes — otherwise a proposal he corrects ("no, her old address") would already have
+    # written the rejected address into his real address book, permanently and silently.
+    if stripped:
+        if update.get("pending_action") is not None:
+            update["pending_side_effects"] = stripped
+        elif directory is not None:
+            handler = (tools or {}).get(domain)
+            if handler is not None:
+                directory.spawn(_run_side_effects(handler, stripped, state))
 
     trace.code(
         tid, node="confirm", loop_id=state.get("loop_id"), domain=domain,
         approved=len(approved), blocked=len(observations), pending=bool(update.get("pending_action")),
         route=route, repeated=repeated,
+        side_effects=[a.get("task") for a in stripped] or None,
+        side_effects_dropped=[a.get("task") for a in dropped] or None,
     )
     return update
+
+
+async def _run_side_effects(handler, actions: list, state: dict) -> None:
+    """Run stripped side effects through the domain handler, out of band.
+
+    Awaits each result so a failure is visible rather than discarded — `run()` never raises, it
+    returns ok=False, which a fire-and-forget dispatch would throw on the floor."""
+    for a in actions:
+        inputs = {k: v for k, v in (a or {}).items()
+                  if k != "task" and not k.startswith("_")}
+        inputs.setdefault("_phone", state.get("phone"))
+        res = await handler.run(_verb_of(a), inputs)
+        if not (res or {}).get("ok"):
+            log.warning('{"side_effect":"failed","task":"%s","error":"%s"}',
+                        (a or {}).get("task"), (res or {}).get("error"))
 
 
 def route_after_confirm(state: MessageState) -> str:

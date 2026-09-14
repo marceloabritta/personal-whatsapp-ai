@@ -41,6 +41,17 @@ class Skill:
     only_self_chat: bool = False
     resolve_gate: Optional[Callable] = None
 
+    # Verbs that run OUT OF BAND: stripped from `actions` at the confirm node and dispatched
+    # detached. They never gate, never render, never reach `respond`, and nothing in the reply path
+    # awaits them. For work whose failure must cost the person in the chat nothing — an address-book
+    # write, not a calendar write.
+    side_effects: set = field(default_factory=set)
+
+    # (state, ctx) -> str | None. A block appended to this skill's system prompt, built in code from
+    # in-memory state on the turn it is used. MUST be pure and synchronous: it runs inside the reply
+    # path, so anything that awaits or burns CPU here stalls every chat, not just this one.
+    context_provider: Optional[Callable] = None
+
     # Per-skill reason-call runtime. model/effort fall back to the settings default when None, so a
     # skill only names what it wants to differ. `think` turns on adaptive thinking for this skill's
     # reason call — its depth is governed by `effort` (this is how Sonnet 5 exposes thinking under a

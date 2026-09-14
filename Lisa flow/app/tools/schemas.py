@@ -89,10 +89,20 @@ DELETE = _verb(
     },
 )
 
+# remember — the address-book write. EVERY field is required, so this branch adds ZERO to both
+# enforced-schema caps (a branch contributes len(properties) - len(required) optionals, and no
+# anyOf/array here). Verified against the live fan-out: 8/16 unions, 23/24 optionals, unchanged.
+# It is a side-effect verb: stripped at the confirm node, never executed, never rendered.
+REMEMBER = _verb(
+    ["name", "email"],
+    {"name": _STR, "email": _STR},
+)
+
 CALENDAR_TASK_SCHEMAS: dict[str, dict] = {
     "create": CREATE,
     "list": LIST,
     "find": FIND,
     "update": UPDATE,
     "delete": DELETE,
+    "remember": REMEMBER,
 }

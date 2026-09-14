@@ -338,6 +338,10 @@ async def context_node(
 
     update: dict = {
         "initialized": True,
+        # The turn as the model will see it. `text` is only the triggering message and the
+        # transcript was a local, so the address-book scan had nothing to read; publishing it here
+        # is what lets a name mentioned three messages ago still resolve.
+        "turn_text": transcript,
         "last_whatsapp_message_id": newest,
         "context_message_ids": ids,
         # Per-activation tool-loop scratch — always fresh so a bound/log never carries over.
@@ -359,6 +363,11 @@ async def context_node(
         update["listed_chats"] = {}
         update["pending_action"] = None
         update["last_confirm_sig"] = None
+        # Contact memory is checkpointed, not per-turn scratch (the same reason seen_event_ids
+        # needs clearing), so a stale address or a pending write cannot bleed into the next loop.
+        update["seen_contacts"] = {}
+        update["side_effects"] = []
+        update["pending_side_effects"] = []
 
     if card_keys:
         prior = [] if reset else list(state.get("seen_chat_keys") or [])

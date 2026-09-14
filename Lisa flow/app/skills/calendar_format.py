@@ -91,6 +91,32 @@ _L = {
 }
 
 
+def _guest_names(state: dict) -> dict:
+    """{address: name} for this turn — the address book's contribution to a confirmation.
+
+    Two sources, merged: `seen_contacts`, written by the reason node from the injected block and
+    merged across the loop; and the {name, email} pairs the confirm node stripped THIS turn and
+    handed in on a patched state, so a person Lisa has only just learned about is still named on
+    the very card that proposes the meeting with them."""
+    out: dict = {}
+    for email, info in (state.get("seen_contacts") or {}).items():
+        name = (info or {}).get("name")
+        if name:
+            out[email.lower()] = name
+    for a in state.get("side_effects") or []:
+        email = (a or {}).get("email")
+        name = (a or {}).get("name")
+        if email and name:
+            out[email.lower()] = name
+    return out
+
+
+def _guest_line(email: str, names: dict) -> str:
+    """'Ana Silva — ana@acme.com' when we know who that is, else the bare address."""
+    name = names.get((email or "").lower())
+    return f"{name} — {email}" if name else email
+
+
 def _lang(state: dict) -> str:
     code = (state.get("session_lang") or state.get("lang") or "en")[:2].lower()
     return code if code in _L else "en"
@@ -173,8 +199,9 @@ def compose_create(action: dict, state: dict) -> str | None:
         lines.append(action["location"])
     ask = L["ask_create"]
     if action.get("attendees"):
+        names = _guest_names(state)
         lines.append(L["participants"])
-        lines.extend(action["attendees"])
+        lines.extend(_guest_line(e, names) for e in action["attendees"])
         ask = f"{ask} {_guest_note(action, L)}"
     lines += ["", ask]
     return _joined(lines)
@@ -217,10 +244,11 @@ def compose_update(action: dict, state: dict) -> str | None:
         if when:
             described.append(f"{(L['u_date'] if after['all_day'] else L['u_time'])}: {when[0]}")
             described.extend(when[1:])
+    names = _guest_names(state)
     for ch in chs:
         if ch["field"] in ("start", "end", "all_day"):
             continue
-        described.extend(_describe_change(ch, L, lang))
+        described.extend(_describe_change(ch, L, lang, names))
 
     if not described:
         # Nothing identifiable is changing. Saying "Posso alterar?" over an empty list asks the
@@ -234,7 +262,7 @@ def compose_update(action: dict, state: dict) -> str | None:
     return _joined(lines)
 
 
-def _describe_change(ch: dict, L: dict, lang: str) -> list[str]:
+def _describe_change(ch: dict, L: dict, lang: str, names: dict | None = None) -> list[str]:
     """One change-set entry → the line(s) the owner reads. Removals get their own words."""
     f, kind, new = ch["field"], ch["kind"], ch["new"]
     if f == "virtual":
@@ -251,7 +279,7 @@ def _describe_change(ch: dict, L: dict, lang: str) -> list[str]:
         # Google's patch REPLACES the attendee array, so this list is the final roster, not an
         # addition. Naming it "Participantes" read as "these are being added" — and anyone the
         # model left out was silently uninvited AND mailed a cancellation.
-        out = [L["guests_full"], *new]
+        out = [L["guests_full"], *(_guest_line(e, names or {}) for e in new)]
         dropped = sorted(set(ch.get("old") or []) - set(new))
         if dropped:
             out.append(f"{L['guests_dropped']}: {', '.join(dropped)}")
@@ -268,8 +296,9 @@ def compose_delete(action: dict, state: dict) -> str | None:
     if ev.get("start"):
         lines.extend(_when(ev, lang))
     if ev.get("attendees"):
+        names = _guest_names(state)
         lines.append(L["participants"])
-        lines.extend(ev["attendees"])
+        lines.extend(_guest_line(e, names) for e in ev["attendees"])
     ask = L["ask_delete"] + (f" {_guest_note(action, L)}" if ev.get("attendees") else "")
     lines += ["", ask]
     return _joined(lines)

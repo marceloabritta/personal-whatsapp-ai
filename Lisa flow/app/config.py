@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     default_start_hour: str = "09:00:00"   # all-day -> timed, when no hour is given
     calendar_timezone: str = "America/Sao_Paulo"
 
+    # Contact memory — the address book (app/directory.py + app/tools/people.py).
+    # Ships OFF, the way MEDIA_ENABLED and AUTO_TRANSCRIBE_ENABLED did.
+    contacts_enabled: bool = False
+    # A SEPARATE refresh token from the calendar one. Re-minting a single shared token is how
+    # the ops step would take the live calendar down — and the same GOOGLE_REFRESH_TOKEN is
+    # consumed by both the lisa and mary services, so the blast radius is two brains, not one.
+    # Empty = the feature stays off no matter what contacts_enabled says.
+    google_contacts_refresh_token: str = ""
+    contacts_sync_seconds: float = 900.0      # incremental People sync cadence
+    contacts_full_resync_hours: float = 96.0  # forced full sweep, before a sync token can expire
+    contacts_max_in_prompt: int = 5           # contacts rendered into one turn's block
+    contacts_default_region: str = "BR"       # phonenumbers parse region for bare numbers
+    contacts_write_attempts: int = 3          # OUTBOX retries; the API call itself is always 1
+    # Q1: Lisa may create people — but only on a phone-confirmed identity (see Directory).
+    contacts_create_people: bool = True
+
     # Session review — a second model grades every turn once a session closes (app/review/).
     # OFF in code so this module ships inert to any flow that has not opted in; turned on per
     # service by env. Everything here is observation only: it never touches the reply path.

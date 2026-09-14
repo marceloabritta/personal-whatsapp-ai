@@ -77,9 +77,15 @@ def unit_checks() -> None:
           cal["properties"]["actions"]["type"] == "array"
           and "anyOf" in cal["properties"]["actions"]["items"])
     tasks = {_task_const(b) for b in _branches(cal)}
-    check("calendar actions anyOf exposes exactly the 5 calendar tasks",
-          tasks == {f"calendar.{v}" for v in ("create", "list", "find", "update", "delete")},
+    # `remember` is the address-book write — a SIDE-EFFECT verb: it appears in the schema so the
+    # model can emit it, but it is stripped at the confirm node and never reaches execute.
+    check("calendar actions anyOf exposes exactly the 6 calendar tasks",
+          tasks == {f"calendar.{v}" for v in
+                    ("create", "list", "find", "update", "delete", "remember")},
           detail=str(sorted(tasks)))
+    check("remember requires task+name+email (so it costs nothing against the caps)",
+          {_task_const(b): set(b["required"]) for b in _branches(cal)}["calendar.remember"]
+          == {"task", "name", "email"})
     req = {_task_const(b): set(b["required"]) for b in _branches(cal)}
     check("create requires task+title+start", req["calendar.create"] == {"task", "title", "start"})
     check("update requires task+event_id", req["calendar.update"] == {"task", "event_id"})

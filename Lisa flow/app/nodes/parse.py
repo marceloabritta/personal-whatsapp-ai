@@ -49,8 +49,21 @@ def parse_node(
     message = data.get("message")
     is_audio = is_audio_message(message)
     ckey = chat_key(remote_jid)
-    alt = chat_key(key.get("remoteJidAlt"))
+    alt_jid = key.get("remoteJidAlt") or ""
+    alt = chat_key(alt_jid)
     cards = contact_cards(message)
+
+    # The chat's PHONE NUMBER, or None — the only identity signal the address book may use.
+    # `number` above is a raw JID local part and is NOT a phone: it is the group id in a group, and
+    # an opaque @lid under LID addressing (a long digit string whose tail looks enough like a local
+    # number to bind a stranger confidently, and then write a learned address onto their card).
+    # Only a real @s.whatsapp.net JID qualifies; chat_key strips the :NN device suffix, which the
+    # raw split does not. Groups and LID-only chats resolve to None, and None means "ask".
+    phone = None
+    if remote_jid.endswith("@s.whatsapp.net"):
+        phone = ckey
+    elif alt_jid.endswith("@s.whatsapp.net"):
+        phone = alt
 
     trace.code(
         tid, node="parse", chat=remote_jid, from_me=from_me,
@@ -67,6 +80,7 @@ def parse_node(
         "text": text,
         "push_name": data.get("pushName"),
         "number": number,
+        "phone": phone,
         "ts": int(data.get("messageTimestamp") or 0),
         "is_own": is_own_message(text, owner_name),
         "tag": tag,

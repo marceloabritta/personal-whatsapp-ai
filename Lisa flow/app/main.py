@@ -106,6 +106,42 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("owner jid lookup failed: %s", exc)
 
+    # Contact memory — the address book the calendar skill reads. Best-effort in every direction:
+    # a scope that was not granted, a store that will not open, or a first sync that fails all leave
+    # the directory cold, and a cold directory serves no block AND refuses every write, so Lisa
+    # behaves exactly as she does today rather than re-creating people she already has.
+    cstore = None
+    if deps.directory is not None:
+        ok, detail = await asyncio.to_thread(deps.directory.people.check_scopes)
+        if not ok:
+            log.warning("contacts disabled: %s", detail)
+            deps.directory = None
+            cal = (deps.tools or {}).get("calendar")
+            if cal is not None:
+                cal.directory = None
+        else:
+            if s.database_url:
+                from .contactstore import ContactStore
+
+                cstore = ContactStore(s.database_url, schema=s.log_schema)
+                try:
+                    await cstore.open()
+                    deps.directory.store = cstore
+                    snap = await cstore.load()
+                    if snap:
+                        deps.directory.load(snap["contacts"], snap["links"],
+                                            snap["sync_token"], ready=bool(snap["contacts"]))
+                    log.info("%s", '{"boot":"contacts-store"}')
+                except Exception as exc:
+                    log.warning("contacts store disabled: %s", exc)
+                    cstore = None
+            else:
+                # No durable tier means no outbox, and a write with no record is not worth
+                # making — the directory still serves reads once it has synced.
+                log.info("%s", '{"boot":"contacts-memory-only"}')
+            deps.directory.start()
+            log.info("%s", '{"boot":"contacts-directory"}')
+
     # Session review — grades each turn once a session closes (app/review/). Best-effort and
     # strictly downstream: it reads the log, writes only its own tables, and nothing in the reply
     # path ever awaits it. Off unless REVIEW_ENABLED, so it ships inert to a flow that hasn't
@@ -136,6 +172,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if deps.directory is not None:
+            await deps.directory.aclose()
+        if cstore is not None:
+            await cstore.aclose()
         if reaper is not None:
             await reaper.aclose()
             await reviewer.store.aclose()

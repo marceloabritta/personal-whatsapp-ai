@@ -10,7 +10,8 @@ from __future__ import annotations
 import time
 
 from ..skills import (
-    output_schema_for, reason_runtime_for, server_tools_for, system_prompt_for,
+    context_block_for, output_schema_for, reason_runtime_for, server_tools_for,
+    system_prompt_for,
 )
 from ..state import MessageState
 from ..trace import Trace
@@ -27,12 +28,24 @@ def _to_neutral(messages: list) -> list[dict]:
     return out
 
 
-async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) -> dict:
+async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
+                      directory=None) -> dict:
     tid = state["trace_id"]
     domain = state.get("domain") or settings.default_domain
     locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
 
-    system = system_prompt_for(domain, settings, session_lang=locked_lang)
+    # The address book, injected as a prompt block — no tool hop, no await. Only on the FIRST pass
+    # of a loop: reason ② is composing prose from a tool result, not choosing an address, so
+    # re-injecting there would only spend tokens and invite a duplicate `remember`.
+    context_block = None
+    seen_contacts: dict = {}
+    if directory is not None and int(state.get("tool_hops") or 0) == 0:
+        context_block, patch = context_block_for(
+            domain, state, {"directory": directory, "settings": settings})
+        seen_contacts = dict(patch.get("seen_contacts") or {})
+
+    system = system_prompt_for(domain, settings, session_lang=locked_lang,
+                               context_block=context_block)
     schema = output_schema_for(domain)
     server_tools = server_tools_for(domain, settings)
     runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
@@ -61,6 +74,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
         reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
         tools=result.get("tool_calls") or [], actions=actions, latency_ms=latency_ms,
+        contacts_shown=len(seen_contacts) or None,
     )
 
     # NB: history is appended in `act` (the single place a *sent* message enters the thread),
@@ -80,6 +94,10 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace) 
         "tool_calls": result.get("tool_calls") or [],
         "error_category": result.get("error_category") or "none",
     }
+    if seen_contacts:
+        # MERGE, never replace — the confirmation composer runs two nodes later and must still be
+        # able to name someone the first pass surfaced (this is the seen_events rule).
+        update["seen_contacts"] = {**(state.get("seen_contacts") or {}), **seen_contacts}
     # Lock the session language on the FIRST pass after a tag (when it isn't set yet), so every
     # later read-back pass and window continuation is told to keep writing in it.
     if not locked_lang and result.get("lang"):

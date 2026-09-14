@@ -16,6 +16,7 @@ from .identity import header_for
 def build_system_prompt(
     owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
     has_actions: bool = False, session_lang: str | None = None,
+    context_block: str | None = None,
 ) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     en_header = header_for(owner_name, "en")
@@ -129,4 +130,9 @@ suggested next steps or follow-up questions; give the answer and stop."""
 
     contract = "Respond ONLY as JSON, with these fields in this order:\n" + "\n".join(fields)
 
-    return f"{base}{skill_block}{action_para}\n\n{contract}\n\nCurrent date: {today}."
+    # The per-turn context block belongs INSIDE the skill region, not appended to the result:
+    # concatenating onto the returned string would land it after the JSON contract and the
+    # "Current date" line — the least authoritative position in the prompt — and would separate
+    # the contract from the date it is meant to be read with.
+    return (f"{base}{skill_block}{context_block or ''}{action_para}"
+            f"\n\n{contract}\n\nCurrent date: {today}.")

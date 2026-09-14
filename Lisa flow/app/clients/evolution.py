@@ -252,6 +252,12 @@ class Evolution:
             by_id[rid] = {
                 "id": rid,
                 "from_me": bool(key.get("fromMe")),
+                # Who actually spoke. In a group `remoteJid` is the group, so without this the
+                # sender of every line is unknown and nobody in a group can be identified at all.
+                # Both spellings are carried: inbound rows persist under `@lid` while we send to
+                # the phone JID, and only an `@s.whatsapp.net` value is a real phone number.
+                "participant": key.get("participant") or None,
+                "participant_alt": key.get("participantAlt") or None,
                 "text": extract_text(row.get("message")).strip(),
                 "push_name": row.get("pushName"),
                 "ts": int(row.get("messageTimestamp") or 0),

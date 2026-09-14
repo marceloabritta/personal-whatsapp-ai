@@ -97,6 +97,34 @@ def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     return "no"
 
 
+def calendar_context(state: dict, ctx: dict):
+    """The address-book block for this turn, plus what it surfaced.
+
+    Pure and synchronous — it runs inside the reply path. All of the work is exact dictionary
+    lookups against the in-process snapshot (measured at 0.3 ms over 2,000 contacts); the fuzzy
+    matching this codebase uses elsewhere was measured at 5 s over the same book, as blocking CPU
+    inside an async node, which stalls every chat rather than just this one."""
+    d = ctx.get("directory")
+    settings = ctx.get("settings")
+    if d is None or not getattr(d, "ready", False):
+        return None                      # fails open: no block, and Lisa asks as she does today
+    found = d.mentions(
+        state.get("turn_text") or state.get("text") or "",
+        phone=state.get("phone"),
+        limit=getattr(settings, "contacts_max_in_prompt", 5),
+        group=(state.get("chat_kind") == "group"),
+    )
+    if not found:
+        return None
+    seen = {}
+    for c, _why in found:
+        for e in c.get("emails") or []:
+            seen[e.lower()] = {"name": c.get("name") or "",
+                               "resource_name": c.get("resource_name") or "",
+                               "n_emails": len(c.get("emails") or [])}
+    return {"block": d.block(found, settings.owner_name), "state": {"seen_contacts": seen}}
+
+
 def calendar_resolve_gate(verb: str, inputs: dict, state: dict):
     """(patched_inputs, error) — update/delete must target an event surfaced by a prior search
     in THIS loop. Moved verbatim out of the execute node, which used to hardcode it; behaviour
@@ -113,7 +141,7 @@ CALENDAR = Skill(
     kind="local",
     describe=DESCRIBE,
     guidance=GUIDANCE,
-    verbs=["create", "list", "find", "update", "delete"],
+    verbs=["create", "list", "find", "update", "delete", "remember"],
     schemas=CALENDAR_TASK_SCHEMAS,
     handler_cls=GoogleCalendarService,
     # The confirm policy composes the confirmation prompt per verb (no LLM writes it) and detects
@@ -136,6 +164,10 @@ CALENDAR = Skill(
     },
     matcher=calendar_matcher,
     resolve_gate=calendar_resolve_gate,
+    # `remember` never enters the action loop: stripped at the confirm node, gated there against
+    # the turn's text, dispatched detached, never rendered.
+    side_effects={"remember"},
+    context_provider=calendar_context,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",
     effort="medium",

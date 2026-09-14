@@ -33,7 +33,8 @@ from ..trace import Trace
 
 
 async def resolve_pending_node(
-    state: MessageState, *, confirm_policies: dict, trace: Trace
+    state: MessageState, *, confirm_policies: dict, trace: Trace,
+    tools: dict | None = None, directory=None,
 ) -> dict:
     tid = state["trace_id"]
     pending = state.get("pending_action")
@@ -51,10 +52,21 @@ async def resolve_pending_node(
 
     if verdict == "yes" and is_owner:
         action = {**pending, APPROVED_BY: OWNER_YES}
+        # The side effects that rode with this proposal fire NOW — on the same yes that approves
+        # the write, never at proposal time. A proposal he corrects ("no, her old address") or
+        # abandons simply drops them, so a rejected address never reaches the real address book.
+        riders = state.get("pending_side_effects") or []
+        if riders and directory is not None:
+            from .confirm import _run_side_effects
+
+            handler = (tools or {}).get(domain)
+            if handler is not None:
+                directory.spawn(_run_side_effects(handler, riders, state))
         trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
-                   pending=task, verdict="yes", owner=True, route="execute")
+                   pending=task, verdict="yes", owner=True, route="execute",
+                   riders=len(riders) or None)
         return {"actions": [action], "domain": domain, "pending_action": None,
-                "resolve_route": "execute"}
+                "pending_side_effects": [], "resolve_route": "execute"}
 
     if verdict == "yes":
         # Someone else agreed. Ignored, silently, and the proposal keeps standing.

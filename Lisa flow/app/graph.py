@@ -74,7 +74,7 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "resolve_pending",
         partial(resolve_pending_node, confirm_policies=deps.confirm_policies or {},
-                trace=deps.trace),
+                trace=deps.trace, tools=deps.tools or {}, directory=deps.directory),
     )
     g.add_node(
         "route",
@@ -82,12 +82,15 @@ def build_graph(deps: Deps, checkpointer=None):
     )
     g.add_node(
         "reason",
-        partial(reason_node, reasoner=deps.reasoner, settings=deps.settings, trace=deps.trace),
+        partial(reason_node, reasoner=deps.reasoner, settings=deps.settings, trace=deps.trace,
+                directory=deps.directory),
     )
     g.add_node(
         "confirm",
         partial(confirm_node, confirm_policies=deps.confirm_policies or {},
-                settings=deps.settings, reasoner=deps.reasoner, trace=deps.trace),
+                settings=deps.settings, reasoner=deps.reasoner, trace=deps.trace,
+                side_effects=deps.side_effects or {}, tools=deps.tools or {},
+                directory=deps.directory),
     )
     g.add_node(
         "execute",

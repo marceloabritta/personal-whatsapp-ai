@@ -98,7 +98,7 @@ def has_actions(domain: str, skills: dict = SKILLS) -> bool:
 # --- per-domain system prompt -----------------------------------------------------------
 
 def system_prompt_for(domain: str, settings, session_lang: str | None = None,
-                      skills: dict = SKILLS) -> str:
+                      skills: dict = SKILLS, context_block: str | None = None) -> str:
     """Render the domain-scoped system prompt: the shared base + this skill's block. The
     actions/workflow JSON-contract section is included only for local skills."""
     from ..prompt import build_system_prompt
@@ -111,6 +111,7 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         describe=skill.describe.format(owner_name=owner),
         has_actions=bool(skill.verbs),
         session_lang=session_lang,
+        context_block=context_block,
     )
 
 
@@ -133,6 +134,38 @@ def confirm_policies(skills: dict = SKILLS) -> dict[str, Any]:
 def render_policies(skills: dict = SKILLS) -> dict[str, Any]:
     """{domain: RenderPolicy|None} — consulted by the respond node."""
     return {name: skill.render for name, skill in skills.items()}
+
+
+def side_effect_verbs(skills: dict = SKILLS) -> dict[str, set]:
+    """{domain: {verb, ...}} — the confirm node's strip list.
+
+    Fanned out here rather than read off the Skill, because confirm_node only ever receives the
+    per-domain policy dicts (graph.py builds it with confirm_policies=...), so it has no route to a
+    Skill object at all."""
+    return {name: set(skill.side_effects or ()) for name, skill in skills.items()}
+
+
+def context_block_for(domain: str, state: dict, ctx: dict,
+                      skills: dict = SKILLS) -> tuple[str | None, dict]:
+    """(block, state_patch) for this skill's per-turn prompt block.
+
+    A provider returns either a bare string (block only) or {"block": str, "state": dict} when it
+    also needs to record what it surfaced — the calendar one does, so the confirmation composer can
+    name a contact two nodes later without reaching back into the Directory. Pure and synchronous;
+    see Skill.context_provider."""
+    provider = skills[domain].context_provider
+    if provider is None:
+        return None, {}
+    try:
+        out = provider(state, ctx)
+    except Exception:  # a context block must never break a turn
+        import logging
+
+        logging.getLogger("mary.skills").exception("context_provider failed for %s", domain)
+        return None, {}
+    if isinstance(out, dict):
+        return out.get("block") or None, dict(out.get("state") or {})
+    return out or None, {}
 
 
 def resolve_gates(skills: dict = SKILLS) -> dict[str, Any]:
@@ -174,6 +207,7 @@ __all__ = [
     "count_unions", "count_optionals",
     "output_schema_for", "has_actions", "system_prompt_for",
     "handlers", "confirm_policies", "render_policies", "resolve_gates", "routable",
+    "side_effect_verbs", "context_block_for",
     "server_tools_for",
     "reason_runtime_for",
 ]

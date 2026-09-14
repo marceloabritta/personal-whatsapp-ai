@@ -36,6 +36,14 @@ class MessageState(TypedDict, total=False):
     seen_events: dict  # {event_id: view} surfaced by find/list this loop; feeds programmatic messages
     pending_action: Optional[dict]  # a write awaiting the owner's yes; run by resolve_pending on a clean confirmation
     last_confirm_sig: Optional[str]  # fingerprint of the confirmation already sent this loop; blocks an identical re-ask
+    # Contact memory. `seen_contacts` is MERGED across the loop (like seen_events) so the
+    # confirmation composer can still name a person the first pass surfaced. `pending_side_effects`
+    # rides with a proposal and is dispatched only on the owner's yes — a corrected proposal must
+    # never leave a rejected address behind in the real address book. Both are checkpointed, so
+    # both are cleared on tag-reset.
+    seen_contacts: dict  # {email: {name, resource_name, n_emails}} surfaced this loop
+    side_effects: list  # side-effect actions stripped this turn (feeds the guest-name renderer)
+    pending_side_effects: list  # side effects waiting on the same yes as pending_action
 
     # --- per-turn scratch ---
     raw: dict
@@ -46,6 +54,10 @@ class MessageState(TypedDict, total=False):
     text: str
     push_name: Optional[str]
     number: str
+    # The chat's phone number, or None. NOT `number` — that is a raw JID local part, which is the
+    # group id in a group and an opaque @lid under LID addressing, and whose tail looks enough like
+    # a real number to bind a stranger confidently. Resolved once, in parse.
+    phone: Optional[str]
     ts: int
     is_own: bool
     tag: Optional[str]
@@ -77,6 +89,7 @@ class MessageState(TypedDict, total=False):
     loop_opened: bool  # this activation opened a NEW loop (tag on a closed window)
 
     context_message_ids: list  # WhatsApp ids ingested this run
+    turn_text: str  # the labeled transcript this turn — what the address-book scan reads
 
     # routing (route node) — which skill serves this turn; set programmatically
     domain: Optional[str]  # "calendar" | "web" | ...

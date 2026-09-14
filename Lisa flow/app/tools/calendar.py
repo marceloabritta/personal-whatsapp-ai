@@ -219,7 +219,17 @@ FIND — the resolver. Search by title words ("query"), the person ("attendee"),
 
 UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, all_day, location, virtual, attendees) and "message": null — but remember "attendees", when you send it at all, is the complete final list. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
-DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id" and "message": null."""
+DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id" and "message": null.
+
+ADDRESS BOOK — you keep {owner_name}'s contacts. The people this conversation mentions are listed above under "Address book", with exactly what is on file for each.
+- NEVER invent an email address. If it is not listed above and not written in this chat, ask for it.
+- ONE address on file -> use it, silently. Do not ask; the confirmation card names the person and the address, and that is {owner_name}'s chance to correct it.
+- TWO OR MORE on file -> do NOT choose. Put the question in "message", listing them numbered, emit no action that turn, and use his answer next turn.
+- A line marked "identity not confirmed" means the person was matched by name alone. Confirm it is the right person before you use their address.
+- NONE on file and an address appears in this chat -> use it for the invite AND emit calendar.remember for it, in the same turn.
+- He gives an address that differs from the one on file -> his wins, always. Use it for the invite; do NOT emit calendar.remember for it (he is correcting you, not adding a second address).
+- calendar.remember is silent bookkeeping. It needs no confirmation, produces no reply, and you never mention it — do not tell him you saved anything, and never read the address book out loud.
+- Emit: {{"task": "calendar.remember", "name": "Ana Silva", "email": "ana@acme.com"}}"""
 
 
 class GoogleCalendarService:
@@ -227,6 +237,8 @@ class GoogleCalendarService:
 
     def __init__(self, settings) -> None:
         self.s = settings
+        # Attached in deps, the way the setup handler gets its roster. None = contacts off.
+        self.directory = None
         self._svc = None  # test seam ONLY: a fake service injected by the selftests
         self._creds = None
         self._creds_lock = threading.Lock()
@@ -706,6 +718,19 @@ class GoogleCalendarService:
     _VERBS = {"create": "_create", "list": "_list", "find": "_find",
               "update": "_update", "delete": "_delete"}
 
+    async def _remember(self, inputs: dict) -> ActionResult:
+        """The address-book write. Runs OUT OF BAND — stripped at the confirm node, dispatched
+        detached, never rendered. It touches Google only through the Directory's durable outbox,
+        so nothing in the reply path can be delayed or failed by it."""
+        if self.directory is None:
+            return {"ok": True, "summary": "contacts off", "data": {}}
+        name = (inputs.get("name") or "").strip()
+        email = (inputs.get("email") or "").strip()
+        if not email:
+            return {"ok": False, "error": "validation", "summary": "remember needs an email."}
+        await self.directory.remember(name, email, phone=inputs.get("_phone"))
+        return {"ok": True, "summary": f"noted {name}".strip(), "data": {"email": email}}
+
     def _attempts_for(self, verb: str, inputs: dict) -> int:
         """How many times this verb may be replayed.
 
@@ -737,6 +762,14 @@ class GoogleCalendarService:
 
         A fresh connection per call (see `_service`) removes the cause of the broken pipes; this
         removes the class. Both are wanted — the next transient error will not be this one."""
+        if verb == "remember":
+            # Async and local: no Google call, no thread, no retry ladder.
+            try:
+                return await self._remember(inputs)
+            except Exception as exc:  # never raise into the graph
+                log.warning("calendar.remember failed: %s", exc)
+                return {"ok": False, "error": str(exc), "summary": "remember failed"}
+
         method = self._VERBS.get(verb)
         if not method:
             return {"ok": False, "error": "unknown_verb",
