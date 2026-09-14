@@ -222,11 +222,30 @@ def write_rule_checks():
           d.plan_write("Ana Silva", "ana.new@acme.com") is None)
     check("address already known -> no write",
           d.plan_write("Ana Silva", "ana.silva@acme.com") is None)
-    check("unknown person, identity unproven -> learned only",
-          (d.plan_write("Novo Alguem", "novo@x.com") or {}).get("kind") == "learn")
-    check("wrong phone + different name does not target the chat's contact",
+    check("unknown person with a real name -> create (Q1: yes)",
+          (d.plan_write("Novo Alguem", "novo@x.com") or {}).get("kind") == "create")
+    # The chat's phone identifies the CHAT, not the person being remembered. It used to be taken
+    # as proof of identity, which made `create` fire precisely when the identity was wrong.
+    check("the chat partner's phone is not evidence about a third party",
           (d.plan_write("Novo Alguem", "novo@x.com", phone="5511987654321") or {}).get("kind")
           == "create")
+    # A name that yields no index tokens told us nothing about WHO — it used to fall through to
+    # "the person in this chat" and write a stranger's address onto their real card.
+    for junk in ("Ze", "Dr", "", "  "):
+        check(f"unindexable name {junk!r} never targets the chat partner",
+              (d.plan_write(junk, "ze@acme.com", phone="5511987654321") or {}).get("resource_name")
+              is None)
+    # The read index tolerates extra tokens, so the write side must too, or Lisa surfaces a
+    # contact and then creates a duplicate of him.
+    d2 = Directory(settings())
+    d2.load([contact("people/x", "Joao Pedro Almeida", [], ["+55 11 90000-0001"])])
+    check("a stored middle name still matches on the write side",
+          (d2.plan_write("Joao Pedro", "jp@acme.com") or {}).get("resource_name") == "people/x")
+    # Duplicate cards are normal in a synced book; picking one at random is not acceptable.
+    d3 = Directory(settings())
+    d3.load([contact("people/a", "Carlos Souza", []), contact("people/b", "Carlos Souza", [])])
+    check("an ambiguous name is refused, not guessed",
+          d3.plan_write("Carlos Souza", "c@x.com") is None)
     check("garbage email is refused", d.plan_write("X", "not-an-email") is None)
     check("cold directory plans nothing",
           Directory(settings()).plan_write("Ana Silva", "a@b.com") is None)
@@ -397,6 +416,73 @@ async def confirm_checks():
     check("verb extraction", _verb_of({"task": "calendar.remember"}) == "remember")
 
 
+# --- 7b. the two graph regressions ----------------------------------------------------------
+
+async def graph_regression_checks():
+    print("\ngraph regressions")
+    from app.nodes.confirm import confirm_node, _loop_text
+    from app.skills.confirm import FlagConfirm
+    from app.skills.calendar_format import compose_create
+
+    class T:
+        def code(self, *a, **k):
+            pass
+
+    policy = FlagConfirm({"create"}, compose_map={"create": compose_create})
+    base = {"trace_id": "t", "domain": "calendar", "session_lang": "pt",
+            "turn_text": "marca com a Ana amanha 15h", "messages": []}
+    create = {"task": "calendar.create", "title": "Reuniao",
+              "start": "2026-09-15T15:00:00-03:00"}
+
+    # A read batched with a gated write: the read runs, the proposal is kept, and — crucially —
+    # no signature is recorded, because nothing was SENT. Recording it made the repeat-suppressor
+    # swallow the real question on the next pass and Lisa answered a booking with silence.
+    out = await confirm_node({**base, "actions": [{"task": "calendar.find"}, create]},
+                             confirm_policies={"calendar": policy}, settings=settings(),
+                             reasoner=None, trace=T(), side_effects={"calendar": {"remember"}},
+                             tools={}, directory=None)
+    check("a read batched with a write still runs the read", out["confirm_route"] == "execute")
+    check("the proposal is kept so the question can still be asked",
+          out.get("pending_action") is not None)
+    check("NO signature is burned for a confirmation that was never sent",
+          "last_confirm_sig" not in out)
+
+    # Second pass, proposal alone: the question is actually asked.
+    out2 = await confirm_node({**base, "actions": [create],
+                               "last_confirm_sig": out.get("last_confirm_sig")},
+                              confirm_policies={"calendar": policy}, settings=settings(),
+                              reasoner=None, trace=T(), side_effects={"calendar": {"remember"}},
+                              tools={}, directory=None)
+    check("the confirmation is then actually sent (no silence)",
+          bool(out2.get("reply_body")) and out2["confirm_route"] == "act")
+
+    # Riders belong to the CURRENT proposal. A turn that re-proposes without a remember must
+    # clear them, or the address the owner rejected fires on his yes.
+    out3 = await confirm_node(
+        {**base, "actions": [create], "pending_side_effects": [
+            {"task": "calendar.remember", "name": "Ana", "email": "ana@old.com"}]},
+        confirm_policies={"calendar": policy}, settings=settings(), reasoner=None, trace=T(),
+        side_effects={"calendar": {"remember"}}, tools={}, directory=None)
+    check("a re-proposal with no remember CLEARS the previous riders",
+          out3.get("pending_side_effects") == [])
+
+    # A correction turn drops the riders too.
+    from app.nodes.resolve import resolve_pending_node
+
+    out4 = await resolve_pending_node(
+        {"trace_id": "t", "from_me": True, "text": "nao, usa o outro email",
+         "pending_action": create, "pending_side_effects": [{"task": "calendar.remember",
+                                                            "name": "Ana", "email": "ana@old.com"}]},
+        confirm_policies={"calendar": policy}, trace=T(), tools={}, directory=None)
+    check("a correction drops the rejected address's rider",
+          out4.get("pending_side_effects") == [])
+
+    # Grounding spans the loop, not one activation — the ordinary multi-turn booking.
+    txt = _loop_text({"turn_text": "15h",
+                      "messages": [{"role": "user", "content": "marca com a Ana, ana@acme.com"}]})
+    check("grounding sees an address given an activation earlier", "ana@acme.com" in txt)
+
+
 # --- 8. message composition -----------------------------------------------------------------
 
 def card_checks():
@@ -437,9 +523,11 @@ def contract_checks():
           side_effect_verbs()["calendar"] == {"remember"})
     check("remember has no optional fields (so it costs nothing)",
           SKILLS["calendar"].schemas["remember"]["required"] == ["name", "email"])
-    check("the guidance tells the model the rules", "ADDRESS BOOK" in SKILLS["calendar"].guidance)
-    check("the guidance forbids inventing an address",
-          "NEVER invent" in SKILLS["calendar"].guidance)
+    from app.skills import system_prompt_for
+
+    on = system_prompt_for("calendar", settings())
+    check("with contacts ON the prompt carries the rules", "ADDRESS BOOK" in on)
+    check("with contacts ON the prompt forbids inventing an address", "NEVER invent" in on)
 
 
 # --- 10. disabled build ----------------------------------------------------------------------
@@ -453,11 +541,20 @@ def disabled_checks():
     cal = (deps.tools or {}).get("calendar")
     check("the calendar handler has no directory", getattr(cal, "directory", None) is None)
 
-    from app.skills import context_block_for
+    from app.skills import context_block_for, output_schema_for, system_prompt_for
 
     block, patch = context_block_for("calendar", {"turn_text": "Ana Silva"},
                                      {"directory": None, "settings": Settings()})
     check("no block is produced", block is None and patch == {})
+
+    # A flag that gates only the runtime still tells the model it keeps an address book "listed
+    # above", pointing at a section that is never injected — so it reasons against a phantom.
+    off = Settings()
+    sc = output_schema_for("calendar", settings=off)
+    tasks = [b["properties"]["task"]["const"] for b in sc["properties"]["actions"]["items"]["anyOf"]]
+    check("remember is ABSENT from the schema when disabled", "calendar.remember" not in tasks)
+    check("the address-book rules are ABSENT from the prompt when disabled",
+          "ADDRESS BOOK" not in system_prompt_for("calendar", off))
 
     from app.graph import build_graph
 
@@ -473,6 +570,7 @@ async def main() -> int:
     await sync_checks()
     await outbox_checks()
     await confirm_checks()
+    await graph_regression_checks()
     card_checks()
     contract_checks()
     disabled_checks()

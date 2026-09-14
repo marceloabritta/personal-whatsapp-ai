@@ -34,19 +34,24 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     domain = state.get("domain") or settings.default_domain
     locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
 
-    # The address book, injected as a prompt block — no tool hop, no await. Only on the FIRST pass
-    # of a loop: reason ② is composing prose from a tool result, not choosing an address, so
-    # re-injecting there would only spend tokens and invite a duplicate `remember`.
+    # The address book, injected as a prompt block — no tool hop, no await, ~0.3 ms.
+    #
+    # Injected on EVERY pass, including the read-backs. The tempting optimisation — first pass only,
+    # since reason ② "just composes prose from a tool result" — is wrong for the flow that matters
+    # most: an update runs `find` first, so the write (and its complete attendee roster) is composed
+    # in reason ②, with hops already ≥ 1. Dropping the block there left the model told to never
+    # invent an address while holding no addresses, so it either asked for one the book already had
+    # or silently dropped a guest from the roster it was rebuilding.
     context_block = None
     seen_contacts: dict = {}
-    if directory is not None and int(state.get("tool_hops") or 0) == 0:
+    if directory is not None:
         context_block, patch = context_block_for(
             domain, state, {"directory": directory, "settings": settings})
         seen_contacts = dict(patch.get("seen_contacts") or {})
 
     system = system_prompt_for(domain, settings, session_lang=locked_lang,
                                context_block=context_block)
-    schema = output_schema_for(domain)
+    schema = output_schema_for(domain, settings=settings)
     server_tools = server_tools_for(domain, settings)
     runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
     convo = _to_neutral(state.get("messages"))

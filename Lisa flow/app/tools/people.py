@@ -133,9 +133,14 @@ class GooglePeople:
         granted = set(getattr(creds, "granted_scopes", None) or [])
         if not granted:
             return True, "granted_scopes not reported; proceeding"
-        if any(s in granted for s in (*SCOPES, *SCOPES_READONLY)):
-            return True, "contacts scope granted"
-        return False, f"contacts scope NOT granted (have: {sorted(granted)})"
+        # Check the scope THIS client needs, not any contacts scope. Google's consent screen offers
+        # read and read-write as separate checkboxes, so accepting `.readonly` for the read-write
+        # client let through a token whose every write 403s — the exact "limps and fails
+        # mysteriously later" outcome this gate exists to prevent.
+        if any(sc in granted for sc in self._scopes):
+            return True, f"granted: {sorted(self._scopes)}"
+        return False, (f"required scope NOT granted — need one of {sorted(self._scopes)}, "
+                       f"have {sorted(granted)}")
 
     # ---- reads -------------------------------------------------------------------------
 

@@ -54,7 +54,7 @@ _WORKFLOW_SCHEMA = {
 
 # --- enforced-JSON output schema, per domain --------------------------------------------
 
-def output_schema_for(domain: str, skills: dict = SKILLS) -> dict:
+def output_schema_for(domain: str, skills: dict = SKILLS, settings=None) -> dict:
     """The enforced-JSON contract for ONE skill. Local skills (with verbs) get `actions` +
     `workflow`, where `actions.items` is an anyOf over just this domain's verbs; native skills
     (web) get the lean base — reasoning/state/message/lang, no actions."""
@@ -67,9 +67,10 @@ def output_schema_for(domain: str, skills: dict = SKILLS) -> dict:
     }
     required = ["reasoning", "state", "message", "lang"]
 
-    if skill.verbs:
+    verbs = skill.enabled_verbs(settings)
+    if verbs:
         branches: list[dict] = []
-        for verb in skill.verbs:
+        for verb in verbs:
             vs = skill.schemas[verb]
             p = {"task": {"const": f"{skill.name}.{verb}"}}
             p.update(vs["properties"])
@@ -91,8 +92,8 @@ def output_schema_for(domain: str, skills: dict = SKILLS) -> dict:
     }
 
 
-def has_actions(domain: str, skills: dict = SKILLS) -> bool:
-    return bool(skills[domain].verbs)
+def has_actions(domain: str, skills: dict = SKILLS, settings=None) -> bool:
+    return bool(skills[domain].enabled_verbs(settings))
 
 
 # --- per-domain system prompt -----------------------------------------------------------
@@ -105,11 +106,15 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
 
     skill = skills[domain]
     owner = settings.owner_name
+    guidance = skill.guidance
+    for attr, extra in skill.gated_guidance:
+        if getattr(settings, attr, False):
+            guidance = guidance + "\n" + extra
     return build_system_prompt(
         owner, settings.primary_tag,
-        guidance=skill.guidance.format(owner_name=owner),
+        guidance=guidance.format(owner_name=owner),
         describe=skill.describe.format(owner_name=owner),
-        has_actions=bool(skill.verbs),
+        has_actions=bool(skill.enabled_verbs(settings)),
         session_lang=session_lang,
         context_block=context_block,
     )

@@ -81,6 +81,9 @@ async def respond_node(
             # silently resurrecting this.
             update["reply_body"] = said
             update["pending_action"] = None
+            # The riders belong to the proposal being dropped; leaving them would fire the old
+            # address against whatever proposal the "try again" turn produces next.
+            update["pending_side_effects"] = []
             update["last_confirm_sig"] = None  # "try again" may legitimately re-ask the same thing
             route = "act"
         else:

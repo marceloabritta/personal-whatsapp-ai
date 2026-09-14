@@ -7,9 +7,10 @@ Skill together with the confirm/render policies and the router matcher."""
 from __future__ import annotations
 
 import difflib
+import re
 import unicodedata
 
-from ..tools.calendar import DESCRIBE, GUIDANCE, GoogleCalendarService
+from ..tools.calendar import CONTACTS_GUIDANCE, DESCRIBE, GUIDANCE, GoogleCalendarService
 from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
 from .calendar_format import (
@@ -97,6 +98,9 @@ def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     return "no"
 
 
+_EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
 def calendar_context(state: dict, ctx: dict):
     """The address-book block for this turn, plus what it surfaced.
 
@@ -108,21 +112,29 @@ def calendar_context(state: dict, ctx: dict):
     settings = ctx.get("settings")
     if d is None or not getattr(d, "ready", False):
         return None                      # fails open: no block, and Lisa asks as she does today
+    text = state.get("turn_text") or state.get("text") or ""
+    is_group = state.get("chat_kind") == "group"
     found = d.mentions(
-        state.get("turn_text") or state.get("text") or "",
+        text,
         phone=state.get("phone"),
         limit=getattr(settings, "contacts_max_in_prompt", 5),
-        group=(state.get("chat_kind") == "group"),
+        group=is_group,
     )
     if not found:
         return None
+    # What this conversation actually put on the table. In a group it is the only thing that may
+    # be shown back — see Directory.block.
+    offered = {m.group(0).lower() for m in _EMAIL_IN_TEXT.finditer(text)}
     seen = {}
     for c, _why in found:
         for e in c.get("emails") or []:
             seen[e.lower()] = {"name": c.get("name") or "",
                                "resource_name": c.get("resource_name") or "",
                                "n_emails": len(c.get("emails") or [])}
-    return {"block": d.block(found, settings.owner_name), "state": {"seen_contacts": seen}}
+    block = d.block(found, settings.owner_name, group=is_group, offered=offered)
+    if not block.strip():
+        return None
+    return {"block": block, "state": {"seen_contacts": seen}}
 
 
 def calendar_resolve_gate(verb: str, inputs: dict, state: dict):
@@ -168,6 +180,10 @@ CALENDAR = Skill(
     # the turn's text, dispatched detached, never rendered.
     side_effects={"remember"},
     context_provider=calendar_context,
+    # With contacts off, the verb leaves the schema and the address-book rules leave the prompt,
+    # so the build is the pre-feature one rather than one that merely never injects the block.
+    gated_verbs={"remember": "contacts_enabled"},
+    gated_guidance=[("contacts_enabled", CONTACTS_GUIDANCE)],
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",
     effort="medium",

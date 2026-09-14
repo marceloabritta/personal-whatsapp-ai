@@ -126,12 +126,20 @@ async def lifespan(app: FastAPI):
                 cstore = ContactStore(s.database_url, schema=s.log_schema)
                 try:
                     await cstore.open()
-                    deps.directory.store = cstore
                     snap = await cstore.load()
-                    if snap:
+                    if snap is None:
+                        # The read failed — distinct from "the mirror is empty". Proceeding would
+                        # let the first full sync reap the mirror against an empty snapshot and
+                        # delete every learned address and identity link. Drop the store for this
+                        # boot: the directory still syncs from Google and serves reads.
+                        log.warning("contacts mirror unreadable; running without the durable tier")
+                        cstore = None
+                    else:
                         deps.directory.load(snap["contacts"], snap["links"],
                                             snap["sync_token"], ready=bool(snap["contacts"]))
-                    log.info("%s", '{"boot":"contacts-store"}')
+                    if cstore is not None:
+                        deps.directory.store = cstore
+                        log.info("%s", '{"boot":"contacts-store"}')
                 except Exception as exc:
                     log.warning("contacts store disabled: %s", exc)
                     cstore = None

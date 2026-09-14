@@ -52,6 +52,22 @@ class Skill:
     # path, so anything that awaits or burns CPU here stalls every chat, not just this one.
     context_provider: Optional[Callable] = None
 
+    # Parts of the skill that only exist when a setting is on. A feature flag that gates only the
+    # RUNTIME leaves the model still being told about a capability it does not have — it then
+    # reasons against a section of the prompt that is never injected. These make the flag reach the
+    # contract itself, so "disabled" really is the pre-feature build.
+    #   gated_verbs:    {verb: settings_attr} — absent from the schema when the attr is falsy
+    #   gated_guidance: [(settings_attr, text)] — appended to guidance only when truthy
+    gated_verbs: dict = field(default_factory=dict)
+    gated_guidance: list = field(default_factory=list)
+
+    def enabled_verbs(self, settings=None) -> list:
+        """This skill's verbs for the given settings (all of them when settings is None)."""
+        if settings is None:
+            return list(self.verbs)
+        return [v for v in self.verbs
+                if not self.gated_verbs.get(v) or getattr(settings, self.gated_verbs[v], False)]
+
     # Per-skill reason-call runtime. model/effort fall back to the settings default when None, so a
     # skill only names what it wants to differ. `think` turns on adaptive thinking for this skill's
     # reason call — its depth is governed by `effort` (this is how Sonnet 5 exposes thinking under a

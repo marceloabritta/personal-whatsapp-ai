@@ -81,7 +81,11 @@ async def resolve_pending_node(
 
     trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
                pending=task, verdict=verdict, route="reason", domain=domain)
-    return {"domain": domain, "resolve_route": "reason"}
+    # The pending SURVIVES a non-yes turn (that is the fixing loop), but its riders do not. This
+    # turn is a correction — "no, her other address" — and the model will re-propose. Carrying the
+    # old riders forward would write the address he just rejected the moment he says yes to the
+    # corrected proposal. confirm re-attaches riders to whatever it proposes next.
+    return {"domain": domain, "resolve_route": "reason", "pending_side_effects": []}
 
 
 def route_after_resolve(state: MessageState) -> str:

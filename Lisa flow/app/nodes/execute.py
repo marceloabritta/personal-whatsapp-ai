@@ -96,6 +96,10 @@ async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict 
         # inputs — strip them so nothing internal reaches a handler or Google.
         inputs = {k: v for k, v in (action or {}).items()
                   if k != "task" and not k.startswith("_")}
+        # The chat's resolved phone, for the address book's identity binding. Underscore-prefixed
+        # so the handler's own input filter treats it as bookkeeping, never as a tool input.
+        if state.get("phone"):
+            inputs["_phone"] = state["phone"]
 
         # Resolved-id gate — tool safety, not user confirmation. The RULE belongs to the skill
         # (calendar: an event surfaced by a prior search; setup: a chat surfaced by a card, a

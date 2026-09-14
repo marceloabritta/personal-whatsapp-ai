@@ -28,6 +28,24 @@ def _verb_of(action: dict) -> str:
     return (action or {}).get("task", "").partition(".")[2]
 
 
+def _loop_text(state: dict) -> str:
+    """Everything said in THIS loop, as one string, for the grounding check.
+
+    `turn_text` is only the messages ingested by THIS activation — on a window continuation that
+    is just the latest line. Grounding against it alone broke the ordinary shape of a booking:
+    "marca com a Ana, ana@acme.com" / "que horas?" / "15h" puts the address one activation back,
+    so the remember was silently discarded and the address never learned. The checkpointed
+    `messages` are what the model actually read, so they are the honest haystack."""
+    parts = [state.get("turn_text") or "", state.get("text") or ""]
+    for m in state.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):  # media turns carry a block list
+            parts.extend(b.get("text", "") for b in content if isinstance(b, dict))
+    return "\n".join(p for p in parts if p)
+
+
 def _grounded(action: dict, turn_text: str) -> bool:
     """Is this side effect's address actually present in the conversation?
 
@@ -65,9 +83,9 @@ async def confirm_node(
     verbs = (side_effects or {}).get(domain) or set()
     stripped = [a for a in actions if _verb_of(a) in verbs]
     actions = [a for a in actions if _verb_of(a) not in verbs]
-    turn_text = state.get("turn_text") or state.get("text") or ""
-    dropped = [a for a in stripped if not _grounded(a, turn_text)]
-    stripped = [a for a in stripped if _grounded(a, turn_text)]
+    haystack = _loop_text(state)
+    dropped = [a for a in stripped if not _grounded(a, haystack)]
+    stripped = [a for a in stripped if _grounded(a, haystack)]
 
     approved: list = []
     observations: list = []
@@ -140,25 +158,32 @@ async def confirm_node(
             update["reply_body"] = ask_message
             update["last_confirm_sig"] = sig
     elif ask_message and approved:
-        # The routing bug this used to hide: `if approved: route = "execute"` above wins, and the
-        # composed confirmation was thrown away with nothing storing the pending — so a find/list
-        # batched with a create silently lost the question. Store it regardless of routing; the
-        # owner's yes next turn resolves it.
-        sig = _signature(pending, ask_message)
-        if sig != state.get("last_confirm_sig"):
-            update["pending_action"] = pending
-            update["last_confirm_sig"] = sig
+        # The routing bug this hides: `if approved: route = "execute"` above wins, and the composed
+        # confirmation was thrown away with nothing storing the pending — so a find/list batched
+        # with a create silently lost the question. Keep the proposal alive so the read can run and
+        # the question still gets asked on the next pass.
+        #
+        # `last_confirm_sig` is deliberately NOT written here. It fingerprints a confirmation
+        # ACTUALLY SENT (see _signature), and this branch sends nothing — route is "execute".
+        # Recording it would make the repeat-suppressor above swallow the real ask on the next
+        # pass, and the owner would get silence in answer to "book a meeting".
+        update["pending_action"] = pending
 
     # A side effect batched with a gated write RIDES WITH THE PROPOSAL and fires only on the
     # owner's yes — otherwise a proposal he corrects ("no, her old address") would already have
     # written the rejected address into his real address book, permanently and silently.
-    if stripped:
-        if update.get("pending_action") is not None:
-            update["pending_side_effects"] = stripped
-        elif directory is not None:
-            handler = (tools or {}).get(domain)
-            if handler is not None:
-                directory.spawn(_run_side_effects(handler, stripped, state))
+    #
+    # The riders belong to THIS proposal, so they are written whenever a proposal is stored, even
+    # when empty. Writing them only `if stripped` left the previous proposal's riders standing:
+    # correct Lisa's address, say yes to the correction, and the address you REJECTED is what
+    # reached Google — and since a contact that already has one is never appended to, it became
+    # the address she used for that person forever.
+    if update.get("pending_action") is not None:
+        update["pending_side_effects"] = stripped
+    elif stripped and directory is not None:
+        handler = (tools or {}).get(domain)
+        if handler is not None:
+            directory.spawn(_run_side_effects(handler, stripped, state))
 
     trace.code(
         tid, node="confirm", loop_id=state.get("loop_id"), domain=domain,

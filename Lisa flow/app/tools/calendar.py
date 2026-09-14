@@ -220,8 +220,13 @@ FIND — the resolver. Search by title words ("query"), the person ("attendee"),
 UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, all_day, location, virtual, attendees) and "message": null — but remember "attendees", when you send it at all, is the complete final list. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
 DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id" and "message": null.
+"""
 
-ADDRESS BOOK — you keep {owner_name}'s contacts. The people this conversation mentions are listed above under "Address book", with exactly what is on file for each.
+# Appended to GUIDANCE only when contacts are ENABLED. With the feature off the model must not
+# be told it keeps an address book "listed above" — the block is never injected, so it would be
+# reasoning against a phantom section: reading the absent listing as "NONE on file", emitting
+# remembers that are stripped and vanish, and switching guest lines to a model-invented name.
+CONTACTS_GUIDANCE = """ADDRESS BOOK — you keep {owner_name}'s contacts. The people this conversation mentions are listed above under "Address book", with exactly what is on file for each.
 - NEVER invent an email address. If it is not listed above and not written in this chat, ask for it.
 - ONE address on file -> use it, silently. Do not ask; the confirmation card names the person and the address, and that is {owner_name}'s chance to correct it.
 - TWO OR MORE on file -> do NOT choose. Put the question in "message", listing them numbered, emit no action that turn, and use his answer next turn.
@@ -230,6 +235,7 @@ ADDRESS BOOK — you keep {owner_name}'s contacts. The people this conversation 
 - He gives an address that differs from the one on file -> his wins, always. Use it for the invite; do NOT emit calendar.remember for it (he is correcting you, not adding a second address).
 - calendar.remember is silent bookkeeping. It needs no confirmation, produces no reply, and you never mention it — do not tell him you saved anything, and never read the address book out loud.
 - Emit: {{"task": "calendar.remember", "name": "Ana Silva", "email": "ana@acme.com"}}"""
+
 
 
 class GoogleCalendarService:
@@ -811,10 +817,22 @@ class GoogleCalendarService:
             inputs = {**inputs, "_idempotency_key": uuid.uuid4().hex}
 
         attempts = self._attempts_for(verb, inputs)
+        # Which addresses this write actually put on an invite — recorded after success so the
+        # address book learns the owner's real preference and binds the chat's identity. This is
+        # the only producer of contact_links rows.
+        used = list(inputs.get("attendees") or []) if verb in ("create", "update") else []
+
         last: Exception | None = None
         for attempt in range(attempts):
             try:
-                return await asyncio.to_thread(getattr(self, method), inputs)
+                res = await asyncio.to_thread(getattr(self, method), inputs)
+                if res.get("ok") and used and self.directory is not None:
+                    for addr in used:
+                        try:
+                            await self.directory.note_used(addr, phone=inputs.get("_phone"))
+                        except Exception as exc:  # bookkeeping must never fail a calendar write
+                            log.warning("note_used failed for %s: %s", addr, exc)
+                return res
             except Exception as exc:  # never raise into the graph
                 last = exc
                 if not self._is_transient(exc) or attempt == attempts - 1:

@@ -54,10 +54,20 @@ def _read_dotenv(path: str = ".env") -> dict:
     return out
 
 
-def _free_port() -> int:
+# A FIXED port, because the project's OAuth client is a "Web application" type: Google only
+# accepts a redirect_uri that was registered in advance, so a random port can never match. Register
+# exactly "http://localhost:8765/" on the client and this works for every future run too.
+# (A "Desktop app" client would accept any loopback port, which is why the first version picked one.)
+DEFAULT_PORT = 8765
+
+
+def _port_is_free(port: int) -> bool:
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
 
 
 class _Catcher(http.server.BaseHTTPRequestHandler):
@@ -130,6 +140,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--client-id", default=None)
     ap.add_argument("--client-secret", default=None)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
+                    help=f"loopback port; must match a registered redirect URI (default {DEFAULT_PORT})")
+    ap.add_argument("--verify", metavar="REFRESH_TOKEN", default=None,
+                    help="skip minting: just check a token you already have (e.g. from the "
+                         "OAuth Playground) against the live People API")
     args = ap.parse_args()
 
     env = {**_read_dotenv(), **os.environ}
@@ -144,8 +159,20 @@ def main() -> int:
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     state = secrets.token_urlsafe(24)
-    port = _free_port()
+    # --verify: the token was minted elsewhere (the OAuth Playground is the usual route here).
+    # Checking it against the live API before it reaches production is the part that matters;
+    # where it came from is not.
+    if args.verify:
+        ok, detail = _verify(client_id, client_secret, args.verify)
+        print(("VERIFIED — " if ok else "NOT USABLE — ") + detail)
+        return 0 if ok else 1
+
+    port = args.port
     redirect_uri = f"http://localhost:{port}/"
+    if not _port_is_free(port):
+        print(f"Port {port} is in use. Close whatever holds it, or pass --port N and register\n"
+              f"http://localhost:N/ as a redirect URI as well.", file=sys.stderr)
+        return 2
 
     params = {
         "client_id": client_id,

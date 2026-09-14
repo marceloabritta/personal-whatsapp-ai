@@ -161,6 +161,9 @@ class Directory:
         self._links: dict = {}          # E.164 -> resource_name
         self._sync_token: Optional[str] = None
         self._ready = False
+        # Did we successfully read the durable mirror at boot? Only then may a full sweep reap
+        # rows from it — otherwise an empty snapshot would delete learned addresses and links.
+        self._mirror_loaded = store is None
         self._last_full = 0.0
         self._tasks: set = set()        # STRONG refs; a bare create_task can be GC'd mid-flight
         self._sync_task: Optional[asyncio.Task] = None
@@ -236,8 +239,13 @@ class Directory:
     def by_email(self, email: str) -> Optional[dict]:
         return self._by_email.get((email or "").lower())
 
-    def block(self, found: list, owner: str) -> str:
-        """The prompt snippet. Pure string building; empty list -> ""."""
+    def block(self, found: list, owner: str, *, group: bool = False,
+              offered: set | None = None) -> str:
+        """The prompt snippet. Pure string building; empty list -> "".
+
+        In a GROUP the stored record is not served verbatim: one address typed into the room must
+        not unlock the rest of that person's card. Only the addresses the conversation itself
+        offered are rendered, so a private address cannot be read out to people who never had it."""
         if not found:
             return ""
         lines = [
@@ -247,6 +255,8 @@ class Directory:
         for c, why in found:
             name = c.get("name") or "(unnamed)"
             emails = list(c.get("emails") or [])
+            if group:
+                emails = [e for e in emails if e.lower() in (offered or set())]
             pref = c.get("preferred")
             if pref and pref in emails:  # order only — it never auto-selects
                 emails = [pref] + [e for e in emails if e != pref]
@@ -283,36 +293,62 @@ class Directory:
             return None
 
         want = _name_tokens(name or "")
+        if not want:
+            # A name that yields no index tokens ("Zé", "Dr", "") tells us nothing about WHO this
+            # address belongs to. It used to fall through to "the person in this chat", which
+            # wrote a third party's address onto the chat partner's real contact card.
+            return {"kind": "learn", "resource_name": None, "name": name, "email": email}
+
         target = None
         if phone:
             found = self._resolve_phone(phone)
-            if len(found) == 1:
-                cand = found[0]
-                # The phone identifies the CHAT, not necessarily the person being discussed.
-                # Accept it as the target only when no name was given, or the first name agrees
-                # (Q2's "phone matches and first name matches" bar). Otherwise the owner is
-                # talking about somebody else and this phone is the wrong card to write to.
-                if not want or (_given(cand) and _given(cand) == want[0]):
-                    target = cand
-        if target is None and want:
-            for c in self._contacts.values():
-                if _name_tokens(c.get("name") or "") == want:
-                    target = c
-                    break
+            # The phone identifies the CHAT, not necessarily the person being discussed. It is a
+            # valid target only when the first name agrees — Q2's "phone matches and first name
+            # matches" bar. Otherwise the owner is talking about somebody else entirely.
+            if len(found) == 1 and _given(found[0]) and _given(found[0]) == want[0]:
+                target = found[0]
+
+        if target is None:
+            # Match the way the READ side matches, or the two disagree and Lisa surfaces a contact
+            # from the book and then creates a duplicate of him: the read index is pair-based and
+            # tolerant of extra tokens ("Ana Silva" resolves "Ana Maria Silva Costa"), so an exact
+            # token-list equality here missed every stored middle name and second surname.
+            # Ambiguity is not a match — the same rule _resolve_phone already applies.
+            cands = self._candidates_by_name(want)
+            if len(cands) == 1:
+                target = cands[0]
+            elif len(cands) > 1:
+                return None  # which one? not a guess worth making against a real address book
 
         if target is not None:
             if target.get("emails"):
                 return None  # has one already — use it for the invite, do not append
-            if target.get("source") != GOOGLE:
-                return {"kind": "learn", "resource_name": target["resource_name"],
-                        "name": name, "email": email}
-            return {"kind": "add_email", "resource_name": target["resource_name"],
+            kind = "learn" if target.get("source") != GOOGLE else "add_email"
+            return {"kind": kind, "resource_name": target["resource_name"],
                     "name": name, "email": email}
 
-        proven = bool(phone and self._resolve_phone(phone))
-        if proven and self.s.contacts_create_people:
+        # Nobody in the book matches. Creating them is what the owner asked for, but it cannot be
+        # justified by "the chat partner is a known contact" — that test made `create` fire
+        # precisely when the identity was WRONG, so every third party mentioned in a chat with a
+        # known contact accreted a real Google contact. For a person who is genuinely not in the
+        # book there is no identity proof to be had; the honest trigger is simply a real name
+        # (given + family) and an address the conversation actually contained.
+        if self.s.contacts_create_people and len(want) >= 2:
             return {"kind": "create", "resource_name": None, "name": name, "email": email}
         return {"kind": "learn", "resource_name": None, "name": name, "email": email}
+
+    def _candidates_by_name(self, want: list) -> list:
+        """Contacts whose stored name contains every token of `want`, via the read index."""
+        if len(want) < 2:
+            # A bare first name binds nobody on the write side either — it may only promote a
+            # contact the PHONE already resolved (handled above).
+            return []
+        seen: dict = {}
+        for c in self._by_pair.get((want[0], want[1]), ()):
+            toks = set(_name_tokens(c.get("name") or ""))
+            if all(w in toks for w in want):
+                seen[c["resource_name"]] = c
+        return list(seen.values())
 
     async def remember(self, name: str, email: str, *, phone: Optional[str] = None) -> None:
         """Durable row FIRST, then the worker performs the Google write. Never awaited by a node."""
@@ -427,11 +463,13 @@ class Directory:
                 self._links.pop(k, None)
 
     def load(self, contacts: list, links: Optional[dict] = None,
-             sync_token: Optional[str] = None, *, ready: bool = True) -> None:
+             sync_token: Optional[str] = None, *, ready: bool = True,
+             mirror_loaded: bool = True) -> None:
         """Seed the snapshot directly (the durable tier at boot, and the selftests)."""
         self._contacts = {c["resource_name"]: dict(c) for c in contacts}
         self._links = dict(links or {})
         self._sync_token = sync_token
+        self._mirror_loaded = mirror_loaded
         self._reindex()
         self._ready = ready
 
@@ -474,8 +512,13 @@ class Directory:
         self._ready = True
         if self.store is not None:
             try:
+                # `full` here means "this sweep may REAP rows the sweep did not return". That is
+                # only true if we know what was in the mirror to begin with: if the boot load
+                # failed (`_mirror_loaded` False) the snapshot started empty, and reaping against
+                # it would delete every learned address and every identity link permanently —
+                # rows that exist nowhere else. Mirror the contacts, reap nothing.
                 await self.store.replace(list(self._contacts.values()), next_token,
-                                         full=was_full)
+                                         full=was_full and self._mirror_loaded)
             except Exception as exc:
                 log.warning("directory mirror write failed: %s", exc)
 
@@ -517,8 +560,15 @@ class Directory:
                 # A terminal failure must not leave an optimistic patch asserting an address
                 # Google has never seen — the incremental sync will never correct it, because
                 # that contact never changed.
-                terminal = await self.store.fail(job["id"], str(exc),
-                                                 self.s.contacts_write_attempts)
+                #
+                # `create` gets ONE attempt, ever. It carries no idempotency key and, unlike
+                # add_email, has no read-back that makes a replay a no-op — so a lost response
+                # (Google committed, the socket died) would create the same person twice on the
+                # next drain. A lost create costs one un-learned address; a duplicated create
+                # costs the owner a hand-merge in his real address book, and poisons matching for
+                # that person until he does it.
+                attempts = 1 if job["kind"] == "create" else self.s.contacts_write_attempts
+                terminal = await self.store.fail(job["id"], str(exc), attempts)
                 if terminal:
                     self._rollback(job)
                 log.warning("contact write failed (%s): %s", job["kind"], exc)
