@@ -11,6 +11,11 @@ skill's own confirm policy, decides what the incoming message means:
                      Only the owner's calendar may be written on the owner's say-so, and a
                      stranger's "sim" must not be answered either — announcing that we are
                      waiting would turn every bystander's agreement into chatter in the chat.
+  owner says no    → the proposal is DROPPED (with its riders, its workflow goal and the
+                     confirmation fingerprint) and the turn goes to `reason` so she can answer.
+                     A refusal is not a correction — "não precisa" used to land in the fixing
+                     loop below, which KEEPS the write, so Lisa went on holding it.
+
   anything else    → the SAME domain's `reason`, pending KEPT. This is the fixing loop: "my
                      email is wrong", "the location is X", "add a conference room" are all
                      corrections to the proposal, and the model answers them by proposing a
@@ -68,10 +73,24 @@ async def resolve_pending_node(
         return {"actions": [action], "domain": domain, "pending_action": None,
                 "pending_side_effects": [], "resolve_route": "execute"}
 
-    if verdict == "yes":
-        # Someone else agreed. Ignored, silently, and the proposal keeps standing.
+    if verdict == "no" and is_owner:
+        # He declined. "other" is the FIXING loop — it keeps the proposal so a correction can
+        # replace it — and a refusal routed there left the write standing, with Lisa still holding
+        # it and waiting. A decline is not a correction: the proposal is dead.
+        #
+        # `workflow` goes too. It is the gather memory toward a goal, and the goal was just
+        # refused; leaving it would have the model resume the same booking next turn.
         trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
-                   pending=task, verdict="yes", owner=False, route="hold",
+                   pending=task, verdict="no", owner=True, route="reason", dropped=True)
+        return {"domain": domain, "resolve_route": "reason",
+                "pending_action": None, "pending_side_effects": [],
+                "workflow": None, "last_confirm_sig": None}
+
+    if verdict in ("yes", "no"):
+        # Someone else agreed or declined. Only the owner's calendar is written on the owner's
+        # say-so, and only he can call the proposal off. Ignored, silently, proposal standing.
+        trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
+                   pending=task, verdict=verdict, owner=False, route="hold",
                    reason="not_owner")
         return {"resolve_route": "hold", "domain": domain,
                 # This turn produces no message. Both fields are per-turn scratch that only

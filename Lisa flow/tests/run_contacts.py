@@ -505,6 +505,37 @@ async def graph_regression_checks():
     check("a correction drops the rejected address's rider",
           out4.get("pending_side_effects") == [])
 
+    # A REFUSAL is not a correction. "nao precisa" used to land in the fixing loop, which keeps
+    # the write — so Lisa went on holding a proposal the owner had declined.
+    from app.intent import classify_confirmation
+
+    for word in ("nao precisa", "nao", "esquece", "deixa pra la", "never mind", "no need"):
+        check(f"{word!r} reads as a decline", classify_confirmation(word) == "no")
+    for word in ("nao, 16h", "sim mas 17h", "que horas?"):
+        check(f"{word!r} stays a correction", classify_confirmation(word) == "other")
+    # "cancela" must NOT be a decline: on a delete confirmation ("Cancelar?") it means YES.
+    check("'cancela' is never read as a refusal", classify_confirmation("cancela") == "other")
+
+    out5 = await resolve_pending_node(
+        {"trace_id": "t", "from_me": True, "text": "nao precisa",
+         "pending_action": create, "workflow": {"task": "calendar.create"},
+         "last_confirm_sig": "abc",
+         "pending_side_effects": [{"task": "calendar.remember", "name": "Ana",
+                                   "email": "ana@x.com"}]},
+        confirm_policies={"calendar": policy}, trace=T(), tools={}, directory=None)
+    check("a refusal DROPS the proposal", out5.get("pending_action") is None)
+    check("a refusal drops its riders", out5.get("pending_side_effects") == [])
+    check("a refusal drops the workflow goal", out5.get("workflow") is None)
+    check("a refusal clears the confirmation fingerprint",
+          out5.get("last_confirm_sig") is None)
+
+    # Only the owner may call it off.
+    out6 = await resolve_pending_node(
+        {"trace_id": "t", "from_me": False, "text": "nao precisa", "pending_action": create},
+        confirm_policies={"calendar": policy}, trace=T(), tools={}, directory=None)
+    check("a bystander's refusal does NOT drop the proposal",
+          out6.get("resolve_route") == "hold" and "pending_action" not in out6)
+
     # Grounding spans the loop, not one activation — the ordinary multi-turn booking.
     txt = _loop_text({"turn_text": "15h",
                       "messages": [{"role": "user", "content": "marca com a Ana, ana@acme.com"}]})

@@ -76,6 +76,25 @@ _YES_PHRASES = {
     "esta certo", "ta bom", "por favor",
     "hazlo ya", "esta bien", "de acuerdo",
 }
+# Declining a proposal. Deliberately NARROW: a word only belongs here if it cannot also mean
+# "yes" to the question being asked. "cancela" is the sharpest example and is excluded — on a
+# `calendar.delete` confirmation ("Cancelar?") it means GO AHEAD, so treating it as a refusal
+# would silently drop exactly the cancellation the owner was approving. "para" (stop / for) and a
+# bare "deixa" ("deixa às 15h" = leave it at 3pm) are ambiguous the same way and are excluded too.
+_NO_WORDS = {
+    "no", "nope", "nah", "naw", "dont", "nevermind",
+    "nao", "n", "negativo",
+}
+_NO_PHRASES = {
+    "never mind", "forget it", "dont bother", "do not", "not now", "no need", "skip it",
+    "leave it", "drop it",
+    "nao precisa", "deixa pra", "pra la", "deixa quieto", "esquece isso", "melhor nao",
+    "nao quero", "nao vamos", "sem necessidade", "nao precisamos",
+    "mejor no", "olvidalo", "no hace", "no importa",
+}
+# Single words that decline on their own but are too generic to list above.
+_NO_SOLO = {"esquece", "olvidalo", "nevermind"}
+
 # Filler that carries no instruction — ignored when deciding if a reply is a CLEAN yes.
 _CONFIRM_FILLER = {
     "please", "pls", "plz", "por", "favor", "obrigado", "obrigada", "thanks", "thank", "you",
@@ -84,14 +103,36 @@ _CONFIRM_FILLER = {
 
 
 def classify_confirmation(text: str) -> str:
-    """"yes" | "other" — is this reply a clean affirmative? (programmatic, no model call).
+    """"yes" | "no" | "other" — what does this reply do to a pending proposal? (no model call).
 
-    "yes" only when every substantive token is affirmative (or filler); anything else — a
-    rejection, a question, or a yes carrying a change ("sim, mas 17h") — returns "other" so the
-    model handles it. Bigram phrases ("go ahead", "pode mandar") count as affirmative."""
+    "yes" only when every substantive token is affirmative (or filler). "no" on the same rule for
+    declines — a clean refusal and nothing else. Everything in between ("sim, mas 17h", "não, 16h",
+    a question) is "other", which keeps the proposal alive for the model to correct.
+
+    The distinction matters because "other" is the FIXING loop: the pending write is deliberately
+    kept so a correction can replace it. Without a "no", answering "não precisa" left the proposal
+    standing — the owner had declined and Lisa was still holding the write, waiting."""
     tokens = _normalize(text).split()
     if not tokens:
         return "other"
+
+    # Declines first: "no" is a substantive token to the affirmative pass below, so a reply like
+    # "nao precisa" would otherwise just fall through to "other".
+    n_matched = [False] * len(tokens)
+    for i in range(len(tokens) - 1):
+        if f"{tokens[i]} {tokens[i + 1]}" in _NO_PHRASES:
+            n_matched[i] = n_matched[i + 1] = True
+    n_hit = any(n_matched)
+    n_other = False
+    for i, tok in enumerate(tokens):
+        if n_matched[i]:
+            continue
+        if tok in _NO_WORDS or tok in _NO_SOLO:
+            n_hit = True
+        elif tok not in _CONFIRM_FILLER:
+            n_other = True
+    if n_hit and not n_other:
+        return "no"
     # Consume affirmative bigrams first, so their words aren't counted as "other".
     matched = [False] * len(tokens)
     for i in range(len(tokens) - 1):
