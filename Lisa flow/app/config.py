@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     google_refresh_token: str = ""
     google_calendar_id: str = "primary"
     default_meeting_minutes: int = 45
+    default_start_hour: str = "09:00:00"   # all-day -> timed, when no hour is given
     calendar_timezone: str = "America/Sao_Paulo"
 
     # Session review — a second model grades every turn once a session closes (app/review/).
@@ -130,7 +131,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-09-12-auto-transcription"
+    prompt_version: str = "2026-09-14-all-day-events"
 
     @property
     def review_settle_window(self) -> float:

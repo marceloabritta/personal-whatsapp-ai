@@ -12,7 +12,7 @@ its `message` is null. Confirmations read from the action (create) or the cached
 `ActionResult.data`. Unsupported languages fall back to the model (see LANGS + the respond node)."""
 from __future__ import annotations
 
-from ..tools.calendar import changes
+from ..tools.calendar import changes, is_date_only, span_days
 
 from datetime import datetime
 
@@ -41,7 +41,11 @@ _L = {
         "empty": "Nada na agenda.", "all_day": "Dia inteiro", "untitled": "(sem título)",
         "event": "(evento)",
         "failed_transient": "Não consegui falar com o Google agora. Quer que eu tente de novo?",
-        "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local", "u_guests": "Adicionar",
+        "u_title": "Novo título", "u_time": "Novo horário", "u_where": "Novo local",
+        "days": "dias", "u_date": "Nova data", "u_all_day": "Passar para dia inteiro",
+        "u_timed": "Passar para horário",
+        "guests_silent": "Os convidados não serão avisados.",
+        "guests_full": "Participantes (lista final)", "guests_dropped": "Removidos",
         "u_video_off": "Remover chamada de vídeo", "u_where_off": "Remover local",
         "u_guests_off": "Remover todos os convidados", "u_title_off": "Remover título",
     },
@@ -57,7 +61,11 @@ _L = {
         "empty": "Nothing on your calendar.", "all_day": "All day", "untitled": "(no title)",
         "event": "(event)",
         "failed_transient": "I couldn't reach Google just now. Want me to try again?",
-        "u_title": "New title", "u_time": "New time", "u_where": "New location", "u_guests": "Add",
+        "u_title": "New title", "u_time": "New time", "u_where": "New location",
+        "days": "days", "u_date": "New date", "u_all_day": "Make it all-day",
+        "u_timed": "Give it a time",
+        "guests_silent": "The guests won't be notified.",
+        "guests_full": "Guests (final list)", "guests_dropped": "Removed",
         "u_video_off": "Remove video call", "u_where_off": "Remove location",
         "u_guests_off": "Remove all guests", "u_title_off": "Remove title",
     },
@@ -72,7 +80,11 @@ _L = {
         "empty": "Nada en la agenda.", "all_day": "Todo el día", "untitled": "(sin título)",
         "event": "(evento)",
         "failed_transient": "No pude conectar con Google ahora. ¿Lo intento de nuevo?",
-        "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación", "u_guests": "Añadir",
+        "u_title": "Nuevo título", "u_time": "Nueva hora", "u_where": "Nueva ubicación",
+        "days": "días", "u_date": "Nueva fecha", "u_all_day": "Pasar a todo el día",
+        "u_timed": "Poner hora",
+        "guests_silent": "No se avisará a los invitados.",
+        "guests_full": "Invitados (lista final)", "guests_dropped": "Quitados",
         "u_video_off": "Quitar videollamada", "u_where_off": "Quitar ubicación",
         "u_guests_off": "Quitar todos los invitados", "u_title_off": "Quitar título",
     },
@@ -100,6 +112,40 @@ def _dt(iso: str, lang: str) -> str:
     return f"{fmt_date(iso, lang)}, {fmt_time(iso, lang)}"
 
 
+def _when(ev: dict, lang: str) -> list:
+    """The date/time line(s) for any event, either kind — THE one renderer.
+
+    Returns a list because an all-day event reads as two lines (the day, then "Dia inteiro")
+    while a timed one reads as one. Never route a date-only ISO through _dt: fmt_time would
+    turn it into midnight and print "12:00 AM" on a whole-day event."""
+    L = _L[lang]
+    iso = ev.get("start")
+    if not iso:
+        return []
+    all_day = ev.get("all_day", is_date_only(iso))
+    if not all_day:
+        return [_dt(iso, lang)]
+    iso = iso[:10]                      # coerce, exactly as the handler does
+    last = (ev.get("end") or iso)[:10]
+    try:
+        n = span_days(iso, last)
+        if n <= 1:
+            return [fmt_date(iso, lang), L["all_day"]]
+        return [f"{fmt_date(iso, lang)} \u2192 {fmt_date(last, lang)}",
+                f"{L['all_day']} \u00b7 {n} {L['days']}"]
+    except ValueError:
+        # A date we cannot parse is a model typo, not a reason to drop the whole card —
+        # show it raw so the owner can see what it is about to approve and correct it.
+        return [iso, L["all_day"]]
+
+
+def _guest_note(action: dict, L: dict) -> str:
+    """Whether the guests are about to be emailed. `send_invites` is a query parameter, not an
+    event field, so it never appears in the change-set — the owner would otherwise approve a
+    write with no idea that eight invitations ride on it."""
+    return L["guests_silent"] if action.get("send_invites") is False else L["guests_will"]
+
+
 def _cap(line: str) -> str:
     # Capitalize the first character of a line when it's a letter (so a name-email "ana@x.com" →
     # "Ana@x.com"); lines starting with a digit or symbol (dates "05/ago", the "*bold*" header) are
@@ -119,15 +165,18 @@ def compose_create(action: dict, state: dict) -> str | None:
     lang = _lang(state); L = _L[lang]
     if not action.get("start"):
         return None
-    lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"], _dt(action["start"], lang)]
+    lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"],
+             *_when(action, lang)]
     if action.get("virtual"):
         lines.append(L["video"])
     elif action.get("location"):
         lines.append(action["location"])
+    ask = L["ask_create"]
     if action.get("attendees"):
         lines.append(L["participants"])
         lines.extend(action["attendees"])
-    lines += ["", L["ask_create"]]
+        ask = f"{ask} {_guest_note(action, L)}"
+    lines += ["", ask]
     return _joined(lines)
 
 
@@ -149,10 +198,28 @@ def compose_update(action: dict, state: dict) -> str | None:
 
     lines = [f"{L['confirm_update']}:", "", header or L["event"]]
     if ev.get("start"):
-        lines.append(_dt(ev["start"], lang))
+        lines.extend(_when(ev, lang))
 
     described: list[str] = []
-    for ch in changes(action, ev):
+    chs = changes(action, ev)
+    by = {c["field"]: c for c in chs}
+    # start / end / all_day describe ONE thing — when the event happens. Emitted per field they
+    # produced two contradictory "Novo horário" lines on any multi-day or converting update.
+    if {"start", "end", "all_day"} & set(by):
+        after = {
+            "start": by["start"]["new"] if "start" in by else ev.get("start"),
+            "end": by["end"]["new"] if "end" in by else ev.get("end"),
+            "all_day": by["all_day"]["new"] if "all_day" in by else ev.get("all_day"),
+        }
+        if "all_day" in by:
+            described.append(L["u_all_day"] if after["all_day"] else L["u_timed"])
+        when = _when(after, lang)
+        if when:
+            described.append(f"{(L['u_date'] if after['all_day'] else L['u_time'])}: {when[0]}")
+            described.extend(when[1:])
+    for ch in chs:
+        if ch["field"] in ("start", "end", "all_day"):
+            continue
         described.extend(_describe_change(ch, L, lang))
 
     if not described:
@@ -160,7 +227,10 @@ def compose_update(action: dict, state: dict) -> str | None:
         # owner to approve a blank; let the model explain instead.
         return None
 
-    lines += [""] + described + ["", L["ask_update"]]
+    ask = L["ask_update"]
+    if action.get("attendees") or ev.get("attendees"):
+        ask = f"{ask} {_guest_note(action, L)}"
+    lines += [""] + described + ["", ask]
     return _joined(lines)
 
 
@@ -178,7 +248,14 @@ def _describe_change(ch: dict, L: dict, lang: str) -> list[str]:
     if f == "attendees":
         if kind == "clear":
             return [L["u_guests_off"]]
-        return [L["participants"], *new]
+        # Google's patch REPLACES the attendee array, so this list is the final roster, not an
+        # addition. Naming it "Participantes" read as "these are being added" — and anyone the
+        # model left out was silently uninvited AND mailed a cancellation.
+        out = [L["guests_full"], *new]
+        dropped = sorted(set(ch.get("old") or []) - set(new))
+        if dropped:
+            out.append(f"{L['guests_dropped']}: {', '.join(dropped)}")
+        return out
     return []
 
 
@@ -189,11 +266,11 @@ def compose_delete(action: dict, state: dict) -> str | None:
         return None
     lines = [f"{L['confirm_delete']}:", "", ev.get("title") or L["event"]]
     if ev.get("start"):
-        lines.append(_dt(ev["start"], lang))
+        lines.extend(_when(ev, lang))
     if ev.get("attendees"):
         lines.append(L["participants"])
         lines.extend(ev["attendees"])
-    ask = L["ask_delete"] + (f" {L['guests_will']}" if ev.get("attendees") else "")
+    ask = L["ask_delete"] + (f" {_guest_note(action, L)}" if ev.get("attendees") else "")
     lines += ["", ask]
     return _joined(lines)
 
@@ -206,8 +283,9 @@ def fmt_create(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['created']}:", "", d.get("title") or L["event"]]
-    if d.get("start"):
-        lines.append(_dt(d["start"], lang))
+    lines.extend(_when(d, lang))
+    if d.get("attendees"):
+        lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
     if d.get("html_link"):
         lines += ["", f"{L['event_link']}: {d['html_link']}"]
     return _joined(lines)
@@ -219,8 +297,9 @@ def fmt_update(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['updated']}:", "", d.get("title") or L["event"]]
-    if d.get("start"):
-        lines.append(_dt(d["start"], lang))
+    lines.extend(_when(d, lang))
+    if d.get("attendees"):
+        lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
     lines += ["", L["u_done"]]
     if d.get("html_link"):
         lines += ["", f"{L['event_link']}: {d['html_link']}"]
@@ -231,10 +310,9 @@ def fmt_delete(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['cancelled']}:", "", d.get("title") or L["event"]]
-    if d.get("start"):
-        lines.append(_dt(d["start"], lang))
+    lines.extend(_when(d, lang))
     if d.get("had_attendees"):
-        lines.append(L["guests_did"])
+        lines.append(L["guests_did"] if d.get("notified", True) else L["guests_silent"])
     return _joined(lines)
 
 
@@ -266,7 +344,11 @@ def fmt_list(results: list, state: dict) -> str:
         if day not in by_day:
             by_day[day] = []
             order.append(iso)
-        t = L["all_day"] if "T" not in iso else fmt_time(iso, lang)
+        if e.get("all_day", "T" not in iso):
+            n = e.get("days") or 1
+            t = L["all_day"] if n <= 1 else f"{L['all_day']} \u00b7 {n} {L['days']}"
+        else:
+            t = fmt_time(iso, lang)
         by_day[day].append(f"{t} - {e.get('title') or L['untitled']}")
     # The day header is bold (WhatsApp *…* — it has no underline) so each day stands out.
     return "\n\n".join(f"*{fmt_date(iso, lang)}*\n" + "\n".join(by_day[iso[:10]]) for iso in order)

@@ -364,8 +364,8 @@ async def graph_checks() -> None:
     st = await _invoke(graph, _upsert("sim", mid="c2"))
     check("[create·yes] the write ran after a clean yes", cal.n("create") == 1)
     check("[create·yes] the yes turn made ZERO model calls", len(stub.calls) == 1)
-    check("[create·yes] the executed write was confirmed in code",
-          next((i.get("confirmed") for v, i in cal.calls if v == "create"), None) is True)
+    check("[create·yes] approval is the code stamp, never a field the handler sees",
+          next((i for v, i in cal.calls if v == "create"), {}).get("_approved_by") is None)
     check("[create·yes] the SKILL rendered the success card",
           "Scheduled" in evo.sent[-1][1] and "Call" in evo.sent[-1][1])
     check("[create·yes] pending cleared", st.get("pending_action") is None)
@@ -994,6 +994,204 @@ async def presence_checks() -> None:
     check("[verify] ...and the miss is stated", "NOT CREATED" in r["summary"].upper())
 
 
+async def allday_checks() -> None:
+    print("\nStep-3 P7 — all-day / multi-day events + guests")
+    import json
+    from app.config import Settings
+    from app.skills import output_schema_for
+    from app.skills.base import count_optionals, count_unions
+    from app.skills.calendar_format import compose_create, compose_delete, compose_update, fmt_list
+    from app.tools.calendar import (GoogleCalendarService, as_day, changes, from_wire_end,
+                                    is_date_only, resolve_kind, span_days, to_wire_end, _same_dt)
+
+    # --- 1-2. the schema budget, and the field that paid for it --------------------------
+    sch = output_schema_for("calendar")
+    check("[budget] optionals == 23 (<= the live-verified cap of 24)",
+          count_optionals(sch) == 23, detail=f"count={count_optionals(sch)}")
+    check("[budget] unions unchanged at 8", count_unions(sch) == 8)
+    check("[budget] NO `confirmed` field anywhere — approval is _approved_by",
+          "confirmed" not in json.dumps(sch))
+    check("[budget] all_day on create AND update",
+          all("all_day" in b["properties"]
+              for b in sch["properties"]["actions"]["items"]["anyOf"]
+              if b["properties"]["task"]["const"] in ("calendar.create", "calendar.update")))
+    check("[budget] send_invites on delete, so a cancel can stay quiet",
+          any("send_invites" in b["properties"]
+              for b in sch["properties"]["actions"]["items"]["anyOf"]
+              if b["properties"]["task"]["const"] == "calendar.delete"))
+
+    # --- 4-7. the pure helpers ------------------------------------------------------------
+    check("[day] boundary round-trips", from_wire_end(to_wire_end("2026-09-16")) == "2026-09-16")
+    check("[day] span is inclusive", span_days("2026-09-14", "2026-09-16") == 3
+          and span_days("2026-09-14", "2026-09-14") == 1)
+    check("[kind] the flag beats the spelling",
+          resolve_kind({"all_day": False, "start": "2026-09-14"}) is False
+          and resolve_kind({"all_day": True, "start": "2026-09-14T09:00:00-03:00"}) is True)
+    check("[kind] all_day:false is an instruction, not an absence",
+          resolve_kind({"all_day": False}, {"all_day": True}) is False)
+    check("[kind] with neither, the patched event keeps its kind",
+          resolve_kind({"title": "x"}, {"all_day": True}) is True)
+    check("[kind] a date and a naive midnight are NOT the same instant",
+          not _same_dt("2026-09-14", "2026-09-14T00:00:00"))
+
+    svc = GoogleCalendarService(Settings())
+
+    # --- 6, 8-9. the wire body ------------------------------------------------------------
+    b, _ = svc._body_from({"title": "T", "start": "2026-09-14"})
+    check("[body] one all-day day -> exclusive end +1, and NO timeZone",
+          b["start"] == {"date": "2026-09-14"} and b["end"] == {"date": "2026-09-15"}
+          and "timeZone" not in b["start"])
+    b, _ = svc._body_from({"title": "T", "start": "2026-09-14", "end": "2026-09-16"})
+    check("[body] three days -> end.date 2026-09-17", b["end"] == {"date": "2026-09-17"})
+    b, _ = svc._body_from({"all_day": True, "start": "2026-09-14T00:00:00-03:00"})
+    check("[body] COERCION: all_day + a datetime is a whole day, not a midnight meeting",
+          b["start"] == {"date": "2026-09-14"})
+
+    # --- 13-14. conversions write BOTH sides ----------------------------------------------
+    prev_allday = {"all_day": True, "start": "2026-09-14", "end": "2026-09-16"}
+    b, _ = svc._body_from({"all_day": False}, existing=prev_allday)
+    check("[flip] all-day -> timed writes both sides as dateTime",
+          "dateTime" in b["start"] and "dateTime" in b["end"] and "date" not in b["start"])
+    b, _ = svc._body_from({"all_day": True},
+                          existing={"all_day": False, "start": "2026-09-14T15:00:00-03:00"})
+    check("[flip] timed -> all-day writes both sides as date",
+          b["start"] == {"date": "2026-09-14"} and "date" in b["end"])
+
+    # --- 12. THE REGRESSION: moving a trip must not collapse it ---------------------------
+    b, _ = svc._body_from({"start": "2026-09-20"}, existing=prev_allday)
+    check("[regression] moving a 3-day event keeps 3 days",
+          b["start"] == {"date": "2026-09-20"} and b["end"] == {"date": "2026-09-23"})
+
+    # --- 11. the view hides Google's exclusive end ----------------------------------------
+    v = svc._event_view({"id": "E1", "summary": "Trip",
+                         "start": {"date": "2026-09-14"}, "end": {"date": "2026-09-17"},
+                         "attendees": [{"email": "ana@x.com", "responseStatus": "accepted"}]})
+    check("[view] exclusive end reads back as the INCLUSIVE last day", v["end"] == "2026-09-16")
+    check("[view] all_day + days surfaced", v["all_day"] is True and v["days"] == 3)
+    check("[view] guest response status is carried",
+          v["attendee_status"] == {"ana@x.com": "accepted"})
+
+    # --- 10. validation before any API call -----------------------------------------------
+    r = await svc.run("create", {"title": "T", "start": "2026-09-16", "end": "2026-09-14"})
+    check("[validate] an end before the start is refused, with no service built",
+          (not r["ok"]) and r.get("error") == "validation")
+
+    # --- 17-19. guests + invites ----------------------------------------------------------
+    calls = []
+    class Ev:
+        def insert(self, **kw):
+            calls.append(("insert", kw))
+            class R:
+                def execute(s_): return {"id": "E9", "summary": "Offsite", "htmlLink": "http://l",
+                                         "start": kw["body"].get("start"),
+                                         "end": kw["body"].get("end"),
+                                         "attendees": kw["body"].get("attendees") or []}
+            return R()
+        def get(self, **kw):
+            class R:
+                def execute(s_): return {"id": "E1", "summary": "Offsite",
+                                         "start": {"date": "2026-09-14"},
+                                         "end": {"date": "2026-09-17"},
+                                         "attendees": [{"email": "ana@x.com"}]}
+            return R()
+        def delete(self, **kw):
+            calls.append(("delete", kw))
+            class R:
+                def execute(s_): return {}
+            return R()
+    class FakeSvc:
+        def events(self): return Ev()
+    g = GoogleCalendarService(Settings()); g._svc = FakeSvc()
+
+    calls.clear()
+    r = await g.run("create", {"title": "Offsite", "start": "2026-09-14", "end": "2026-09-16",
+                               "attendees": ["ana@x.com", "rafael@x.com"]})
+    kw = calls[0][1]
+    check("[guests] an all-day create carries BOTH the dates and the guests",
+          kw["body"]["start"] == {"date": "2026-09-14"} and len(kw["body"]["attendees"]) == 2)
+    check("[guests] and notifies by default", kw["sendUpdates"] == "all")
+    check("[guests] the card can tell the truth about it", r["data"]["notified"] is True)
+
+    calls.clear()
+    await g.run("create", {"title": "Ferias", "start": "2026-09-14",
+                           "attendees": ["ana@x.com"], "send_invites": False})
+    check("[guests] send_invites:false suppresses the mail but keeps the guest",
+          calls[0][1]["sendUpdates"] == "none" and calls[0][1]["body"]["attendees"])
+
+    calls.clear()
+    r = await g.run("delete", {"event_id": "E1", "send_invites": False})
+    check("[guests] A QUIET CANCEL is finally possible",
+          calls[0][1]["sendUpdates"] == "none")
+    check("[guests] ...and the card says nobody was told", r["data"]["notified"] is False)
+    calls.clear()
+    await g.run("delete", {"event_id": "E1"})
+    check("[guests] a plain cancel still notifies everyone", calls[0][1]["sendUpdates"] == "all")
+
+    # --- retry policy: never replay a write that can email guests -------------------------
+    check("[retry] a notifying update gets ONE attempt",
+          g._attempts_for("update", {}) == 1 and g._attempts_for("delete", {}) == 1)
+    check("[retry] a silent one may still be replayed",
+          g._attempts_for("update", {"send_invites": False}) > 1)
+    check("[retry] create keeps its retries — the idempotency key protects it",
+          g._attempts_for("create", {}) > 1)
+
+    # --- 23a. the replacement trap --------------------------------------------------------
+    ev = {"title": "Offsite", "start": "2026-09-14", "end": "2026-09-16", "all_day": True,
+          "attendees": ["ana@x.com", "rafael@x.com"]}
+    msg = compose_update({"task": "calendar.update", "event_id": "E1",
+                          "attendees": ["ana@x.com", "carla@x.com"]},
+                         {"session_lang": "pt", "seen_events": {"E1": ev}})
+    check("[trap] a partial guest list is shown as a REPLACEMENT, not an addition",
+          "lista final" in msg)
+    check("[trap] ...and names who is being dropped", "rafael@x.com" in msg.split("Removidos")[-1])
+
+    # --- 21, 23b. the cards ---------------------------------------------------------------
+    m = compose_create({"task": "calendar.create", "title": "Offsite", "all_day": True,
+                        "start": "2026-09-14", "end": "2026-09-16",
+                        "attendees": ["ana@x.com"]}, {"session_lang": "pt"})
+    check("[card] a multi-day create reads as a span, never '12:00 AM'",
+          "Dia inteiro · 3 dias" in m and "12:00" not in m)
+    check("[card] ...and warns that the guests will be emailed",
+          "convidados serão avisados" in m)
+    m2 = compose_create({"task": "calendar.create", "title": "Ferias", "all_day": True,
+                         "start": "2026-09-14", "attendees": ["ana@x.com"],
+                         "send_invites": False}, {"session_lang": "pt"})
+    check("[card] a silent add says so", "não serão avisados" in m2)
+
+    conv = compose_update({"task": "calendar.update", "event_id": "E1", "all_day": True},
+                          {"session_lang": "pt", "seen_events": {"E1": {
+                              "title": "Revisao", "start": "2026-09-04T15:00:00-03:00",
+                              "all_day": False}}})
+    check("[card] a conversion is named in words", "dia inteiro" in conv.lower())
+    span = compose_update({"task": "calendar.update", "event_id": "E1",
+                           "start": "2026-09-14", "end": "2026-09-18"},
+                          {"session_lang": "pt", "seen_events": {"E1": ev}})
+    check("[card] a start+end change prints ONE when-line, not two contradictory ones",
+          span.count("Nova data") + span.count("Novo horário") == 1)
+
+    d = compose_delete({"task": "calendar.delete", "event_id": "E1", "send_invites": False},
+                       {"session_lang": "pt", "seen_events": {"E1": ev}})
+    check("[card] a quiet cancel is visibly quiet", "não serão avisados" in d)
+
+    # --- 12/16. the agenda ----------------------------------------------------------------
+    agenda = fmt_list([{"data": {"items": [
+        {"start": "2026-09-14", "end": "2026-09-16", "all_day": True, "days": 3, "title": "Trip"},
+        {"start": "2026-09-14T09:00:00-03:00", "title": "Dentista"}]}}],
+        {"session_lang": "pt"})
+    check("[agenda] a multi-day event shows its span", "3 dias" in agenda)
+    check("[agenda] a timed event still shows its hour", "09:00 AM" in agenda)
+
+    # --- 15. post-conditions --------------------------------------------------------------
+    missed = svc._unapplied({"all_day": True, "start": "2026-09-14", "end": "2026-09-16"},
+                            {"all_day": True, "start": "2026-09-14", "end": "2026-09-15"}, None)
+    check("[verify] a wrong last day is caught", "last day" in missed)
+    missed = svc._unapplied({"all_day": True}, {"all_day": False}, None)
+    check("[verify] a conversion that did not happen is caught", "all-day setting" in missed)
+    missed = svc._unapplied({"attendees": ["b@x.com", "a@x.com"]},
+                            {"attendees": ["a@x.com", "b@x.com"]}, None)
+    check("[verify] guest ORDER is not a failure (Google reorders them)", missed == [])
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -1007,4 +1205,5 @@ if __name__ == "__main__":
     asyncio.run(calendar_checks())
     asyncio.run(confirmation_checks())
     asyncio.run(presence_checks())
+    asyncio.run(allday_checks())
     _finish()

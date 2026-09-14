@@ -22,14 +22,16 @@ def _verb(required: list[str], properties: dict) -> dict:
     return {"required": list(required), "properties": dict(properties)}
 
 
-# A mutating verb carries `confirmed`: the model sets it true only after the owner has given
-# a go-ahead. The calendar skill's FlagConfirm policy refuses a gated verb without it (structural
-# gate, not prompt-alone). Plain-typed boolean — no union cost.
-_CONFIRMED = {"type": "boolean"}
+# NO `confirmed` FIELD, DELIBERATELY. Approval is `_approved_by`, stamped by resolve_pending on
+# the owner's own message and absent from every schema the model sees (skills/confirm.py). A
+# model-writable approval flag was only ever advisory — the gate stopped reading it when a
+# repeated tool failure had the model set it itself — so it was three optional slots and three
+# lines of prompt buying nothing. Those slots are what `all_day` is paid for. Do not reintroduce it.
 
 # create — needs only title + start; everything else optional.
 # NB: Anthropic caps the TOTAL optional-parameter count of an enforced schema at 24 (a
-# separate limit from the 16 union/array cap; see count_optionals + run_step3). duration_min
+# separate limit from the 16 union/array cap; see count_optionals + run_step3) — verified
+# against the live API, which rejects 25 with "too many optional parameters". duration_min
 # was dropped (use `end`) to keep margin under it; the handler still honours it if present.
 CREATE = _verb(
     ["title", "start"],
@@ -39,9 +41,9 @@ CREATE = _verb(
         "end": _STR,              # ISO 8601; omitted -> start + default_meeting_minutes
         "virtual": _BOOL,         # true -> Google Meet link; nulls location (video wins)
         "location": _STR,
-        "attendees": _STRARR,     # emails
+        "attendees": _STRARR,     # emails — ALWAYS the complete final list, never a delta
         "send_invites": _BOOL,    # default true; false -> don't email guests (sendUpdates=none)
-        "confirmed": _CONFIRMED,
+        "all_day": _BOOL,         # true -> a whole-day event; start/end are read as dates
     },
 )
 
@@ -72,16 +74,19 @@ UPDATE = _verb(
         "end": _STR,
         "virtual": _BOOL,
         "location": _STR,
-        "attendees": _STRARR,
+        "attendees": _STRARR,     # ALWAYS the complete final list — patch REPLACES the array
         "send_invites": _BOOL,
-        "confirmed": _CONFIRMED,
+        "all_day": _BOOL,
     },
 )
 
 # delete — needs a resolved event_id.
 DELETE = _verb(
     ["event_id"],
-    {"event_id": _STR, "confirmed": _CONFIRMED},
+    {
+        "event_id": _STR,
+        "send_invites": _BOOL,   # default true; false -> cancel without emailing the guests
+    },
 )
 
 CALENDAR_TASK_SCHEMAS: dict[str, dict] = {

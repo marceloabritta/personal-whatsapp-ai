@@ -40,6 +40,8 @@ _STRONG = {
     "remarque", "lembrete", "convite", "convidado", "convidados", "convidar", "evento",
     "calendario",
     "agenda", "reunion", "cita", "recordatorio", "agendame", "invitado", "invitados",
+    "birthday", "aniversario", "cumpleanos", "holiday", "feriado",
+    "vacation", "ferias", "vacaciones", "pto",
 }
 
 # Weak / time-ish words that MIGHT be scheduling but often are not ("cancel my sub", "monday
@@ -50,6 +52,7 @@ _WEAK = {
     "cancelar", "mover", "amanha", "hoje", "manha", "tarde", "noite",
     "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
     "manana", "hoy", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo",
+    "trip", "viagem", "viaje", "folga", "block", "bloquear", "inteiro",
 }
 
 
@@ -73,9 +76,18 @@ def _hits(tokens: list[str], lexicon: set[str], threshold: float) -> bool:
     return False
 
 
+# Multi-word signals the token lexicon structurally cannot see: _normalize splits on
+# whitespace, so "all day" and "dia inteiro" are two tokens each and no single-token entry can
+# ever match them — while "dia" alone is far too common to put in _WEAK.
+_STRONG_PHRASES = ("all day", "dia inteiro", "todo el dia", "day off", "dia de folga")
+
+
 def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     """"yes" | "no" | "maybe" — is this turn calendar work? (programmatic, no model call)."""
-    tokens = _normalize(text).split()
+    norm = _normalize(text)
+    if any(p in norm for p in _STRONG_PHRASES):
+        return "yes"
+    tokens = norm.split()
     if not tokens:
         return "no"
     if _hits(tokens, _STRONG, threshold):

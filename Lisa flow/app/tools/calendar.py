@@ -19,7 +19,7 @@ import logging
 import socket
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from .base import ActionResult
 
@@ -57,12 +57,68 @@ _MATCH_THRESHOLD = 0.6
 # So presence is decided in exactly one place, and the change-set is computed once and consumed
 # by both layers.
 
-CHANGE_FIELDS = ("title", "start", "end", "virtual", "location", "attendees")
+CHANGE_FIELDS = ("title", "start", "end", "all_day", "virtual", "location", "attendees")
 
 
 def provided(inp: dict, key: str) -> bool:
     """Did the model actually send this field? false / "" / [] / 0 all count as SENT."""
     return isinstance(inp, dict) and key in inp and inp[key] is not None
+
+
+# --- one kind, decided once ----------------------------------------------------------------
+#
+# Google models the two kinds with different wire fields: a timed event carries
+# {dateTime, timeZone}; an all-day event carries {date: "YYYY-MM-DD"} — and its end.date is
+# EXCLUSIVE, the day AFTER the last day. Both facts stay sealed in this module. Above the
+# handler an event is `all_day` plus an INCLUSIVE last day, which is what a person means when
+# they say "I'm away the 14th to the 16th".
+
+
+def is_date_only(iso: str | None) -> bool:
+    """Is this the all-day SPELLING? A bare YYYY-MM-DD, no time part."""
+    return bool(iso) and "T" not in iso
+
+
+def resolve_kind(inp: dict, prev: dict | None = None) -> bool:
+    """Is this write all-day? THE decision, made in exactly one place.
+
+    The explicit flag wins when the model sent it — including `all_day: false`, which is the
+    instruction "give this a time", not an absence (see `provided`). With no flag the spelling
+    of the new start decides; with neither, the event being patched keeps its kind. Callers must
+    COERCE the values to this answer rather than re-deriving it, so the flag and the value can
+    never disagree — two implementations of one fact is the bug this module already paid for."""
+    if provided(inp, "all_day"):
+        return bool(inp["all_day"])
+    ref = inp.get("start") or inp.get("end")
+    if ref:
+        return is_date_only(ref)
+    return bool((prev or {}).get("all_day"))
+
+
+def as_day(iso: str) -> str:
+    """Coerce any ISO value to its date part. This is what makes the flag authoritative:
+    `all_day: true` carrying a full datetime becomes the right whole day, not a midnight
+    meeting."""
+    return iso[:10]
+
+
+def _shift(day: str, n: int) -> str:
+    return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
+
+
+def to_wire_end(last_day: str) -> str:
+    """Inclusive last day -> Google's exclusive end.date. The ONLY place +1 appears."""
+    return _shift(last_day, 1)
+
+
+def from_wire_end(end_date: str) -> str:
+    """Google's exclusive end.date -> the inclusive last day. The ONLY place -1 appears."""
+    return _shift(end_date, -1)
+
+
+def span_days(first_day: str, last_day: str) -> int:
+    """How many days an all-day event covers, inclusive. 1 for a single day."""
+    return (date.fromisoformat(last_day) - date.fromisoformat(first_day)).days + 1
 
 
 def _same_dt(a: str | None, b: str | None) -> bool:
@@ -71,6 +127,10 @@ def _same_dt(a: str | None, b: str | None) -> bool:
     if a == b:
         return True
     if not a or not b:
+        return False
+    # A naive date and a naive midnight datetime compare EQUAL, which would let a
+    # timed<->all-day conversion vanish from the change-set and report "nothing to change".
+    if is_date_only(a) != is_date_only(b):
         return False
     try:
         return datetime.fromisoformat(a) == datetime.fromisoformat(b)
@@ -98,6 +158,14 @@ def changes(action: dict, before: dict | None = None) -> list[dict]:
             if has_meet is not None and bool(new) == has_meet:
                 continue
             out.append({"field": f, "kind": "set" if new else "clear", "new": bool(new), "old": has_meet})
+            continue
+        if f == "all_day":
+            # A conversion is a change the owner must see named. Compare against the cached
+            # view's own kind; equal means nothing is converting.
+            if old is not None and bool(new) == bool(old):
+                continue
+            out.append({"field": f, "kind": "set" if new else "clear",
+                        "new": bool(new), "old": old})
             continue
         if f in ("start", "end"):
             if _same_dt(new, old):
@@ -128,14 +196,20 @@ HOW YOU WORK HERE — you do NOT write the confirmation, the result, or the agen
 
 ALWAYS
 - The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase.
-- To create, change or cancel anything, emit the action with "confirmed": false and leave "message" null. The system shows {owner_name} a confirmation and, when he answers yes, runs it for you — do NOT set "confirmed": true yourself and do NOT re-send the action. Only `list` and `find` run without asking.
-- You cannot make recurring/repeating or all-day / multi-day events. If asked for one, say so briefly in "message" and offer a single timed event instead.
+- To create, change or cancel anything, just emit the action and leave "message" null. The system shows {owner_name} a confirmation and runs it for you when he agrees — you never mark anything approved, and you never re-send an action you already sent. Only `list` and `find` run without asking.
+- Two kinds of event. Set "all_day": true for whole-day things — birthdays, holidays, travel and trips, time off, a deadline with no hour, "block Thursday". Leave it out for anything with an hour.
+- On an all-day event write "start" as a bare date, "2026-09-14". On a timed one write a full ISO datetime with offset, "2026-09-14T15:00:00-03:00".
+- "end" on an all-day event is the LAST DAY, INCLUSIVE. Away the 14th through the 16th is start "2026-09-14", end "2026-09-16". A single day needs no "end" at all. Never add a day to the end yourself — the system handles how Google stores it.
+- To convert an event, send "all_day" with the new value and nothing else. The system rewrites both ends of the event for you.
+- "attendees" is ALWAYS THE COMPLETE FINAL GUEST LIST, never just the people being added. Google replaces the whole list, so anyone you leave out is uninvited and emailed a cancellation. To add Carla to an event that already has Ana and Rafael, send all three. To remove someone, send everyone except them. If you do not know the current list, `find` the event first and read it.
+- Guests work the same on an all-day event as on a timed one, and they are invited by default. "send_invites": false adds or removes them without sending any email — use it on create, update AND delete when {owner_name} asks you to do something quietly. An all-day event has no timezone, so every guest sees it on the same calendar day wherever they are.
+- You still cannot make recurring/repeating events. If asked for one, say so briefly in "message" and offer a single event instead.
 
 CREATE — you only need a title and a start; do not interrogate {owner_name} for details he did not give.
 - Title is what the event is ABOUT — a short topic ("Budget review"). If you can't resolve the topic, use the format Name & Name for the people, starting with {owner_name}.
 - No end -> defaults to 45 minutes. Use "virtual": true for a video call (a Meet link is created and the location dropped); otherwise set "location". Add "attendees" emails when he names people (invited by default; "send_invites": false to suppress).
 - Vague about the hour? Assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) — the confirmation shows it so he can fix it.
-- Emit: {{"task": "calendar.create", "title": ..., "start": ..., "confirmed": false}} with "message": null.
+- Emit: {{"task": "calendar.create", "title": ..., "start": ...}} with "message": null.
 
 LIST — read-only, no confirmation. Resolve the window from his question (default: what is coming up). Emit `calendar.list` with time_min/time_max; the system formats and sends the agenda.
 
@@ -143,9 +217,9 @@ FIND — the resolver. Search by title words ("query"), the person ("attendee"),
 - To answer "when is X", just emit the find; the system replies.
 - To CANCEL an event, emit the find AND set "workflow" to {{"task": "calendar.delete"}} — when the search hits a single event the system asks to cancel it directly. If several match, the system lists them and you pick one next turn.
 
-UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, location, virtual, attendees), "confirmed": false, "message": null. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
+UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, all_day, location, virtual, attendees) and "message": null — but remember "attendees", when you send it at all, is the complete final list. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
-DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id", "confirmed": false, "message": null."""
+DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id" and "message": null."""
 
 
 class GoogleCalendarService:
@@ -226,12 +300,25 @@ class GoogleCalendarService:
     def _event_view(self, e: dict) -> dict:
         start = e.get("start") or {}
         end = e.get("end") or {}
+        all_day = bool(start.get("date"))
+        s_iso = start.get("dateTime") or start.get("date")
+        e_iso = end.get("dateTime") or end.get("date")
+        if all_day and e_iso:
+            # Google's exclusive boundary stops here and goes no further. Above the handler an
+            # all-day event ends on its LAST DAY, which is what a person means by "through the 16th".
+            e_iso = from_wire_end(e_iso)
         return {
             "event_id": e.get("id"),
             "title": e.get("summary") or "(no title)",
-            "start": start.get("dateTime") or start.get("date"),
-            "end": end.get("dateTime") or end.get("date"),
+            "start": s_iso,
+            "end": e_iso,
+            "all_day": all_day,
+            "days": span_days(s_iso, e_iso) if (all_day and s_iso and e_iso) else None,
             "attendees": [a.get("email") for a in e.get("attendees") or [] if a.get("email")],
+            # Who has actually accepted. Carried now so a future card can show it without
+            # needing another round-trip; nothing renders it yet.
+            "attendee_status": {a["email"]: a.get("responseStatus")
+                                for a in e.get("attendees") or [] if a.get("email")},
             "location": e.get("location"),
             "html_link": e.get("htmlLink"),
         }
@@ -257,7 +344,7 @@ class GoogleCalendarService:
         )
 
     @staticmethod
-    def _agenda(views: list[dict]) -> str:
+    def _agenda(views: list[dict], window_start: date | None = None) -> str:
         """The owner's agenda layout for `list` — start-sorted events grouped by local day:
             DD/MMM - Weekday
             HH:MM - Title
@@ -271,30 +358,79 @@ class GoogleCalendarService:
                 dt = datetime.fromisoformat(iso)
             except ValueError:
                 continue
-            all_day = "T" not in iso
-            if not days or days[-1][0] != dt.date():
-                header = f"{dt.day:02d}/{_MONTHS[dt.month - 1]} - {_WEEKDAYS[dt.weekday()]}"
-                days.append((dt.date(), [header]))
-            time_str = "All day" if all_day else dt.strftime("%H:%M")
+            all_day = v.get("all_day", is_date_only(iso))
+            # An in-progress MULTI-DAY ALL-DAY event starts before the window; group it under
+            # the window's first day so "what's on this week" never opens with last Thursday.
+            # Narrow on purpose: a single-day or timed event keeps its own date, always.
+            day = dt.date()
+            if (window_start and all_day and (v.get("days") or 1) > 1
+                    and day < window_start):
+                day = window_start
+            if not days or days[-1][0] != day:
+                header = f"{day.day:02d}/{_MONTHS[day.month - 1]} - {_WEEKDAYS[day.weekday()]}"
+                days.append((day, [header]))
+            if all_day:
+                n = v.get("days") or 1
+                if n <= 1:
+                    time_str = "All day"
+                elif day == dt.date():
+                    time_str = f"All day ({n} days, through {v.get('end')})"
+                else:
+                    time_str = f"All day (day {(day - dt.date()).days + 1} of {n})"
+            else:
+                time_str = dt.strftime("%H:%M")
             days[-1][1].append(f"{time_str} - {v.get('title') or '(no title)'}")
         return "\n\n".join("\n".join(lines) for _, lines in days)
 
-    def _body_from(self, inp: dict, base: dict | None = None) -> tuple[dict, bool]:
-        """Build (event body, want_meet). Only fields present in `inp` are set, so the same
-        builder serves create (full) and update (partial patch)."""
+    @staticmethod
+    def _default_last_day(first: str, prev: dict) -> str:
+        """No end given on an all-day write: keep the event's current span (a move), else one
+        day (a create). Moving a 3-day trip must not silently shrink it to a single day."""
+        if prev.get("all_day") and prev.get("start") and prev.get("end"):
+            return _shift(first, span_days(prev["start"], prev["end"]) - 1)
+        return first
+
+    def _body_from(self, inp: dict, base: dict | None = None,
+                   existing: dict | None = None) -> tuple[dict, str | None]:
+        """Build (event body, conference intent). Only fields present in `inp` are set, so the
+        same builder serves create (full) and update (partial patch).
+
+        The KIND is resolved once by `resolve_kind` and the values are then COERCED to match it
+        — an `all_day: true` carrying a full datetime becomes the right whole day rather than a
+        midnight meeting. Both sides are always written together, because Google rejects a mixed
+        body ("start and end must both be date or both be dateTime"), so a patch that flips the
+        kind must carry both even when only one of them changed."""
         body = dict(base or {})
         tz = self.s.calendar_timezone
         if provided(inp, "title"):
             body["summary"] = inp["title"]
-        if provided(inp, "start"):
-            body["start"] = {"dateTime": inp["start"], "timeZone": tz}
-            end = inp.get("end")
-            if not end:
-                dur = inp.get("duration_min") or self.s.default_meeting_minutes
-                end = self._plus_minutes(inp["start"], dur)
-            body["end"] = {"dateTime": end, "timeZone": tz}
-        elif provided(inp, "end"):
-            body["end"] = {"dateTime": inp["end"], "timeZone": tz}
+
+        prev = existing or {}
+        new_start = inp["start"] if provided(inp, "start") else None
+        new_end = inp["end"] if provided(inp, "end") else None
+        all_day = resolve_kind(inp, prev)
+        # Write the dates when either side moved, or when the kind itself is flipping.
+        flips = provided(inp, "all_day") and all_day != bool(prev.get("all_day"))
+        if new_start or new_end or flips:
+            if all_day:
+                first = as_day(new_start or prev.get("start") or "")
+                if first:   # nothing to anchor on (a flip against an event we never read) —
+                    last = as_day(new_end) if new_end else self._default_last_day(first, prev)
+                    if last < first:
+                        last = first    # a backwards span is a typo, not a zero-day event
+                    body["start"] = {"date": first}          # no timeZone — an all-day
+                    body["end"] = {"date": to_wire_end(last)}  # event has no zone at all
+            else:
+                start = new_start or prev.get("start") or ""
+                if is_date_only(start):   # all-day -> timed, and no hour was given
+                    start = f"{start}T{self.s.default_start_hour}"
+                if new_end and not is_date_only(new_end):
+                    end = new_end
+                else:
+                    dur = inp.get("duration_min") or self.s.default_meeting_minutes
+                    end = self._plus_minutes(start, dur)
+                body["start"] = {"dateTime": start, "timeZone": tz}
+                body["end"] = {"dateTime": end, "timeZone": tz}
 
         # Conference INTENT, not a "want a meet" boolean. Removing a Meet is a real instruction
         # with its own wire form (conferenceData: null), and BOTH forms are ignored by Google
@@ -328,6 +464,9 @@ class GoogleCalendarService:
         if not inp.get("title") or not inp.get("start"):
             return {"ok": False, "error": "validation",
                     "summary": "create needs a title and a start time."}
+        if resolve_kind(inp) and inp.get("end") and as_day(inp["end"]) < as_day(inp["start"]):
+            return {"ok": False, "error": "validation",
+                    "summary": "the last day of an all-day event cannot be before its first."}
         body, conference = self._body_from(inp)
         want_meet = conference == "create"
         kw = dict(calendarId=self._cal(), body=body, sendUpdates=self._send_updates(inp))
@@ -365,13 +504,19 @@ class GoogleCalendarService:
         else:
             where = view["location"] or "no location"
         parts = [f"Created '{view['title']}'", f"start {view['start']}", where]
-        n = len(inp.get("attendees") or [])
+        if view.get("all_day"):
+            parts.append(f"all day ({view.get('days') or 1} day(s), through {view['end']})")
+        # Count the guests GOOGLE returned, not the ones we asked for — same rule the Meet
+        # read-back already follows — and say honestly whether they were emailed.
+        notified = self._send_updates(inp) != "none"
+        n = len(view.get("attendees") or [])
         if n:
-            parts.append(f"{n} guest(s) invited")
+            parts.append(f"{n} guest(s) {'invited' if notified else 'added without notice'}")
         if view["html_link"]:
             parts.append(f"event link: {view['html_link']}")
         # Full view in data so the skill can render the "Scheduled" card programmatically.
-        return {"ok": True, "summary": " · ".join(parts), "data": {**view, "meet_link": meet}}
+        return {"ok": True, "summary": " · ".join(parts),
+                "data": {**view, "meet_link": meet, "notified": notified}}
 
     def _list(self, inp: dict) -> ActionResult:
         params = dict(calendarId=self._cal(), singleEvents=True, orderBy="startTime",
@@ -380,7 +525,11 @@ class GoogleCalendarService:
             params["timeMax"] = inp["time_max"]
         items = self._service().events().list(**params).execute().get("items", [])
         views = [self._event_view(e) for e in items]
-        return {"ok": True, "summary": self._agenda(views) or "No upcoming events.",
+        try:
+            window_start = datetime.fromisoformat(params["timeMin"]).date()
+        except (KeyError, ValueError):
+            window_start = None
+        return {"ok": True, "summary": self._agenda(views, window_start) or "No upcoming events.",
                 "data": {"items": views}}
 
     def _find(self, inp: dict) -> ActionResult:
@@ -451,19 +600,26 @@ class GoogleCalendarService:
         eid = inp.get("event_id")
         if not eid:
             return {"ok": False, "error": "validation", "summary": "update needs an event_id."}
-        existing = self._service().events().get(calendarId=self._cal(), eventId=eid).execute()
-        # Rescheduling with only a new start? Preserve the original duration instead of
-        # silently collapsing to the default meeting length.
-        if inp.get("start") and not inp.get("end") and not inp.get("duration_min"):
-            try:
-                os_ = existing["start"]["dateTime"]
-                oe = existing["end"]["dateTime"]
-                mins = int((datetime.fromisoformat(oe) - datetime.fromisoformat(os_))
-                           .total_seconds() // 60)
-                inp = {**inp, "duration_min": mins}
-            except (KeyError, ValueError):
-                pass
-        body, conference = self._body_from(inp)
+        prev = self._event_view(
+            self._service().events().get(calendarId=self._cal(), eventId=eid).execute())
+        if (resolve_kind(inp, prev) and provided(inp, "start") and provided(inp, "end")
+                and as_day(inp["end"]) < as_day(inp["start"])):
+            return {"ok": False, "error": "validation",
+                    "summary": "the last day of an all-day event cannot be before its first."}
+        # Rescheduling with only a new start keeps the event's length. For a timed event that
+        # is its duration in minutes; for an all-day event it is its span in DAYS — which the
+        # old code could not express, so it fell through to the default meeting length and
+        # collapsed a week-long trip into a 45-minute block at midnight.
+        if provided(inp, "start") and not provided(inp, "end") and not inp.get("duration_min"):
+            if not resolve_kind(inp, prev):
+                try:
+                    mins = int((datetime.fromisoformat(prev["end"])
+                                - datetime.fromisoformat(prev["start"])).total_seconds() // 60)
+                    inp = {**inp, "duration_min": mins}
+                except (TypeError, ValueError):
+                    pass
+            # all-day spans ride on _default_last_day, off `prev` — no guess needed here.
+        body, conference = self._body_from(inp, existing=prev)
         if not body:
             # An empty patch is a guaranteed lie: Google returns 200 and the unchanged event, and
             # we would report "Updated". This is exactly how `virtual: false` used to behave.
@@ -505,8 +661,15 @@ class GoogleCalendarService:
                 missed.append("location")
         if provided(inp, "attendees") and set(view.get("attendees") or []) != set(inp["attendees"]):
             missed.append("guests")
-        if provided(inp, "start") and not _same_dt(view.get("start"), inp["start"]):
-            missed.append("start time")
+        if provided(inp, "all_day") and bool(view.get("all_day")) != bool(inp["all_day"]):
+            missed.append("all-day setting")
+        if provided(inp, "start"):
+            want = as_day(inp["start"]) if view.get("all_day") else inp["start"]
+            if not _same_dt(view.get("start"), want):
+                missed.append("start time")
+        # An all-day span is only half-verified by the start; a wrong end is a wrong event.
+        if view.get("all_day") and provided(inp, "end") and view.get("end") != as_day(inp["end"]):
+            missed.append("last day")
         return missed
 
     def _delete(self, inp: dict) -> ActionResult:
@@ -521,17 +684,34 @@ class GoogleCalendarService:
             view = self._event_view(ev)
         except Exception:
             pass
+        notified = self._send_updates(inp) != "none"
         self._service().events().delete(
-            calendarId=self._cal(), eventId=eid, sendUpdates="all").execute()
+            calendarId=self._cal(), eventId=eid,
+            sendUpdates=self._send_updates(inp)).execute()
         label = f" '{view['title']}'" if view.get("title") else ""
         return {"ok": True, "summary": f"Cancelled{label}.",
                 "data": {"event_id": eid, "title": view.get("title"), "start": view.get("start"),
-                         "had_attendees": bool(view.get("attendees"))}}
+                         "end": view.get("end"), "all_day": view.get("all_day"),
+                         "days": view.get("days"), "attendees": view.get("attendees"),
+                         "had_attendees": bool(view.get("attendees")), "notified": notified}}
 
     # ---- dispatch ----------------------------------------------------------------------
 
     _VERBS = {"create": "_create", "list": "_list", "find": "_find",
               "update": "_update", "delete": "_delete"}
+
+    def _attempts_for(self, verb: str, inputs: dict) -> int:
+        """How many times this verb may be replayed.
+
+        `create` is protected by its idempotency key: a replayed insert collides with 409 and we
+        re-fetch, so guests are invited exactly once. `update` and `delete` have no such shield —
+        Calendar v3 exposes no idempotency parameter on patch or delete, so there is no token to
+        mint — and they default to notifying every guest. A broken pipe is genuinely ambiguous
+        about whether Google received the write, so replaying one can email everybody a second
+        time about a single change. Replay them only when no notification can go out."""
+        if verb in ("update", "delete") and self._send_updates(inputs) != "none":
+            return 1
+        return _MAX_ATTEMPTS
 
     @staticmethod
     def _is_duplicate(exc: Exception) -> bool:
@@ -561,16 +741,17 @@ class GoogleCalendarService:
         if verb == "create":
             inputs = {**inputs, "_idempotency_key": uuid.uuid4().hex}
 
+        attempts = self._attempts_for(verb, inputs)
         last: Exception | None = None
-        for attempt in range(_MAX_ATTEMPTS):
+        for attempt in range(attempts):
             try:
                 return await asyncio.to_thread(getattr(self, method), inputs)
             except Exception as exc:  # never raise into the graph
                 last = exc
-                if not self._is_transient(exc) or attempt == _MAX_ATTEMPTS - 1:
+                if not self._is_transient(exc) or attempt == attempts - 1:
                     break
                 log.warning("calendar.%s transient (%s); retry %d/%d",
-                            verb, exc, attempt + 1, _MAX_ATTEMPTS - 1)
+                            verb, exc, attempt + 1, attempts - 1)
                 await asyncio.sleep(_BACKOFF_BASE * (2 ** attempt))
         return self._on_error(last, verb)
 

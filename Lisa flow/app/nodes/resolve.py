@@ -50,7 +50,7 @@ async def resolve_pending_node(
     is_owner = bool(state.get("from_me"))
 
     if verdict == "yes" and is_owner:
-        action = {**pending, "confirmed": True, APPROVED_BY: OWNER_YES}
+        action = {**pending, APPROVED_BY: OWNER_YES}
         trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
                    pending=task, verdict="yes", owner=True, route="execute")
         return {"actions": [action], "domain": domain, "pending_action": None,

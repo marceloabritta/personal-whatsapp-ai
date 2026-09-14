@@ -9,10 +9,12 @@ from typing import Annotated, Optional, TypedDict
 from langgraph.graph.message import add_messages
 
 
-# The approval stamp. `confirmed` is part of the model's own output schema, so the model can set
-# it; this key is written ONLY by resolve_pending, on the owner's own message, and appears in no
-# schema the model sees. Lives here rather than in either layer so nodes and skills can both read
-# it without one importing the other.
+# The approval stamp. Written ONLY by resolve_pending, on the owner's own message, and present in
+# no schema the model sees — which is the whole point: a model-writable approval flag is advisory,
+# and under a repeated tool failure the model once set one itself and ran an unapproved calendar
+# write. The calendar schema no longer carries `confirmed` at all (tools/schemas.py); the setup
+# schema still does, harmlessly, since nothing reads it. Lives here rather than in either layer so
+# nodes and skills can both read it without one importing the other.
 APPROVED_BY = "_approved_by"
 OWNER_YES = "owner_yes"
 

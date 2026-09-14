@@ -34,7 +34,7 @@ def _build_write_from_find(state: MessageState) -> dict | None:
     eid = items[0].get("event_id")
     if not eid:
         return None
-    return {"task": "calendar.delete", "event_id": eid, "confirmed": False}
+    return {"task": "calendar.delete", "event_id": eid}
 
 
 async def respond_node(
