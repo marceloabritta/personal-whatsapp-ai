@@ -38,7 +38,17 @@ def _loop_text(state: dict) -> str:
     `messages` are what the model actually read, so they are the honest haystack."""
     parts = [state.get("turn_text") or "", state.get("text") or ""]
     for m in state.get("messages") or []:
-        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        # Lisa's OWN replies are in here too (act appends every sent message). They are not
+        # evidence: an address she invented into a confirmation card would otherwise ground the
+        # very `remember` this gate exists to refuse — the model would be citing itself.
+        if isinstance(m, dict):
+            if m.get("role") == "assistant":
+                continue
+            content = m.get("content")
+        else:
+            if getattr(m, "type", "") == "ai":
+                continue
+            content = getattr(m, "content", "")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):  # media turns carry a block list

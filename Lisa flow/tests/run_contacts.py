@@ -481,6 +481,11 @@ async def graph_regression_checks():
     txt = _loop_text({"turn_text": "15h",
                       "messages": [{"role": "user", "content": "marca com a Ana, ana@acme.com"}]})
     check("grounding sees an address given an activation earlier", "ana@acme.com" in txt)
+    # Lisa citing herself is not evidence: an address she invented into a card must not ground
+    # the very remember the gate exists to refuse.
+    own = _loop_text({"turn_text": "sim",
+                      "messages": [{"role": "assistant", "content": "Participantes\nfake@x.com"}]})
+    check("Lisa's own reply does NOT ground a remember", "fake@x.com" not in own)
 
 
 # --- 8. message composition -----------------------------------------------------------------
