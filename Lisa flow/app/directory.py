@@ -257,9 +257,10 @@ class Directory:
             emails = list(c.get("emails") or [])
             if group:
                 emails = [e for e in emails if e.lower() in (offered or set())]
-            pref = c.get("preferred")
-            if pref and pref in emails:  # order only — it never auto-selects
-                emails = [pref] + [e for e in emails if e != pref]
+            pref = (c.get("preferred") or "").lower()
+            if pref and pref in [e.lower() for e in emails]:  # order only — never auto-selects
+                emails = ([e for e in emails if e.lower() == pref]
+                          + [e for e in emails if e.lower() != pref])
             if not emails:
                 lines.append(f"- {name} — no email on file")
             elif len(emails) == 1:
@@ -370,8 +371,9 @@ class Directory:
             "emails": [], "phones": [], "source": LEARNED,
             "preferred": None, "used_at": None,
         }
-        if job["email"] not in (c.get("emails") or []):
-            c["emails"] = [*(c.get("emails") or []), job["email"]]
+        addr = (job["email"] or "").strip().lower()
+        if addr not in (c.get("emails") or []):
+            c["emails"] = [*(c.get("emails") or []), addr]
         self._contacts[rn] = c
         self._reindex()
         if self.store is not None:
@@ -386,6 +388,7 @@ class Directory:
         A booking the owner approved is the strongest identity evidence available and costs no
         extra turn — so it is what writes a `contact_links` row.
         """
+        email = (email or "").strip().lower()
         c = self.by_email(email)
         if c is None:
             return

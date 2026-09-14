@@ -74,7 +74,11 @@ def view(person: dict) -> dict:
         "resource_name": person.get("resourceName") or "",
         "etag": person.get("etag") or "",
         "name": (names[0].get("displayName") if names else "") or "",
-        "emails": [e["value"] for e in (person.get("emailAddresses") or []) if e.get("value")],
+        # Lowercased at the boundary so there is ONE canonical form everywhere: the index keys,
+        # the stored list and `preferred` all compare directly. Storing Google's casing meant
+        # `preferred in emails` silently failed and the preferred-address ordering never applied.
+        "emails": [e["value"].strip().lower()
+                   for e in (person.get("emailAddresses") or []) if e.get("value")],
         # canonicalForm is Google's own E.164 parse; the raw value is whatever was typed.
         "phones": [p.get("canonicalForm") or p.get("value") or ""
                    for p in (person.get("phoneNumbers") or [])],

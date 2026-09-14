@@ -399,6 +399,34 @@ async def outbox_checks():
     check("a successful booking binds the identity link",
           d3.store.links.get("+5511987654321") == "people/1")
 
+    # Case. The model writes the address however the human typed it, so `preferred` was stored
+    # "Thiago.avelino@..." against an `emails` list holding it lowercase — `preferred in emails`
+    # was False and the preferred-address ordering silently never applied. That ordering only
+    # matters for the contacts with 2+ addresses, which is exactly where it was needed.
+    d4 = book()
+    d4.store = FakeStore()
+    await d4.note_used("BRUNO@T.CO")
+    check("note_used canonicalises the address it records",
+          d4._contacts["people/2"]["preferred"] == "bruno@t.co")
+    b = d4.block(d4.mentions("Bruno Tavares"), "Marcelo")
+    first = [ln for ln in b.splitlines() if "Bruno" in ln][0]
+    check("the preferred address is ordered first",
+          first.index("bruno@t.co") < first.index("b.t@gmail.com"))
+    # A row written before the fix must still order correctly.
+    d4._contacts["people/2"]["preferred"] = "B.T@Gmail.com"
+    b2 = d4.block(d4.mentions("Bruno Tavares"), "Marcelo")
+    first2 = [ln for ln in b2.splitlines() if "Bruno" in ln][0]
+    check("a legacy mixed-case preferred still orders",
+          first2.index("b.t@gmail.com") < first2.index("bruno@t.co"))
+    # Google's own casing is canonicalised at the boundary.
+    from app.tools.people import view as people_view
+
+    v = people_view({"resourceName": "people/z", "etag": "e",
+                     "names": [{"displayName": "Zed"}],
+                     "emailAddresses": [{"value": "Mixed.Case@Example.COM"}]})
+    check("Google-sourced addresses are stored lowercase",
+          v["emails"] == ["mixed.case@example.com"])
+
 
 # --- 7. the confirm node --------------------------------------------------------------------
 
