@@ -1204,6 +1204,32 @@ async def allday_checks() -> None:
     check("[agenda] a multi-day event shows its span", "3 dias" in agenda)
     check("[agenda] a timed event still shows its hour", "09:00 AM" in agenda)
 
+    # --- what the MODEL reads: candidate lines must distinguish same-named events ---------
+    # `execute` appends only a result's `summary` to the conversation, so everything the model
+    # needs to pick between two events has to be on this one line. A date-only value through
+    # _fmt rendered as "00:00", which made two same-named all-day events byte-identical.
+    dupes = [
+        {"event_id": "abc123", "title": "Viagem SP", "start": "2026-10-05",
+         "end": "2026-10-07", "all_day": True, "days": 3, "attendees": [], "location": None},
+        {"event_id": "def456", "title": "Viagem SP", "start": "2026-10-05",
+         "end": "2026-10-05", "all_day": True, "days": 1,
+         "attendees": ["ana@x.com"], "location": None},
+    ]
+    rendered = GoogleCalendarService._lines(dupes).split("\n")
+    check("[model] an all-day candidate says 'all day', never 00:00",
+          "all day" in rendered[1] and "00:00" not in rendered[1], rendered[1][:58])
+    check("[model] a multi-day candidate carries its span",
+          "3 days" in rendered[0] and "07 Oct" in rendered[0], rendered[0][:58])
+    check("[model] TWO SAME-NAMED all-day events are distinguishable",
+          rendered[0].split(" [id=")[0] != rendered[1].split(" [id=")[0])
+    check("[model] guests still shown, for a further tiebreak", "ana@x.com" in rendered[1])
+    timed = GoogleCalendarService._lines([
+        {"event_id": "t1", "title": "Call", "start": "2026-10-05T15:00:00-03:00",
+         "all_day": False, "attendees": [], "location": "Sala 5"}])
+    check("[model] a timed candidate is unchanged", "15:00" in timed and "@ Sala 5" in timed)
+    check("[model] the update read-back is span-aware too",
+          "all day (3 days)" in GoogleCalendarService._fmt_when(dupes[0]))
+
     # --- 15. post-conditions --------------------------------------------------------------
     missed = svc._unapplied({"all_day": True, "start": "2026-09-14", "end": "2026-09-16"},
                             {"all_day": True, "start": "2026-09-14", "end": "2026-09-15"}, None)

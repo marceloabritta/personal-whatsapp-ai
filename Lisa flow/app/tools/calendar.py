@@ -344,16 +344,46 @@ class GoogleCalendarService:
                 return ep["uri"]
         return None
 
-    @staticmethod
-    def _lines(views: list[dict], fmt) -> str:
-        """Candidate lines for `find` — numbered, id-bearing, so the model can pick one to act on."""
-        return "\n".join(
-            f"{i + 1}. {v['title']} — {fmt(v['start'])}"
-            + (f" @ {v['location']}" if v.get("location") else "")
-            + (f" (with {', '.join(v['attendees'])})" if v.get("attendees") else "")
-            + f" [id={v['event_id']}]"
-            for i, v in enumerate(views)
-        )
+    @classmethod
+    def _fmt_when(cls, v: dict) -> str:
+        """When an event happens, as the MODEL reads it.
+
+        This string has to carry enough to tell two same-named events apart, because the model
+        never sees the structured view — `execute` appends only a result's `summary`. A
+        date-only value pushed through `_fmt` renders as "00:00", so two all-day events with
+        the same title produced byte-identical candidate lines and the model had nothing to
+        choose between, nor anything to describe back when asked which was which."""
+        start, end = v.get("start"), v.get("end")
+        if not start:
+            return "?"
+        if not v.get("all_day", is_date_only(start)):
+            return cls._fmt(start)
+        try:
+            first = as_day(start)
+            last = as_day(end or start)
+            n = span_days(first, last)
+            day = lambda d: datetime.fromisoformat(d).strftime("%a %d %b")
+            if n <= 1:
+                return f"{day(first)}, all day"
+            return f"{day(first)} \u2192 {day(last)}, all day ({n} days)"
+        except (TypeError, ValueError):
+            return f"{start}, all day"
+
+    @classmethod
+    def _lines(cls, views: list[dict]) -> str:
+        """Candidate lines for `find` — numbered, id-bearing, so the model can pick one to act
+        on. Everything that distinguishes two events must be ON this line; nothing else reaches
+        the model."""
+        out = []
+        for i, v in enumerate(views):
+            line = f"{i + 1}. {v['title']} — {cls._fmt_when(v)}"
+            if v.get("location"):
+                line += f" @ {v['location']}"
+            guests = v.get("attendees") or []
+            if guests:
+                line += f" (with {', '.join(guests)})"
+            out.append(line + f" [id={v['event_id']}]")
+        return "\n".join(out)
 
     @staticmethod
     def _agenda(views: list[dict], window_start: date | None = None) -> str:
@@ -585,7 +615,7 @@ class GoogleCalendarService:
         if not ranked:
             return {"ok": True, "summary": "No matching events found.", "data": {"items": []}}
         head = "Best matches (use the id to act):\n" if len(ranked) > 1 else "Found:\n"
-        return {"ok": True, "summary": head + self._lines(ranked, self._fmt),
+        return {"ok": True, "summary": head + self._lines(ranked),
                 "data": {"items": ranked}}
 
     @staticmethod
@@ -660,7 +690,7 @@ class GoogleCalendarService:
                     "summary": f"Google accepted the change but did not apply: {', '.join(missed)}.",
                     "data": {**view, "meet_link": meet}}
 
-        return {"ok": True, "summary": f"Updated '{view['title']}' → {self._fmt(view['start'])}",
+        return {"ok": True, "summary": f"Updated '{view['title']}' → {self._fmt_when(view)}",
                 "data": {**view, "meet_link": meet}}
 
     @staticmethod
