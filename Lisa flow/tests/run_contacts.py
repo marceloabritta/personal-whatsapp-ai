@@ -34,8 +34,9 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  FAIL {name}" + (f"  — {detail}" if detail else ""))
 
 
-def contact(rn, name, emails=(), phones=(), source=GOOGLE):
+def contact(rn, name, emails=(), phones=(), source=GOOGLE, nicknames=()):
     return {"resource_name": rn, "etag": f"etag-{rn}", "name": name,
+            "nicknames": list(nicknames),
             "emails": list(emails), "phones": list(phones), "source": source,
             "preferred": None, "used_at": None}
 
@@ -93,6 +94,7 @@ class FakeStore:
         self.upserts: list = []
         self.links: dict = {}
         self.failed: list = []
+        self.replaced: list = []
 
     async def enqueue(self, job):
         self.jobs.append({**job, "id": self.next_id, "attempts": 0})
@@ -118,7 +120,7 @@ class FakeStore:
         self.upserts.append(dict(c))
 
     async def replace(self, contacts, token, *, full):
-        pass
+        self.replaced.append((list(contacts), token, full))
 
     async def link(self, phone, rn, source):
         self.links[phone] = rn
@@ -174,18 +176,68 @@ def retrieval_checks():
     d = book()
     check("full name matches",
           [c["name"] for c, _ in d.mentions("marca com a Ana Silva amanha")] == ["Ana Silva"])
-    check("BARE FIRST NAME BINDS NOBODY", d.mentions("marca com a Ana amanha") == [])
     check("phone + first name is the strongest signal",
           d.mentions("marca com a Ana", phone="5511987654321")[0][1] == "phone+name")
     check("literal email matches",
           [c["name"] for c, _ in d.mentions("o email e bruno@t.co")] == ["Bruno Tavares"])
     check("speaker labels are not scanned", d.mentions("Ana Silva: bom dia") == [])
-    check("a group does not serve the global book",
-          d.mentions("marca com a Ana Silva", group=True) == [])
-    check("a group still resolves the participant's own phone",
-          len(d.mentions("oi", phone="5511987654321", group=True)) == 1)
     check("cold directory matches nothing",
           Directory(settings()).mentions("Ana Silva", phone="5511987654321") == [])
+
+    # A BARE NAME. "add Zen" is how the owner actually asks, and refusing it outright is what
+    # made Lisa forget an address she had. It binds when the book answers with exactly one
+    # person; two Anas are a question, not a bind.
+    check("a unique bare first name BINDS",
+          [c["name"] for c, _ in d.mentions("marca com a Carla amanha")] == ["Carla Mendes"])
+    check("a unique bare SURNAME binds too",
+          [c["name"] for c, _ in d.mentions("fala com o Tavares")] == ["Bruno Tavares"])
+    amb = d.mentions("marca com a Ana amanha")
+    check("an ambiguous bare first name asks instead of guessing",
+          len(amb) == 2 and {w for _c, w in amb} == {"name?"})
+    check("an ambiguous name renders NO address",
+          "@" not in d.block(amb, "Marcelo").split("never invent an address.")[1])
+    check("an ambiguous name renders as a question",
+          "ASK WHICH" in d.block(amb, "Marcelo"))
+    check("a full name still beats the bare-name pass (no Ana Souza tag-along)",
+          [c["name"] for c, _ in d.mentions("marca com a Ana Silva amanha")] == ["Ana Silva"])
+
+    # A word that happens to be a surname is not a name. Past the prompt budget it is dropped
+    # rather than turned into a twelve-way question.
+    many = Directory(settings())
+    many.load([contact(f"people/s{i}", f"Nome{i} Santos", [f"n{i}@x.com"]) for i in range(9)])
+    check("a token matching more people than fit is not a name", many.mentions("santos") == [])
+
+    # THE GROUP. The book is served exactly as it is in a 1:1 — the rail that withheld it also
+    # withheld the address the owner asked for, and the invitation carries the guest list anyway.
+    check("a group serves the global book",
+          [c["name"] for c, _ in d.mentions("marca com a Ana Silva")] == ["Ana Silva"])
+    check("an address is rendered in a group nobody typed it into",
+          "ana.silva@acme.com" in d.block(d.mentions("marca com a Ana Silva"), "Marcelo"))
+
+    # THE ROOM. Membership is an identity SOURCE, never a hit: in a 20-person group every member
+    # would otherwise outrank the people the turn is actually about.
+    room = ["5511987654321", "5521912345678"]
+    check("a member nobody named is NOT surfaced", d.mentions("bom dia", phones=room) == [])
+    named = d.mentions("marca com a Ana Silva", phones=room)
+    check("a member the turn names clears the phone+name bar", named[0][1] == "phone+name")
+    check("a confirmed identity carries no 'confirm before using' marker",
+          "identity not confirmed" not in d.block(named, "Marcelo"))
+    check("someone named but NOT in the room still resolves, flagged",
+          d.mentions("marca com a Ana Souza", phones=room)[0][1] == "name")
+
+    # The room is also the disambiguator: two Anas on file, one of them here.
+    picked = d.mentions("marca com a Ana amanha", phones=["5511987654321"])
+    check("several on file, one in the room -> that is the one",
+          len(picked) == 1 and picked[0][0]["name"] == "Ana Silva"
+          and picked[0][1] == "phone+name")
+
+    # NICKNAMES — the alias tolerance this module always said belonged in the index.
+    nick = Directory(settings())
+    nick.load([contact("people/z", "Zenaldo Tanaka", ["zt@acme.com"], nicknames=["Zen"])])
+    check("a nickname resolves a bare name",
+          [c["name"] for c, _ in nick.mentions("add Zen")] == ["Zenaldo Tanaka"])
+    check("a nickname pairs with the family name",
+          [c["name"] for c, _ in nick.mentions("marca com Zen Tanaka")] == ["Zenaldo Tanaka"])
 
     block = d.block(d.mentions("Ana Silva e Bruno Tavares"), "Marcelo")
     check("block flags a contact with two addresses", "MORE THAN ONE" in block)
@@ -246,6 +298,23 @@ def write_rule_checks():
     d3.load([contact("people/a", "Carlos Souza", []), contact("people/b", "Carlos Souza", [])])
     check("an ambiguous name is refused, not guessed",
           d3.plan_write("Carlos Souza", "c@x.com") is None)
+    # A BARE NAME. The read side binds one now, so the write side has to target the SAME person
+    # — when they disagree Lisa surfaces someone from the book and then writes the address onto a
+    # fresh duplicate of him, which is the defect class that motivated the pair-index fix above.
+    check("a unique bare name targets the contact the READ side surfaced",
+          (d.plan_write("Carla", "carla@x.com") or {}).get("resource_name") == "people/3")
+    check("...and that is an add_email, not a second Carla",
+          (d.plan_write("Carla", "carla@x.com") or {}).get("kind") == "add_email")
+    check("an ambiguous bare name is refused, not guessed",
+          d.plan_write("Ana", "someone@x.com") is None)
+    # One token still cannot justify CREATING a person — that bar is unchanged (given + family).
+    check("an unmatched bare name is learned, never created",
+          (d.plan_write("Zeneide", "z@x.com") or {}).get("kind") == "learn")
+    d4 = Directory(settings())
+    d4.load([contact("people/z", "Zenaldo Tanaka", [], nicknames=["Zen"])])
+    check("a nickname targets the real contact on the write side",
+          (d4.plan_write("Zen", "zen@acme.com") or {}).get("resource_name") == "people/z")
+
     check("garbage email is refused", d.plan_write("X", "not-an-email") is None)
     check("cold directory plans nothing",
           Directory(settings()).plan_write("Ana Silva", "a@b.com") is None)
@@ -352,6 +421,20 @@ async def sync_checks():
     d.people = FakePeople(people)
     await d._apply_learned({"resource_name": None, "name": "Aprendido", "email": "ap@x.com"})
     await d.refresh(full=True)
+    # An empty delta is the ordinary tick: four an hour against a book that rarely moves. It
+    # must advance the cursor and touch nothing else — the index rebuild it used to trigger was
+    # 144 ms of blocking CPU inside the event loop, and it rewrote every mirror row.
+    d5 = Directory(settings(), store=FakeStore(), people=FakePeople([]))
+    await d5.refresh(full=True)
+    before = d5._by_token
+    d5.store.replaced.clear()
+    await d5.refresh()
+    check("an empty delta does not rebuild the index", d5._by_token is before)
+    check("an empty delta writes no contact rows",
+          all(rows == [] for rows, _tok, _full in d5.store.replaced))
+    check("...but it does persist the new cursor",
+          any(tok for _rows, tok, _full in d5.store.replaced))
+
     check("learned entries survive a full resync", d.by_email("ap@x.com") is not None)
 
 
@@ -594,6 +677,56 @@ def contract_checks():
     check("with contacts ON the prompt forbids inventing an address", "NEVER invent" in on)
 
 
+# --- 9b. the group case, end to end ----------------------------------------------------------
+
+def group_checks():
+    """The reported defect: a contact booked before, named in a group, not remembered.
+
+    Exercised through the REAL context-block builder and the REAL participant reader, because
+    every one of the three rails that produced it lived in a different file.
+    """
+    print("\ngroups (the reported defect)")
+    from app.nodes.context import _participant_phones
+    from app.skills import context_block_for
+
+    # 1. The room is read off the history the way Evolution actually hands it over.
+    records = [
+        {"id": "1", "participant": "5511987654321@s.whatsapp.net"},
+        {"id": "2", "participant": "5511987654321@s.whatsapp.net"},   # dedup
+        {"id": "3", "participant": "99999999999999@lid",             # opaque: not a phone
+         "participant_alt": "5521912345678@s.whatsapp.net"},
+        {"id": "4", "participant": None},                             # the owner's own line
+        {"id": "5", "participant": "5511900000000:12@s.whatsapp.net"},  # device suffix stripped
+    ]
+    phones = _participant_phones(records)
+    check("the room is read from the history's participants",
+          phones == ["5511987654321", "5521912345678", "5511900000000"])
+    check("an @lid participant is never read as a phone",
+          not any("99999999999999" in p for p in phones))
+    check("a group with no participants at all yields an empty room",
+          _participant_phones([{"id": "1"}]) == [])
+
+    # 2. The defect itself. "add Ana" in a group whose members include her.
+    d = book()
+    ctx = {"directory": d, "settings": settings()}
+    state = {"turn_text": "Marcelo: @lisa marca reuniao amanha 15h, add Ana",
+             "chat_kind": "group", "phone": None, "participant_phones": phones}
+    blk, patch = context_block_for("calendar", state, ctx)
+    check("THE DEFECT: a group chat now serves the address book", blk is not None)
+    check("...with the address she was asked for", "ana.silva@acme.com" in (blk or ""))
+    check("...naming the right Ana, not the other one", "ana.souza@x.com" not in (blk or ""))
+    check("...and it is remembered for the confirmation card",
+          "ana.silva@acme.com" in (patch.get("seen_contacts") or {}))
+    check("...with no confirmation round-trip, because the room proves who she is",
+          "identity not confirmed" not in (blk or ""))
+
+    # 3. A room whose members prove nothing still answers, it just flags the identity.
+    state["participant_phones"] = []
+    blk2, _ = context_block_for("calendar", state, ctx)
+    check("an empty room falls back to asking which Ana", "ASK WHICH" in (blk2 or ""))
+    check("...and offers no address while it asks", "ana.silva@acme.com" not in (blk2 or ""))
+
+
 # --- 10. disabled build ----------------------------------------------------------------------
 
 def disabled_checks():
@@ -637,6 +770,7 @@ async def main() -> int:
     await graph_regression_checks()
     card_checks()
     contract_checks()
+    group_checks()
     disabled_checks()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

@@ -53,7 +53,7 @@ class ContactStore:
             async with self._pool.connection() as conn:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
-                        f"SELECT resource_name, etag, name, emails, phones, source, "
+                        f"SELECT resource_name, etag, name, nicknames, emails, phones, source, "
                         f"preferred, extract(epoch from used_at)::bigint AS used_at "
                         f"FROM {self.schema}.contacts")
                     rows = [dict(r) for r in await cur.fetchall()]
@@ -64,6 +64,7 @@ class ContactStore:
                         f"SELECT sync_token FROM {self.schema}.contact_sync WHERE id = 1")
                     row = await cur.fetchone()
             for r in rows:
+                r["nicknames"] = list(r.get("nicknames") or [])
                 r["emails"] = list(r.get("emails") or [])
                 r["phones"] = list(r.get("phones") or [])
             return {"contacts": rows, "links": links,
@@ -124,14 +125,17 @@ class ContactStore:
         async with self._pool.connection() as conn:
             await conn.execute(
                 f"""INSERT INTO {self.schema}.contacts
-                        (resource_name, etag, name, emails, phones, source, preferred, used_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                        (resource_name, etag, name, nicknames, emails, phones, source,
+                         preferred, used_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
                     ON CONFLICT (resource_name) DO UPDATE SET
                         etag = EXCLUDED.etag, name = EXCLUDED.name,
+                        nicknames = EXCLUDED.nicknames,
                         emails = EXCLUDED.emails, phones = EXCLUDED.phones,
                         source = EXCLUDED.source, preferred = EXCLUDED.preferred,
                         used_at = EXCLUDED.used_at, updated_at = now()""",
                 (c["resource_name"], c.get("etag") or "", c.get("name") or "",
+                 list(c.get("nicknames") or []),
                  list(c.get("emails") or []), list(c.get("phones") or []),
                  c.get("source") or "google", c.get("preferred"), c.get("used_at")))
 
@@ -141,14 +145,17 @@ class ContactStore:
             for c in contacts:
                 await conn.execute(
                     f"""INSERT INTO {self.schema}.contacts
-                            (resource_name, etag, name, emails, phones, source, preferred, used_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                            (resource_name, etag, name, nicknames, emails, phones, source,
+                             preferred, used_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
                         ON CONFLICT (resource_name) DO UPDATE SET
                             etag = EXCLUDED.etag, name = EXCLUDED.name,
+                            nicknames = EXCLUDED.nicknames,
                             emails = EXCLUDED.emails, phones = EXCLUDED.phones,
                             source = EXCLUDED.source, preferred = EXCLUDED.preferred,
                             used_at = EXCLUDED.used_at, updated_at = now()""",
                     (c["resource_name"], c.get("etag") or "", c.get("name") or "",
+                     list(c.get("nicknames") or []),
                      list(c.get("emails") or []), list(c.get("phones") or []),
                      c.get("source") or "google", c.get("preferred"), c.get("used_at")))
             if full and contacts:
@@ -187,6 +194,7 @@ class ContactStore:
             resource_name text PRIMARY KEY,
             etag          text NOT NULL DEFAULT '',
             name          text NOT NULL DEFAULT '',
+            nicknames     text[] NOT NULL DEFAULT '{{}}',
             emails        text[] NOT NULL DEFAULT '{{}}',
             phones        text[] NOT NULL DEFAULT '{{}}',
             source        text NOT NULL DEFAULT 'google',
@@ -216,4 +224,8 @@ class ContactStore:
             source        text NOT NULL,
             linked_at     timestamptz NOT NULL DEFAULT now()
         );
+        -- Migration. CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists, so a
+        -- deployed schema never sees a column added to the definition above.
+        ALTER TABLE {s}.contacts
+            ADD COLUMN IF NOT EXISTS nicknames text[] NOT NULL DEFAULT '{{}}';
         """

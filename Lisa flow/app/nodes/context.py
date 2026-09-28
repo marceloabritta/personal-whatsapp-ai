@@ -16,7 +16,29 @@ from ..identity import is_own_message
 from ..skills.setup import setup_matcher
 from ..state import MessageState
 from ..trace import Trace
-from ..whatsapp import build_labeled_transcript, label_for
+from ..whatsapp import build_labeled_transcript, chat_key, label_for
+
+
+def _participant_phones(records: list[dict]) -> list[str]:
+    """Every phone number that has spoken in this chat — the room's membership, as the history
+    shows it. It is what lets "add Zen" resolve in a group: `state["phone"]` is None there
+    (`remoteJid` is the group), so without this the address book has no identity to work from
+    and a name that fits several contacts can never be narrowed to the one actually present.
+
+    Only a real `@s.whatsapp.net` JID is a phone. An `@lid` is opaque and its tail looks enough
+    like a local number to bind a stranger, which is the same rail `parse` holds.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in records:
+        for jid in (r.get("participant"), r.get("participant_alt")):
+            if not jid or not str(jid).endswith("@s.whatsapp.net"):
+                continue
+            k = chat_key(jid)
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+    return out
 
 
 def _log_transcript(trace: Trace, tid: str, loop_id: str | None, records: list[dict],
@@ -342,6 +364,9 @@ async def context_node(
         # transcript was a local, so the address-book scan had nothing to read; publishing it here
         # is what lets a name mentioned three messages ago still resolve.
         "turn_text": transcript,
+        # Who is in this room. Read from the WHOLE fetched history, not the window: membership is
+        # a property of the chat, and someone who spoke yesterday is still here today.
+        "participant_phones": _participant_phones(records),
         "last_whatsapp_message_id": newest,
         "context_message_ids": ids,
         # Per-activation tool-loop scratch — always fresh so a bound/log never carries over.

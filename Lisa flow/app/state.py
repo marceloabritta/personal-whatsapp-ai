@@ -42,6 +42,7 @@ class MessageState(TypedDict, total=False):
     # never leave a rejected address behind in the real address book. Both are checkpointed, so
     # both are cleared on tag-reset.
     seen_contacts: dict  # {email: {name, resource_name, n_emails}} surfaced this loop
+    participant_phones: list  # phones that have spoken in this chat; the room, for the address book
     side_effects: list  # side-effect actions stripped this turn (feeds the guest-name renderer)
     pending_side_effects: list  # side effects waiting on the same yes as pending_action
 

@@ -7,7 +7,6 @@ Skill together with the confirm/render policies and the router matcher."""
 from __future__ import annotations
 
 import difflib
-import re
 import unicodedata
 
 from ..tools.calendar import CONTACTS_GUIDANCE, DESCRIBE, GUIDANCE, GoogleCalendarService
@@ -98,9 +97,6 @@ def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     return "no"
 
 
-_EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-
-
 def calendar_context(state: dict, ctx: dict):
     """The address-book block for this turn, plus what it surfaced.
 
@@ -113,25 +109,24 @@ def calendar_context(state: dict, ctx: dict):
     if d is None or not getattr(d, "ready", False):
         return None                      # fails open: no block, and Lisa asks as she does today
     text = state.get("turn_text") or state.get("text") or ""
-    is_group = state.get("chat_kind") == "group"
     found = d.mentions(
         text,
         phone=state.get("phone"),
+        # The room. In a group `phone` is None, so this is the only identity evidence there is.
+        phones=state.get("participant_phones"),
         limit=getattr(settings, "contacts_max_in_prompt", 5),
-        group=is_group,
     )
     if not found:
         return None
-    # What this conversation actually put on the table. In a group it is the only thing that may
-    # be shown back — see Directory.block.
-    offered = {m.group(0).lower() for m in _EMAIL_IN_TEXT.finditer(text)}
     seen = {}
-    for c, _why in found:
+    for c, why in found:
+        if why == "name?":
+            continue  # ambiguous: no address is attributable to it, so none is remembered
         for e in c.get("emails") or []:
             seen[e.lower()] = {"name": c.get("name") or "",
                                "resource_name": c.get("resource_name") or "",
                                "n_emails": len(c.get("emails") or [])}
-    block = d.block(found, settings.owner_name, group=is_group, offered=offered)
+    block = d.block(found, settings.owner_name)
     if not block.strip():
         return None
     return {"block": block, "state": {"seen_contacts": seen}}

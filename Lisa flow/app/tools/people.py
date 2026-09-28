@@ -29,7 +29,9 @@ SCOPES_READONLY = ["https://www.googleapis.com/auth/contacts.readonly"]
 # Everything we ever read about a person. `metadata` is not optional decoration: updateContact
 # REQUIRES person.metadata.sources in the body, and the precondition is checked against
 # metadata.sources[].etag rather than the top-level person.etag.
-PERSON_FIELDS = "names,emailAddresses,phoneNumbers,metadata"
+# `nicknames` is what makes "add Zen" reach Zenaldo Tanaka: Google already stores the alias the
+# owner actually uses, and reading it costs nothing over a field list we were fetching anyway.
+PERSON_FIELDS = "names,nicknames,emailAddresses,phoneNumbers,metadata"
 
 # Transport failures where the request never reached Google, so a replay is safe. Reads only —
 # a mutation never replays here regardless (see the module docstring).
@@ -74,6 +76,8 @@ def view(person: dict) -> dict:
         "resource_name": person.get("resourceName") or "",
         "etag": person.get("etag") or "",
         "name": (names[0].get("displayName") if names else "") or "",
+        "nicknames": [n["value"].strip() for n in (person.get("nicknames") or [])
+                      if (n.get("value") or "").strip()],
         # Lowercased at the boundary so there is ONE canonical form everywhere: the index keys,
         # the stored list and `preferred` all compare directly. Storing Google's casing meant
         # `preferred in emails` silently failed and the preferred-address ordering never applied.

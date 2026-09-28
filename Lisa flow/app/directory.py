@@ -9,13 +9,20 @@ THE READ IS PURE AND EXACT. `mentions()` does dictionary lookups and nothing els
 implementation — the repo's own normalize-then-difflib idiom from intent.py — was measured at
 1.3 s / 5.0 s / 12.3 s against 500 / 2 000 / 5 000 contacts, as pure CPU inside an async node, which
 blocks the event loop for every chat, not just this one. Exact lookups over the same book are
-0.17 ms. There is no fuzzy matching here; if nickname tolerance is ever wanted, precompute aliases
-during the sync and put them in the same exact-match index.
+0.17 ms. So nickname tolerance is bought the way this file always said it should be: aliases are
+precomputed during the sync (Google's own Nickname field) into the same exact-match index.
 
-IDENTITY IS A PHONE NUMBER. A name never binds anyone on its own — `state["number"]` is a raw JID
-local part (a group id, or an opaque @lid whose tail happens to look like a plausible local number),
-so matching on it produces confident wrong answers. `parse.py` resolves an explicit phone-or-None
-and only a real `@s.whatsapp.net` JID qualifies.
+A BARE NAME BINDS, WHEN IT IS UNAMBIGUOUS. "add Zen" is how people actually ask, and refusing it
+because a first name "could be anyone" made Lisa forget an address she demonstrably had. A lone
+name resolves when the BOOK answers it with exactly one person, or when the ROOM does — several
+Zens on file but only one of them in this chat. More than one candidate is not a guess, it is a
+question, and it renders as one. A word matching more people than fit in the prompt is not a name.
+
+IDENTITY IS A PHONE NUMBER, and a group has many. `state["phone"]` is the 1:1 partner (None in a
+group — `state["number"]` there is the group id, and an opaque @lid elsewhere, whose tail looks
+enough like a local number to bind a stranger). `state["participant_phones"]` is who has spoken in
+the room. Membership is an identity SOURCE, never a hit on its own: in a twenty-person group every
+member would otherwise outrank the people the turn is actually about.
 
 FAIL CLOSED WHILE COLD, in both directions. Until a full sync has completed once, `mentions()`
 matches nothing AND every write is refused. "Book not loaded yet" is indistinguishable from "no
@@ -55,6 +62,7 @@ class Contact(TypedDict, total=False):
     resource_name: str
     etag: str
     name: str
+    nicknames: list
     emails: list
     phones: list
     source: str
@@ -142,6 +150,21 @@ def _name_tokens(name: str) -> list:
     return [t for t in _normalize(name).split() if len(t) >= _MIN_TOKEN and t not in _STOP]
 
 
+def _alias_tokens(contact: dict) -> list:
+    """Every token this person can be called by — full name plus Google's Nickname field.
+
+    One flat list, in one exact-match index: "Zen" has to reach Zenaldo Tanaka, and the measured
+    cost of the fuzzy alternative (5 s over 2 000 contacts, blocking the event loop) is why the
+    tolerance is precomputed here instead of being matched for at read time.
+    """
+    toks = _name_tokens(contact.get("name") or "")
+    for nick in contact.get("nicknames") or []:
+        for t in _name_tokens(nick):
+            if t not in toks:
+                toks.append(t)
+    return toks
+
+
 def _given(contact: dict) -> str:
     toks = _name_tokens(contact.get("name") or "")
     return toks[0] if toks else ""
@@ -156,9 +179,16 @@ class Directory:
         self.people = people
         self._contacts: dict = {}       # resource_name -> Contact
         self._by_pair: dict = {}        # (tok_a, tok_b) -> [Contact]
+        self._by_token: dict = {}       # one name/nickname token -> [Contact]
         self._by_email: dict = {}       # address -> Contact
         self._by_phone: dict = {}       # E.164 match key -> [Contact]
         self._links: dict = {}          # E.164 -> resource_name
+        # phone string -> [Contact]. `to_e164` is a libphonenumber parse, not a dict lookup, and
+        # a group hands us one number PER MEMBER PER TURN: at 100 members that measured 6.3 ms of
+        # blocking CPU inside an async node, over this module's own 5 ms budget. Membership barely
+        # changes between turns, so the parse is done once. Dropped whenever the book or the
+        # links move, which is the only way an answer here can go stale.
+        self._phone_cache: dict = {}
         self._sync_token: Optional[str] = None
         self._ready = False
         # Did we successfully read the durable mirror at boot? Only then may a full sweep reap
@@ -176,15 +206,17 @@ class Directory:
         return self._ready
 
     def mentions(self, turn_text: str, *, phone: Optional[str] = None,
-                 limit: int = 5, group: bool = False) -> list:
+                 phones: Optional[list] = None, limit: int = 5) -> list:
         """Contacts this turn is provably about. The ONLY method the reply path calls.
 
-        Exact lookups only. Returns [(contact, why)] where `why` is "phone+name" | "phone" |
-        "email" | "name", strongest first. A bare first name binds NOBODY — it can only promote a
-        contact the phone already resolved, which is the "phone matches and first name matches"
-        bar. In a GROUP the global book is not served: only identities established in this chat, or
-        addresses written in this conversation, so a contact's private address cannot surface in a
-        room where nobody offered it.
+        Exact lookups only. Returns [(contact, why)] where `why` is "phone+name" | "email" |
+        "phone" | "name" | "name?", strongest first — and "name?" means AMBIGUOUS: the caller
+        must render it as a question and must not read an address off it.
+
+        `phone` is the 1:1 chat partner. `phones` is everyone who has spoken in this chat, which
+        in a group is the membership; it never produces a hit by itself, it only says WHICH of
+        several same-named people is the one being talked about, and lifts a name match to the
+        "phone matches and name matches" bar without costing a confirmation turn.
         """
         if not self._ready:
             return []
@@ -201,20 +233,54 @@ class Directory:
                 for c in self._resolve_phone(phone):
                     hits.setdefault(c["resource_name"], (c, "phone"))
 
+            # The room. Resolved up front, used only to disambiguate and to promote — see above.
+            members: dict = {}
+            for p in phones or []:
+                for c in self._resolve_phone(p):
+                    members[c["resource_name"]] = c
+
             toks = _normalize(strip_labels(turn_text)).split()
-
-            if not group:
-                for a, b in zip(toks, toks[1:]):
-                    for c in self._by_pair.get((a, b), ()):
-                        hits.setdefault(c["resource_name"], (c, "name"))
-
-            # Phone + first-name agreement is the strongest signal available.
             tokset = set(toks)
+
+            for a, b in zip(toks, toks[1:]):
+                for c in self._by_pair.get((a, b), ()):
+                    hits.setdefault(c["resource_name"], (c, "name"))
+
+            # A lone name — "add Zen". Tokens already accounted for by a contact we resolved are
+            # skipped, so "Ana Silva" does not also fire the eight other Silvas in the book.
+            covered = {t for c, _w in hits.values() for t in _alias_tokens(c)}
+            for t in toks:
+                if t in covered:
+                    continue
+                cands = self._by_token.get(t) or []
+                if not cands:
+                    continue
+                here = [c for c in cands if c["resource_name"] in members]
+                if len(cands) == 1:
+                    pick = cands[0]
+                elif len(here) == 1:
+                    pick = here[0]      # several on file, one in the room: that is the one
+                elif len(cands) <= limit:
+                    # Not a guess worth making against a real address book. Surfaced as a
+                    # question instead, by name only — `block` renders no address for these.
+                    for c in cands:
+                        hits.setdefault(c["resource_name"], (c, "name?"))
+                    covered |= {tok for c in cands for tok in _alias_tokens(c)}
+                    continue
+                else:
+                    continue            # a common word that happens to be somebody's surname
+                hits[pick["resource_name"]] = (pick, "name")
+                covered |= set(_alias_tokens(pick))
+
+            # Phone + name agreement is the strongest signal available. In a group "the phone" is
+            # the member list, so a member the turn names by name clears the same bar.
             for rn, (c, why) in list(hits.items()):
-                if why == "phone" and _given(c) and _given(c) in tokset:
+                if why in ("phone", "name") and rn in members:
+                    hits[rn] = (c, "phone+name")
+                elif why == "phone" and _given(c) and _given(c) in tokset:
                     hits[rn] = (c, "phone+name")
 
-            order = {"phone+name": 0, "email": 1, "phone": 2, "name": 3}
+            order = {"phone+name": 0, "email": 1, "phone": 2, "name": 3, "name?": 4}
             ranked = sorted(hits.values(), key=lambda t: (order.get(t[1], 9),
                                                           -(t[0].get("used_at") or 0)))
             return ranked[:limit]
@@ -223,6 +289,16 @@ class Directory:
             return []
 
     def _resolve_phone(self, phone: str) -> list:
+        cached = self._phone_cache.get(phone)
+        if cached is not None:
+            return cached
+        found = self._resolve_phone_uncached(phone)
+        if len(self._phone_cache) >= 4096:   # unbounded growth is the only other failure here
+            self._phone_cache.clear()
+        self._phone_cache[phone] = found
+        return found
+
+    def _resolve_phone_uncached(self, phone: str) -> list:
         e164 = to_e164(phone, self.s.contacts_default_region)
         if not e164:
             return []
@@ -239,24 +315,29 @@ class Directory:
     def by_email(self, email: str) -> Optional[dict]:
         return self._by_email.get((email or "").lower())
 
-    def block(self, found: list, owner: str, *, group: bool = False,
-              offered: set | None = None) -> str:
+    def block(self, found: list, owner: str) -> str:
         """The prompt snippet. Pure string building; empty list -> "".
 
-        In a GROUP the stored record is not served verbatim: one address typed into the room must
-        not unlock the rest of that person's card. Only the addresses the conversation itself
-        offered are rendered, so a private address cannot be read out to people who never had it."""
+        The same record is served in a group as in a 1:1. It used to be filtered down to the
+        addresses the room had already typed, on the theory that a private address must not be
+        read out to people who never had it — but the person being invited receives the invitation,
+        which carries the guest list, so the room learns the address anyway the moment the meeting
+        is booked. The filter bought no privacy and cost Lisa the address she was asked for.
+        """
         if not found:
             return ""
         lines = [
             f"\n\nAddress book — the people this conversation mentions, from {owner}'s Google "
             f"Contacts. These are facts: use them, and never invent an address.",
         ]
+        ask: list = []
         for c, why in found:
             name = c.get("name") or "(unnamed)"
+            if why == "name?":
+                # Ambiguous by construction — showing any of their addresses would be picking one.
+                ask.append(name)
+                continue
             emails = list(c.get("emails") or [])
-            if group:
-                emails = [e for e in emails if e.lower() in (offered or set())]
             pref = (c.get("preferred") or "").lower()
             if pref and pref in [e.lower() for e in emails]:  # order only — never auto-selects
                 emails = ([e for e in emails if e.lower() == pref]
@@ -269,6 +350,9 @@ class Directory:
                 lines.append(f"- {name} — {' | '.join(emails)}  (MORE THAN ONE: ask which)")
             if why == "name":
                 lines[-1] += "  [named in the chat, identity not confirmed — confirm before using]"
+        if ask:
+            lines.append(f"- A name used here fits more than one person: {', '.join(ask)}. "
+                         f"ASK WHICH — and use no address until he answers.")
         return "\n".join(lines)
 
     # --- learning ------------------------------------------------------------------------
@@ -339,14 +423,20 @@ class Directory:
         return {"kind": "learn", "resource_name": None, "name": name, "email": email}
 
     def _candidates_by_name(self, want: list) -> list:
-        """Contacts whose stored name contains every token of `want`, via the read index."""
-        if len(want) < 2:
-            # A bare first name binds nobody on the write side either — it may only promote a
-            # contact the PHONE already resolved (handled above).
+        """Contacts whose stored name contains every token of `want`, via the read index.
+
+        It has to bind on the same evidence the READ side binds on. When they disagree, Lisa
+        surfaces someone from the book and then writes the address onto a brand-new duplicate of
+        him — which is exactly what a bare first name used to do here, now that one resolves.
+        Ambiguity is still refused by the caller rather than guessed.
+        """
+        if not want:
             return []
+        if len(want) == 1:
+            return list(self._by_token.get(want[0]) or [])
         seen: dict = {}
         for c in self._by_pair.get((want[0], want[1]), ()):
-            toks = set(_name_tokens(c.get("name") or ""))
+            toks = set(_alias_tokens(c))
             if all(w in toks for w in want):
                 seen[c["resource_name"]] = c
         return list(seen.values())
@@ -403,6 +493,9 @@ class Directory:
             e164 = to_e164(phone, self.s.contacts_default_region)
             if e164 and self._links.get(e164) != c["resource_name"]:
                 self._links[e164] = c["resource_name"]
+                # `_links` is read by _resolve_phone, and this is the one path that changes it
+                # without rebuilding the index.
+                self._phone_cache = {}
                 if self.store is not None:
                     try:
                         await self.store.link(e164, c["resource_name"], "booked")
@@ -436,16 +529,30 @@ class Directory:
 
     def _reindex(self) -> None:
         by_pair: dict = {}
+        by_token: dict = {}
         by_email: dict = {}
         by_phone: dict = {}
         for c in self._contacts.values():
             toks = _name_tokens(c.get("name") or "")
+            nicks = [t for t in _alias_tokens(c) if t not in toks]
             if toks:
                 # every (first token, later token) pair, capped — so "Ana Silva" still resolves
-                # someone stored as "Ana Maria Silva Costa"
+                # someone stored as "Ana Maria Silva Costa". A nickname pairs with every real
+                # token in both directions, so "Zen Tanaka" reaches Zenaldo Tanaka too.
                 pairs = [(toks[0], t) for t in toks[1:]] + list(zip(toks, toks[1:]))
-                for pair in pairs[:6]:
+                for n in nicks:
+                    pairs += [(n, t) for t in toks] + [(t, n) for t in toks]
+                seen_pairs: set = set()
+                for pair in pairs:
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
                     by_pair.setdefault(pair, []).append(c)
+                    if len(seen_pairs) >= 12:
+                        break
+            # The single-token index — what lets a bare "Zen" resolve at all.
+            for t in _alias_tokens(c):
+                by_token.setdefault(t, []).append(c)
             for e in c.get("emails") or []:
                 by_email.setdefault(e.lower(), c)
             for p in c.get("phones") or []:
@@ -457,7 +564,9 @@ class Directory:
                     continue
                 for k in match_keys(e164):
                     by_phone.setdefault(k, []).append(c)
-        self._by_pair, self._by_email, self._by_phone = by_pair, by_email, by_phone
+        self._by_pair, self._by_token = by_pair, by_token
+        self._by_email, self._by_phone = by_email, by_phone
+        self._phone_cache = {}
 
     def _forget(self, resource_name: str) -> None:
         self._contacts.pop(resource_name, None)
@@ -510,8 +619,15 @@ class Directory:
                 else:
                     self._contacts[v["resource_name"]] = self._merge_local(v)
 
+        # A delta that returned nobody changed nothing, and that is the ordinary case: the sync
+        # runs four times an hour and the address book does not. Rebuilding the index anyway cost
+        # a measured 144 ms of blocking CPU (115 ms before the alias index) inside the event loop
+        # every tick, re-wrote all 2 000 mirror rows, and dropped the phone cache that keeps a
+        # big group's membership off the reply path. Only the sync cursor actually moved.
+        changed = was_full or bool(people)
         self._sync_token = next_token
-        self._reindex()
+        if changed or not self._ready:
+            self._reindex()
         self._ready = True
         if self.store is not None:
             try:
@@ -520,7 +636,12 @@ class Directory:
                 # failed (`_mirror_loaded` False) the snapshot started empty, and reaping against
                 # it would delete every learned address and every identity link permanently —
                 # rows that exist nowhere else. Mirror the contacts, reap nothing.
-                await self.store.replace(list(self._contacts.values()), next_token,
+                #
+                # With nothing changed the row list is empty and `replace` persists the cursor
+                # alone — which is the one thing that DID move, and it has to be durable or a
+                # restart resumes from a token that eventually expires.
+                rows = list(self._contacts.values()) if changed else []
+                await self.store.replace(rows, next_token,
                                          full=was_full and self._mirror_loaded)
             except Exception as exc:
                 log.warning("directory mirror write failed: %s", exc)
