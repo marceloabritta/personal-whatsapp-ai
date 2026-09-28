@@ -219,10 +219,11 @@ class ReviewStore:
                 if gaps:
                     await cur.executemany(
                         f"""INSERT INTO {s}.findings
-                            (review_id, loop_id, ts, code, severity, evidence, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                            (review_id, loop_id, ts, code, severity, evidence, harm, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         [(review_id, row["loop_id"], row["ts"], g["code"], g["severity"],
-                          g.get("evidence"), g.get("source", "judge")) for g in gaps],
+                          g.get("evidence"), g.get("harm"), g.get("source", "judge"))
+                         for g in gaps],
                     )
 
     async def mark_done(self, loop_id: str, *, judge_version: str, turns: int, bad: int) -> None:
@@ -294,8 +295,13 @@ class ReviewStore:
             code       text NOT NULL,
             severity   text NOT NULL,
             evidence   text,
+            harm       text,                            -- what the chat actually lost
             source     text NOT NULL DEFAULT 'judge'   -- judge | timing
         );
+        -- v3 added `harm`: the judge must say what was lost, and a gap that cannot name it is
+        -- dropped in normalise(). Idempotent, so an existing database picks the column up on
+        -- the next open() without a migration step of its own.
+        ALTER TABLE {s}.findings ADD COLUMN IF NOT EXISTS harm text;
         CREATE INDEX IF NOT EXISTS findings_code ON {s}.findings (code, ts DESC);
         CREATE INDEX IF NOT EXISTS findings_review ON {s}.findings (review_id);
 

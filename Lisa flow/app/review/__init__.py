@@ -68,7 +68,7 @@ class Reviewer:
     async def _review_turn(self, turn: dict, audio: dict) -> dict:
         async with self._sem:
             verdict = await self.judge.judge(
-                lines=turn["lines"], reply_text=turn["reply_text"]
+                lines=turn["lines"], reply_text=turn["reply_text"], turn_ts=turn["ts"]
             )
 
         # Timing is scored even when the judge failed — the clock does not depend on the model.
@@ -81,12 +81,14 @@ class Reviewer:
                 error=turn["error"],
                 delivery=turn["delivery"],
                 audio_sec=audio.get(turn.get("audio_id")),
+                overtaken=turn["overtaken"],
             ),
             task_class,
         )
 
         gaps = [dict(g, source="judge") for g in verdict["gaps"]]
         gaps += [{"code": c, "severity": sev, "evidence": _timing_evidence(c, score),
+                  "harm": _TIMING_HARM.get(c, "time lost in the chat"),
                   "source": "timing"} for c, sev in score.gaps]
 
         row = {
@@ -112,6 +114,19 @@ class Reviewer:
             return await self.store.audio_seconds([t.get("audio_id") for t in turns])
         except Exception:  # the transcripts table is a nicety, not a dependency
             return {}
+
+
+# The judge writes its own `harm` per gap; the scorer's are fixed, because a measured code always
+# costs the same thing. Kept here beside the codes rather than in taxonomy.py, which the judge's
+# prompt is rendered from and must stay about reading, not about clocks.
+_TIMING_HARM: dict[str, str] = {
+    "slow_reply": "he waited longer than the task warranted",
+    "slow_silence": "the chat lock was held while producing nothing",
+    "window_expired": "the session expired as it answered, so his follow-up was dropped",
+    "no_answer_error": "he was left with no answer at all",
+    "delivery_failed": "the reply was written but never arrived",
+    "dropped_after_timeout": "his follow-up landed outside the window and went unhandled",
+}
 
 
 def _timing_evidence(code: str, score) -> str:

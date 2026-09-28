@@ -76,11 +76,56 @@ def test_pure() -> None:
     # -- normalise: the judge is allowed to be inconsistent; the store is not --
     good_with_gaps = tx.normalise({"verdict": "good", "confidence": "high", "rationale": "r",
                                    "task_class": "ack", "proposed_gap": "",
-                                   "gaps": [{"code": "too_verbose", "severity": "major", "evidence": "e"}]})
+                                   "gaps": [{"code": "too_verbose", "severity": "major",
+                                             "evidence": "e", "harm": "he read padding"}]})
     check("good + gaps downgrades to acceptable", good_with_gaps["verdict"] == "acceptable")
     check("good + gaps keeps the gaps", len(good_with_gaps["gaps"]) == 1)
+    check("the harm is kept", good_with_gaps["gaps"][0]["harm"] == "he read padding")
     check("unknown code is dropped",
-          tx.normalise({"gaps": [{"code": "nope", "severity": "minor", "evidence": "e"}]})["gaps"] == [])
+          tx.normalise({"gaps": [{"code": "nope", "severity": "minor", "evidence": "e",
+                                  "harm": "h"}]})["gaps"] == [])
+
+    # -- v3 guards. Each one removes a class of bad call measured in the v2 audit. --
+    # A finding that cannot say what was lost was an observation, not a fault.
+    check("a gap with no harm is dropped",
+          tx.normalise({"gaps": [{"code": "too_verbose", "severity": "minor",
+                                  "evidence": "e", "harm": "   "}]})["gaps"] == [])
+    # v2 filed two codes off one rationale five times, which doubled one fault in every count.
+    twice = tx.normalise({"rationale": "one problem", "gaps": [
+        {"code": "wrong_details", "severity": "minor", "evidence": "a",
+         "harm": "the guest line contradicts the confirmation"},
+        {"code": "bad_format", "severity": "minor", "evidence": "b",
+         "harm": "The guest line contradicts the confirmation."},
+    ]})
+    check("one harm, one finding — the second code collapses", len(twice["gaps"]) == 1)
+    check("the collapse keeps the FIRST, most specific code",
+          twice["gaps"][0]["code"] == "wrong_details")
+    two_faults = tx.normalise({"rationale": "two problems", "gaps": [
+        {"code": "wrong_details", "severity": "minor", "evidence": "a", "harm": "wrong end time"},
+        {"code": "too_verbose", "severity": "minor", "evidence": "b", "harm": "three currencies"},
+    ]})
+    check("two genuinely different harms both stand", len(two_faults["gaps"]) == 2)
+
+    # v2 ended four rationales with "staying silent is defensible" and filed missed_turn anyway.
+    cleared = tx.normalise({"rationale": "it was banter between the two of them, so staying "
+                                         "silent is defensible.",
+                            "gaps": [{"code": "missed_turn", "severity": "minor",
+                                      "evidence": "e", "harm": "he got no answer"}]}, silent=True)
+    check("a silence the rationale clears files nothing", cleared["gaps"] == [])
+    kept = tx.normalise({"rationale": "he addressed her directly with @lisa and she stayed "
+                                      "silent instead of acting.",
+                         "gaps": [{"code": "missed_turn", "severity": "major",
+                                   "evidence": "e", "harm": "his request went unanswered"}]},
+                        silent=True)
+    check("a real miss still stands", len(kept["gaps"]) == 1)
+    not_silent = tx.normalise({"rationale": "staying silent would have been reasonable",
+                               "gaps": [{"code": "missed_turn", "severity": "minor",
+                                         "evidence": "e", "harm": "h"}]}, silent=False)
+    check("the silence guard never touches a REPLY", len(not_silent["gaps"]) == 1)
+    other_code = tx.normalise({"rationale": "staying silent is defensible",
+                               "gaps": [{"code": "wrong_details", "severity": "minor",
+                                         "evidence": "e", "harm": "wrong date"}]}, silent=True)
+    check("the silence guard only clears silence codes", len(other_code["gaps"]) == 1)
     prop = tx.normalise({"verdict": "bad", "gaps": [], "proposed_gap": "invented a price"})
     check("proposed_gap becomes an 'other' finding",
           len(prop["gaps"]) == 1 and prop["gaps"][0]["code"] == tx.OTHER)
@@ -97,6 +142,26 @@ def test_pure() -> None:
     check("prompt frames silence as legitimate", "silence is a real" in sysprompt.lower())
     check("prompt asks for the MOST SPECIFIC code", "most specifically" in sysprompt.lower())
     check("prompt forbids double-filing one fault", "one code per fault" in sysprompt.lower())
+    # v3: the four things the audit showed the judge did not know.
+    check("prompt tells it to resolve relative dates against the stamp",
+          "amanh" in sysprompt.lower() and "correct" in sysprompt.lower())
+    check("prompt says a gap must name the harm", "name the harm" in sysprompt.lower())
+    check("prompt clears a turn its own rationale defends",
+          "the gaps list is empty" in sysprompt.lower())
+    check("prompt marks the confirmation gate as deliberate",
+          "deliberate" in sysprompt.lower() and "go-ahead" in sysprompt.lower())
+    check("capability card grants guest invitations", "guest" in sysprompt.lower())
+    check("capability card grants contact memory", "remember the people" in sysprompt.lower())
+
+    # -- the date stamp reaches the turn message --
+    import datetime as _dt
+    when = rp.format_when(_dt.datetime(2026, 9, 16, 20, 44, tzinfo=_dt.timezone.utc))
+    check("the stamp names the weekday", "Wednesday" in when)
+    check("the stamp is local, not UTC", "17:44" in when and "Sao_Paulo" in when)
+    check("no timestamp means no stamp block", rp.format_when(None) == "")
+    check("the stamp is shown to the judge", "Wednesday" in rp.build_turn_message("x", "hi", when))
+    check("a turn with no stamp shows no empty header",
+          "WHEN THIS TURN WAS TAKEN" not in rp.build_turn_message("x", "hi", ""))
 
     # -- transcript rendering --
     lines = [{"who": "Marcelo", "text": f"m{i}"} for i in range(10)]
@@ -148,6 +213,22 @@ def test_pure() -> None:
           not any(c == "slow_reply" for c, _ in past.gaps))
 
     err = score_timing(Turn(silent=True, reply_ts=1040, last_human_ts=1000, error=True), "ack")
+    # -- overtaken: measured, but not charged --
+    slow_ot = score_timing(Turn(silent=True, reply_ts=1_100.0, last_human_ts=1_000.0,
+                                overtaken=True), "ack")
+    check("an overtaken turn still reports its band", slow_ot.band == "breach")
+    check("an overtaken turn still reports its wait", slow_ot.wait_seconds == 100.0)
+    check("an overtaken turn files NO latency gap",
+          [c for c, _ in slow_ot.gaps if c in ("window_expired", "slow_silence", "slow_reply")] == [])
+    same_not_ot = score_timing(Turn(silent=True, reply_ts=1_100.0, last_human_ts=1_000.0), "ack")
+    check("...but the same turn not overtaken does", 
+          ("window_expired", "major") in same_not_ot.gaps)
+    err_ot = score_timing(Turn(silent=True, reply_ts=1_100.0, last_human_ts=1_000.0,
+                               error=True, delivery="failed", overtaken=True), "ack")
+    codes_ot = [c for c, _ in err_ot.gaps]
+    check("an overtaken turn still files a no-answer error", "no_answer_error" in codes_ot)
+    check("an overtaken turn still files a failed delivery", "delivery_failed" in codes_ot)
+
     check("an errored turn files no_answer_error", ("no_answer_error", "major") in err.gaps)
     quick_err = score_timing(Turn(silent=True, reply_ts=1005, last_human_ts=1000, error=True), "ack")
     check("a QUICK error is only minor", ("no_answer_error", "minor") in quick_err.gaps)
@@ -196,7 +277,7 @@ def test_baseline() -> None:
         return
 
     waits: dict[str, list] = {"reply": [], "silence": []}
-    over60 = noanswer = overtaken = unknown = 0
+    over60 = noanswer = overtaken = unknown = suppressed = 0
     for line in open(FIXTURE, encoding="utf-8"):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -206,9 +287,17 @@ def test_baseline() -> None:
         # Replay through the scorer with a fixed base so only the DELTA matters.
         s = score_timing(
             Turn(silent=silent, reply_ts=1_000_000 + float(wait_s), last_human_ts=1_000_000,
+                 error=(err != "none"), delivery=dlv or None, overtaken=(ot == "t")),
+            "ack",
+        )
+        # What the v3 overtaken rule removes, measured on the same 120 turns: the wait is still
+        # recorded (the percentiles below are unchanged), only the GAP is withheld.
+        charged = score_timing(
+            Turn(silent=silent, reply_ts=1_000_000 + float(wait_s), last_human_ts=1_000_000,
                  error=(err != "none"), delivery=dlv or None),
             "ack",
         )
+        suppressed += len(charged.gaps) - len(s.gaps)
         if s.wait_seconds is None:
             unknown += 1
         else:
@@ -238,6 +327,7 @@ def test_baseline() -> None:
     check("2 turns past the 60s window", over60 == 2)
     check("2 no-answer turns", noanswer == 2)
     check("19 overtaken turns", overtaken == 19)
+    check("v3 withholds 10 timing gaps from those 19 turns", suppressed == 10)
     check("silences are SLOWER than replies at the median", pct(s_, .5) > pct(r, .5))
 
 

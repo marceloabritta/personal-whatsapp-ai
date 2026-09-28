@@ -13,6 +13,8 @@ a real code is a deliberate edit HERE plus a judge_version bump, never automatic
 that drifts on its own cannot be counted over time."""
 from __future__ import annotations
 
+import re
+
 # --- what the judge may assign, by reading ---------------------------------
 # Descriptions are shown to the judge verbatim, so they are written AT it: short, concrete,
 # and phrased as the condition that must hold for the code to apply.
@@ -120,8 +122,14 @@ def judge_schema() -> dict:
                             "type": "string",
                             "description": "The quote from the transcript that proves it.",
                         },
+                        "harm": {
+                            "type": "string",
+                            "description": "What the person in the chat actually lost because of "
+                                           "this, in a few words. If nothing was lost, this is "
+                                           "not a gap — leave it out of the list entirely.",
+                        },
                     },
-                    "required": ["code", "severity", "evidence"],
+                    "required": ["code", "severity", "evidence", "harm"],
                 },
             },
             "proposed_gap": {
@@ -134,24 +142,70 @@ def judge_schema() -> dict:
     }
 
 
-def normalise(raw: dict) -> dict:
+# Codes that are a judgement about STAYING QUIET. When the judge's own rationale argues the
+# silence was the right call, a gap from this set contradicts the sentence above it.
+SILENCE_CODES = frozenset({"missed_turn", "closed_too_early"})
+
+# "staying silent is defensible", "silence here is reasonable", "saying nothing was correct".
+# Deliberately narrow: the exoneration has to be ABOUT the silence, within a few words of it, or
+# a rationale like "acting would have been correct" would wrongly clear a real miss.
+_SILENCE_OK = re.compile(
+    r"(staying\s+silent|silence|saying\s+nothing|not\s+(?:to\s+)?(?:speak|reply|answer|respond))"
+    r"[^.]{0,60}?\b(defensible|reasonable|appropriate|correct|justified|fine|right|acceptable)\b",
+    re.IGNORECASE,
+)
+
+
+def _harm_key(text: str) -> str:
+    """Two harms that read the same collapse to the same key."""
+    return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
+
+
+def normalise(raw: dict, *, silent: bool = False) -> dict:
     """Coerce a judge payload into something safe to store.
 
-    The enum does most of the work, but a model can still hand back `verdict:"good"` alongside a
-    list of gaps. Rather than drop either half — the gaps are the valuable part — we keep the gaps
-    and downgrade the verdict. A judge that hedges is more useful than one silently inconsistent."""
+    Three things are dropped here rather than stored, each for a measured reason from the v2 audit:
+
+    A gap with no HARM. The schema makes the judge say what the person in the chat lost. When it
+    cannot fill that in, the finding was an observation, not a fault.
+
+    A second gap repeating the first one's harm. v2 filed two codes for one fault five times —
+    `bad_format` beside `wrong_details`, `wrong_details` beside `ignored_approval` — from a single
+    rationale describing a single problem, which made one fault look like two in every count.
+
+    A silence gap the rationale itself clears. Four v2 findings ended "staying silent is
+    defensible" and attached a `missed_turn` underneath. Her instructions tell her to stay quiet
+    unless she is confident she is addressed, so a defensible silence is a good turn.
+
+    The enum does the rest, except that a model can still hand back `verdict:"good"` alongside
+    gaps. There the gaps are the valuable half, so they stay and the verdict is downgraded."""
     verdict = raw.get("verdict") if raw.get("verdict") in VERDICTS else "acceptable"
+    rationale = raw.get("rationale") or ""
+    silence_cleared = bool(silent and _SILENCE_OK.search(rationale))
+
     gaps = []
+    seen_harm: set[str] = set()
     for g in raw.get("gaps") or []:
         code = (g or {}).get("code")
         if code not in JUDGE_CODES:
             continue
+        harm = (g.get("harm") or "").strip()
+        if not harm:
+            continue
+        key = _harm_key(harm)
+        if key and key in seen_harm:
+            continue
+        if silence_cleared and code in SILENCE_CODES:
+            continue
+        seen_harm.add(key)
         sev = g.get("severity") if g.get("severity") in SEVERITIES else "minor"
-        gaps.append({"code": code, "severity": sev, "evidence": (g.get("evidence") or "")[:500]})
+        gaps.append({"code": code, "severity": sev,
+                     "evidence": (g.get("evidence") or "")[:500], "harm": harm[:300]})
 
     proposed = (raw.get("proposed_gap") or "").strip()
     if proposed and not gaps:  # a real miss the vocabulary could not absorb
-        gaps.append({"code": OTHER, "severity": "minor", "evidence": proposed[:500]})
+        gaps.append({"code": OTHER, "severity": "minor", "evidence": proposed[:500],
+                     "harm": proposed[:300]})
 
     if verdict == "good" and gaps:
         verdict = "acceptable"

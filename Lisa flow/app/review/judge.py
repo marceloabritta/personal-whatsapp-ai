@@ -13,7 +13,8 @@ import json
 import logging
 from typing import Any, Optional
 
-from .prompt import build_judge_prompt, build_turn_message, render_transcript
+from .prompt import (build_judge_prompt, build_turn_message, format_when,
+                     render_transcript)
 from .taxonomy import judge_schema, normalise
 
 log = logging.getLogger("mary.review.judge")
@@ -35,13 +36,16 @@ class Judge:
             self._client = anthropic.AsyncAnthropic(api_key=self.s.anthropic_api_key)
         return self._client
 
-    async def judge(self, *, lines: list[dict], reply_text: Optional[str]) -> dict:
+    async def judge(self, *, lines: list[dict], reply_text: Optional[str], turn_ts=None) -> dict:
         """Grade one turn from the transcript alone.
 
         `lines` is every transcript line before this turn, oldest first. `reply_text` is what she
-        sent, or None when she stayed silent — silence is a decision and is judged too."""
+        sent, or None when she stayed silent — silence is a decision and is judged too. `turn_ts`
+        is when the turn was taken: the judge needs a date to resolve "amanhã" and to check a
+        weekday, and without one it filed wrong_details against dates that were right."""
         transcript = render_transcript(lines, max_lines=self.s.review_max_context_lines)
-        content = build_turn_message(transcript, reply_text)
+        when = format_when(turn_ts, getattr(self.s, "calendar_timezone", "America/Sao_Paulo"))
+        content = build_turn_message(transcript, reply_text, when)
 
         try:
             client = self._client_or_make()
@@ -69,7 +73,7 @@ class Judge:
             log.error("judge returned unparseable JSON: %r", text[:300])
             return _error("unparseable json")
 
-        out = normalise(raw)
+        out = normalise(raw, silent=reply_text is None)
         usage = getattr(resp, "usage", None)
         out["error"] = None
         out["judge_model"] = self.s.review_model

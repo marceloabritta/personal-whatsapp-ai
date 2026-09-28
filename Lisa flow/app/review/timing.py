@@ -14,6 +14,11 @@ slow silence looks free — and is not: main.py holds a per-thread lock for the 
 seconds are charged to whoever speaks next in that chat. Producing nothing should never be slow,
 whatever the topic, so silence gets one flat budget instead of the task's.
 
+A turn that was OVERTAKEN — a newer human message landed before it finished — is measured but not
+charged. The wait is real arithmetic, but it is a wait nobody was serving: the conversation had
+already moved past the message the clock is counting from. v2 charged those, and its three worst
+latency figures (399.7s, 293.5s, 255.9s) all turned out to be one abandoned loop running itself out.
+
 Everything here is a pure function of already-recorded numbers, so the budgets can be re-tuned and
 the whole history re-scored in milliseconds — no judge re-run, no token spend. Quality verdicts are
 the expensive half; timing verdicts are free."""
@@ -96,6 +101,7 @@ class Turn:
     error: bool = False                     # record.error_category != "none"
     delivery: Optional[str] = None          # "ok" | "failed" | "silent"
     audio_sec: Optional[float] = None       # voice-note length, when this turn transcribed one
+    overtaken: bool = False                 # a newer human message landed before this turn ended
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,15 @@ def score_timing(turn: Turn, task_class: str = DEFAULT_TASK_CLASS) -> TimingScor
     budget = SILENCE_BUDGET if turn.silent else BUDGETS.get(task_class, BUDGETS[DEFAULT_TASK_CLASS])
     band = budget.band(secs, turn.audio_sec)
     code = "slow_silence" if turn.silent else "slow_reply"
+
+    if turn.overtaken:
+        # Nobody was on the other end of this clock. `overtaken` means a newer human message had
+        # already superseded the turn, so the wait is measured to a message the turn was never
+        # answering — and the person who sent it had moved on before the seconds were spent. The
+        # band is still returned, because the number is true and worth seeing; the GAP is not
+        # filed, because charging a stale turn for a wait nobody served is how three of v2's
+        # sixteen major findings came to be the same abandoned loop, counted three times.
+        return TimingScore(band, round(secs, 3), gaps)
 
     if secs > WINDOW_SECONDS:
         # Outranning the window is its own failure and supersedes the budget band — the session
