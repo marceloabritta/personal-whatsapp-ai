@@ -231,6 +231,64 @@ def retrieval_checks():
           len(picked) == 1 and picked[0][0]["name"] == "Ana Silva"
           and picked[0][1] == "phone+name")
 
+    # THE CHAT ANSWERS FIRST. His rule: a name he uses is somebody in this chat unless he says
+    # otherwise. The reported Zen was saved as plain "Zen" and there was another Zen on file.
+    two_zens = Directory(settings())
+    two_zens.load([
+        contact("people/room", "Zen", ["zen.group@acme.com"], ["+55 11 98888-7777"]),
+        contact("people/other", "Zen Oliveira", ["zen.oliveira@foo.com"], ["+55 21 99999-8888"]),
+    ])
+    z = two_zens.mentions("add Zen", phones=["5511988887777"])
+    check("the Zen IN THE CHAT beats the Zen on file",
+          len(z) == 1 and z[0][0]["emails"] == ["zen.group@acme.com"])
+    check("...and needs no confirmation — named, and demonstrably here", z[0][1] == "phone+name")
+
+    # A member's card may be fuller than what he types. Prefix, but only ever inside the room.
+    zenaldo = Directory(settings())
+    zenaldo.load([contact("people/z", "Zenaldo Tanaka", ["zt@acme.com"], ["+55 11 98888-7777"]),
+                  contact("people/a", "Ana Silva", ["a@x.com"], ["+55 11 90000-0000"])])
+    zp = zenaldo.mentions("add Zen", phones=["5511988887777", "5511900000000"])
+    check("a bare name reaches a longer name in the room",
+          [c["name"] for c, _ in zp] == ["Zenaldo Tanaka"])
+    check("prefix does NOT run against the book at large",
+          zenaldo.mentions("add Zen", phones=["5511900000000"]) == [])
+
+    # Two people in this very chat answer to it — nothing outside the room can settle that.
+    both = Directory(settings())
+    both.load([contact("people/1", "Zen Tanaka", ["zt@acme.com"], ["+55 11 98888-7777"]),
+               contact("people/2", "Zen Oliveira", ["zo@foo.com"], ["+55 21 99999-8888"])])
+    bz = both.mentions("add Zen", phones=["5511988887777", "5521999998888"])
+    check("two of them in the same chat is the one case he must settle",
+          {w for _c, w in bz} == {"name?"} and len(bz) == 2)
+
+    # Duplicate cards are normal in a synced book; the one belonging to someone here is his.
+    dup = Directory(settings())
+    dup.load([contact("people/d1", "Ana Silva", ["ana.old@x.com"]),
+              contact("people/d2", "Ana Silva", ["ana.here@x.com"], ["+55 11 98888-7777"])])
+    ds = dup.mentions("marca com a Ana Silva", phones=["5511988887777"])
+    check("a duplicate card is settled by who is in the chat",
+          len(ds) == 1 and ds[0][0]["emails"] == ["ana.here@x.com"])
+
+    # The 1:1 partner is in the chat too — the same rule, not a separate one.
+    check("the 1:1 partner counts as being in the chat",
+          d.mentions("marca com a Ana", phone="5511987654321")[0][1] == "phone+name")
+    check("a 1:1 partner who was never named is not marked confirmed",
+          d.mentions("bom dia", phone="5511987654321")[0][1] == "phone")
+
+    # An ordinary word looks exactly like a partial name against a member list: "sobre" leads
+    # every Sobrenome in the room. A partial match is a convenience, never a question — this
+    # turned one common Portuguese word into a 100-way ask, and the turn cost 15 ms with it.
+    crowd = Directory(settings())
+    crowd.load([contact(f"people/c{i}", f"Nome{i} Sobrenome{i}", [f"n{i}@x.com"],
+                        [f"+5511 9{10000000 + i}"]) for i in range(100)])
+    room100 = [f"5511 9{10000000 + i}" for i in range(100)]
+    check("a common word leading many member names matches NOBODY",
+          crowd.mentions("marcar reuniao amanha sobre o projeto", phones=room100) == [])
+    # ...but one person here whose name starts with it is still the person he means.
+    check("...while a prefix unique in the room still binds",
+          [c["name"] for c, _ in crowd.mentions("chama o Nome7", phones=room100)]
+          == ["Nome7 Sobrenome7"])
+
     # NICKNAMES — the alias tolerance this module always said belonged in the index.
     nick = Directory(settings())
     nick.load([contact("people/z", "Zenaldo Tanaka", ["zt@acme.com"], nicknames=["Zen"])])

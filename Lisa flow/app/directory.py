@@ -12,11 +12,15 @@ blocks the event loop for every chat, not just this one. Exact lookups over the 
 0.17 ms. So nickname tolerance is bought the way this file always said it should be: aliases are
 precomputed during the sync (Google's own Nickname field) into the same exact-match index.
 
-A BARE NAME BINDS, WHEN IT IS UNAMBIGUOUS. "add Zen" is how people actually ask, and refusing it
-because a first name "could be anyone" made Lisa forget an address she demonstrably had. A lone
-name resolves when the BOOK answers it with exactly one person, or when the ROOM does — several
-Zens on file but only one of them in this chat. More than one candidate is not a guess, it is a
-question, and it renders as one. A word matching more people than fit in the prompt is not a name.
+A BARE NAME BINDS, AND THE CHAT ANSWERS IT FIRST. "add Zen" is how people actually ask, and
+refusing it because a first name "could be anyone" made Lisa forget an address she demonstrably
+had. The owner's rule is that a name he uses belongs to somebody in this chat unless he says
+otherwise, so a name is matched against the MEMBERS before the book at large — exactly, then by
+prefix within the room, so "Zen" reaches a Zenaldo sitting right here. A member who answers to it
+beats a same-named stranger on file outright, and needs no confirmation: named, and demonstrably
+present. Only a name the room cannot account for falls through to the book, where exactly one
+match binds, several are a question rather than a guess, and more than fit in the prompt is not
+a name at all.
 
 IDENTITY IS A PHONE NUMBER, and a group has many. `state["phone"]` is the 1:1 partner (None in a
 group — `state["number"]` there is the group id, and an opaque @lid elsewhere, whose tail looks
@@ -165,6 +169,25 @@ def _alias_tokens(contact: dict) -> list:
     return toks
 
 
+def _member_index(members: list) -> tuple:
+    """(exact, prefix) — the names the people in this chat answer to.
+
+    The prefix half is PRECOMPUTED rather than scanned. Testing `tok.startswith(t)` across the
+    member index per turn-token is the obvious spelling and it measured 15.6 ms at 100 members
+    against a normal transcript — a 200-token turn times a 200-entry index — which is blocking
+    CPU inside an async node and three times this module's budget. Expanding each member name
+    into its own prefixes costs a few hundred dict writes once and makes every lookup O(1).
+    """
+    exact: dict = {}
+    prefix: dict = {}
+    for c in members:
+        for t in _alias_tokens(c):
+            exact.setdefault(t, []).append(c)
+            for n in range(_MIN_TOKEN, len(t)):
+                prefix.setdefault(t[:n], []).append(c)
+    return exact, prefix
+
+
 def _given(contact: dict) -> str:
     toks = _name_tokens(contact.get("name") or "")
     return toks[0] if toks else ""
@@ -189,6 +212,7 @@ class Directory:
         # changes between turns, so the parse is done once. Dropped whenever the book or the
         # links move, which is the only way an answer here can go stale.
         self._phone_cache: dict = {}
+        self._member_cache: dict = {}   # phones tuple -> (exact, prefix); same lifetime as above
         self._sync_token: Optional[str] = None
         self._ready = False
         # Did we successfully read the durable mirror at boot? Only then may a full sweep reap
@@ -213,10 +237,15 @@ class Directory:
         "phone" | "name" | "name?", strongest first — and "name?" means AMBIGUOUS: the caller
         must render it as a question and must not read an address off it.
 
-        `phone` is the 1:1 chat partner. `phones` is everyone who has spoken in this chat, which
-        in a group is the membership; it never produces a hit by itself, it only says WHICH of
-        several same-named people is the one being talked about, and lifts a name match to the
-        "phone matches and name matches" bar without costing a confirmation turn.
+        THE CHAT ANSWERS FIRST. A name the owner uses is the name of somebody in this chat
+        unless the chat has no answer for it at all — that is his stated rule, and it is how
+        people actually talk. So every name is matched against the members (`phone`, the 1:1
+        partner, plus `phones`, everyone who has spoken here) BEFORE the address book at large,
+        and a member who answers to it wins outright over a same-named stranger on file. Only a
+        name the room cannot account for falls through to the book.
+
+        Membership still never produces a hit BY ITSELF: in a twenty-person group every member
+        would otherwise outrank the people the turn is actually about.
         """
         if not self._ready:
             return []
@@ -233,49 +262,76 @@ class Directory:
                 for c in self._resolve_phone(phone):
                     hits.setdefault(c["resource_name"], (c, "phone"))
 
-            # The room. Resolved up front, used only to disambiguate and to promote — see above.
+            # WHO IS IN THIS CHAT — the 1:1 partner and everyone who has spoken in a group.
+            # Indexed by the names they answer to, because this is what names resolve against
+            # first; `_resolve_phone` is memoised, so a big room costs one parse per member ever.
             members: dict = {}
-            for p in phones or []:
+            for p in ([phone] if phone else []) + list(phones or []):
                 for c in self._resolve_phone(p):
                     members[c["resource_name"]] = c
+            member_exact, member_prefix = self._member_index(members)
 
             toks = _normalize(strip_labels(turn_text)).split()
             tokset = set(toks)
 
+            # Full name. Duplicate cards are normal in a synced book, and the one belonging to
+            # somebody in this chat is the one he means.
             for a, b in zip(toks, toks[1:]):
-                for c in self._by_pair.get((a, b), ()):
+                cands = list(self._by_pair.get((a, b), ()))
+                if not cands:
+                    continue
+                here = [c for c in cands if c["resource_name"] in members]
+                for c in (here if len(here) == 1 else cands):
                     hits.setdefault(c["resource_name"], (c, "name"))
 
             # A lone name — "add Zen". Tokens already accounted for by a contact we resolved are
             # skipped, so "Ana Silva" does not also fire the eight other Silvas in the book.
             covered = {t for c, _w in hits.values() for t in _alias_tokens(c)}
+            def ask(candidates: list) -> None:
+                """Surface them as a question — names only; `block` reads no address off these."""
+                for c in candidates:
+                    hits.setdefault(c["resource_name"], (c, "name?"))
+
             for t in toks:
                 if t in covered:
                     continue
-                cands = self._by_token.get(t) or []
-                if not cands:
+                here = member_exact.get(t) or []          # somebody here is called exactly this
+                near = member_prefix.get(t) or []         # ...or has a name starting with it
+                cands = self._by_token.get(t) or []       # ...or the book at large does
+                pick = None
+                if len(here) == 1:
+                    pick = here[0]
+                elif len(here) > 1:
+                    # Two people in this very chat answer to it. Nothing outside the room can
+                    # settle that, and it is the one case where he genuinely has to say which.
+                    if len(here) <= limit:
+                        ask(here)
+                        covered |= {tok for c in here for tok in _alias_tokens(c)}
                     continue
-                here = [c for c in cands if c["resource_name"] in members]
-                if len(cands) == 1:
+                elif len(near) == 1:
+                    pick = near[0]                        # "Zen" and one Zenaldo in the room
+                elif len(cands) == 1:
                     pick = cands[0]
-                elif len(here) == 1:
-                    pick = here[0]      # several on file, one in the room: that is the one
-                elif len(cands) <= limit:
-                    # Not a guess worth making against a real address book. Surfaced as a
-                    # question instead, by name only — `block` renders no address for these.
-                    for c in cands:
-                        hits.setdefault(c["resource_name"], (c, "name?"))
+                elif not near and cands and len(cands) <= limit:
+                    # Not a guess worth making against a real address book.
+                    ask(cands)
                     covered |= {tok for c in cands for tok in _alias_tokens(c)}
                     continue
                 else:
-                    continue            # a common word that happens to be somebody's surname
+                    # Several people here have names merely STARTING with it, which is what an
+                    # ordinary word looks like against a member list — "sobre" leads every
+                    # Sobrenome in the chat. A partial match is a convenience, never a question.
+                    # Same for a token matching more of the book than fits in the prompt.
+                    continue
                 hits[pick["resource_name"]] = (pick, "name")
                 covered |= set(_alias_tokens(pick))
 
-            # Phone + name agreement is the strongest signal available. In a group "the phone" is
-            # the member list, so a member the turn names by name clears the same bar.
+            # Phone + name agreement is the strongest signal available. A NAME match that is also
+            # somebody in this chat clears it: named, and demonstrably here. A bare `phone` hit is
+            # the chat partner, who may not have been named at all, so it still needs the name
+            # check — promoting it on membership alone would mark every 1:1 partner confirmed.
             for rn, (c, why) in list(hits.items()):
-                if why in ("phone", "name") and rn in members:
+                if why == "name" and rn in members:
                     hits[rn] = (c, "phone+name")
                 elif why == "phone" and _given(c) and _given(c) in tokset:
                     hits[rn] = (c, "phone+name")
@@ -287,6 +343,16 @@ class Directory:
         except Exception:  # the reply path must never see an exception from here
             log.exception("directory.mentions failed")
             return []
+
+    def _member_index(self, members: dict) -> tuple:
+        """`_member_index` for this chat, memoised — a room sends turn after turn unchanged."""
+        key = tuple(sorted(members))
+        hit = self._member_cache.get(key)
+        if hit is None:
+            if len(self._member_cache) >= 512:
+                self._member_cache.clear()
+            hit = self._member_cache[key] = _member_index(list(members.values()))
+        return hit
 
     def _resolve_phone(self, phone: str) -> list:
         cached = self._phone_cache.get(phone)
@@ -496,6 +562,7 @@ class Directory:
                 # `_links` is read by _resolve_phone, and this is the one path that changes it
                 # without rebuilding the index.
                 self._phone_cache = {}
+                self._member_cache = {}
                 if self.store is not None:
                     try:
                         await self.store.link(e164, c["resource_name"], "booked")
@@ -567,6 +634,7 @@ class Directory:
         self._by_pair, self._by_token = by_pair, by_token
         self._by_email, self._by_phone = by_email, by_phone
         self._phone_cache = {}
+        self._member_cache = {}
 
     def _forget(self, resource_name: str) -> None:
         self._contacts.pop(resource_name, None)
