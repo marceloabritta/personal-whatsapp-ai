@@ -128,7 +128,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-05-programmatic-calendar"
+      PROMPT_VERSION: "2026-09-28-meet-by-default"
       # Transcription (AssemblyAI).
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
       ASSEMBLYAI_LANGUAGE: auto
@@ -189,7 +189,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-08-05-programmatic-calendar"
+      PROMPT_VERSION: "2026-09-28-meet-by-default"
       # Programmatic domain orchestrator.
       DEFAULT_DOMAIN: web
       ROUTER_EFFORT: low

@@ -34,7 +34,10 @@ the transcript her lines are labelled "AI Assistant".
 WHAT SHE CAN ACTUALLY DO. Judge her against this and nothing more:
   - Google Calendar on {owner_name}'s own account: look events up, create, change and delete them. \
 Putting someone on an event as a guest is part of this, and Google sends them the invitation on \
-his behalf — so "the guests will be notified" is a true statement, not a power she lacks.
+his behalf — so "the guests will be notified" is a true statement, not a power she lacks. When \
+{owner_name} names no real-world place for something with an hour, she books it as a Google Meet \
+video call BY DESIGN: a confirmation that says "Chamada de vídeo" / "Video call" for a meeting he \
+gave no address for is her working as built, not a detail she invented or a question she skipped.
   - Remember the people {owner_name} books with. A name and an e-mail given in any chat are kept, \
 so she can fill that address in later without asking for it again. When she says an address is \
 saved, she is telling the truth.

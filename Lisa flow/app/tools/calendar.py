@@ -121,6 +121,32 @@ def span_days(first_day: str, last_day: str) -> int:
     return (date.fromisoformat(last_day) - date.fromisoformat(first_day)).days + 1
 
 
+# --- one "where", decided once -------------------------------------------------------------
+
+
+def resolve_virtual(inp: dict) -> bool:
+    """Does this NEW event get a Google Meet link? THE decision, made in exactly one place.
+
+    The explicit flag wins when the model sent it — including `virtual: false`, which is the
+    instruction "no video call", not an absence (see `provided`). With no flag, a MEETING WITH
+    NOWHERE TO GO is a video call: nobody names a place for a call, so a timed event with no
+    location gets a Meet link rather than being filed with no "where" at all. An all-day thing
+    — a birthday, a trip, time off — is not a meeting and never gets one, and an empty
+    `location: ""` is the instruction "no place", which is a place-less meeting like any other.
+
+    CREATE ONLY, and that is the whole point of it being a separate resolver from the body
+    builder: on a patch an absent location means "I did not touch the location", so defaulting
+    there would bolt a Meet link onto every reschedule.
+
+    The confirmation composer calls this too, so the card and the event can never disagree about
+    the "where" — the two-implementations bug this module already paid for once."""
+    if provided(inp, "virtual"):
+        return bool(inp["virtual"])
+    if resolve_kind(inp):
+        return False
+    return not str(inp.get("location") or "").strip()
+
+
 def _same_dt(a: str | None, b: str | None) -> bool:
     """Compare two ISO instants by value, not by spelling — Google echoes its own offset format,
     so a string compare reports a time change that isn't one."""
@@ -207,7 +233,9 @@ ALWAYS
 
 CREATE — you only need a title and a start; do not interrogate {owner_name} for details he did not give.
 - Title is what the event is ABOUT — a short topic ("Budget review"). If you can't resolve the topic, use the format Name & Name for the people, starting with {owner_name}.
-- No end -> defaults to 45 minutes. Use "virtual": true for a video call (a Meet link is created and the location dropped); otherwise set "location". Add "attendees" emails when he names people (invited by default; "send_invites": false to suppress).
+- No end -> defaults to 45 minutes. Add "attendees" emails when he names people (invited by default; "send_invites": false to suppress).
+- WHERE it happens: set "location" when he says a real-world place ("at the office", "Starbucks Faria Lima", "his apartment"). If he names no place, DO NOT ASK and do not send "virtual" — a timed event with no location automatically gets a Google Meet link, and the confirmation shows him "Video call" so he can correct it. "virtual": true is only worth sending when he explicitly asks for a call/Meet/Zoom.
+- Send "virtual": false for the timed things that are not a call he would dial into and that have no address worth writing: the dentist, the gym, a haircut, a flight, or a block of his own time (focus, lunch, commute). No place named and no Meet either.
 - Vague about the hour? Assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) — the confirmation shows it so he can fix it.
 - Emit: {{"task": "calendar.create", "title": ..., "start": ...}} with "message": null.
 
@@ -217,7 +245,7 @@ FIND — the resolver. Search by title words ("query"), the person ("attendee"),
 - To answer "when is X", just emit the find; the system replies.
 - To CANCEL an event, emit the find AND set "workflow" to {{"task": "calendar.delete"}} — when the search hits a single event the system asks to cancel it directly. If several match, the system lists them and you pick one next turn.
 
-UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, all_day, location, virtual, attendees) and "message": null — but remember "attendees", when you send it at all, is the complete final list. A new start keeps the original length unless you also give an end. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
+UPDATE (reschedule / edit) — `find` first to resolve the event; once you see the match, emit `calendar.update` with its "event_id" and ONLY the fields that change (any of: title, start, end, all_day, location, virtual, attendees) and "message": null — but remember "attendees", when you send it at all, is the complete final list. A new start keeps the original length unless you also give an end. An update never adds or removes a video call on its own: send "virtual": true to put a Meet on an existing event, false to take one off. (The system shows {owner_name} exactly what changes and asks before applying — you don't write that.)
 
 DELETE (cancel) — `find` first to resolve the event, then emit `calendar.delete` with the "event_id" and "message": null.
 """
@@ -523,6 +551,11 @@ class GoogleCalendarService:
         if resolve_kind(inp) and inp.get("end") and as_day(inp["end"]) < as_day(inp["start"]):
             return {"ok": False, "error": "validation",
                     "summary": "the last day of an all-day event cannot be before its first."}
+        # A meeting with nowhere to go is a video call. Resolved here rather than inside the
+        # body builder, which also serves the patch path, where a missing location means
+        # "unchanged" instead of "nowhere".
+        if resolve_virtual(inp):
+            inp = {**inp, "virtual": True}
         body, conference = self._body_from(inp)
         want_meet = conference == "create"
         kw = dict(calendarId=self._cal(), body=body, sendUpdates=self._send_updates(inp))
