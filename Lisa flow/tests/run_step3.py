@@ -894,8 +894,8 @@ async def confirmation_checks() -> None:
 
 async def presence_checks() -> None:
     print("\nStep-3 P6 — presence semantics + post-condition")
-    from app.skills.calendar_format import compose_update
-    from app.tools.calendar import GoogleCalendarService, changes, provided
+    from app.skills.calendar_format import compose_create, compose_update
+    from app.tools.calendar import GoogleCalendarService, changes, provided, resolve_virtual
 
     # --- the single presence rule ---------------------------------------------------------
     for val in (False, "", [], 0):
@@ -950,6 +950,58 @@ async def presence_checks() -> None:
     check("[confirm] a change-less update falls to the model, not a blank ask",
           compose_update({"task": "calendar.update", "event_id": "E1",
                           "location": "Sala 5"}, st) is None)
+
+    # --- a meeting with nowhere to go is a video call --------------------------------------
+    # One resolver, read by the body builder AND the confirmation card, so the card can never say
+    # "no location" for an event that is being given a Meet link (or the reverse).
+    TIMED = {"title": "Sync", "start": "2026-09-14T10:00:00-03:00"}
+    check("[where] a timed event with no place defaults to a Meet",
+          resolve_virtual(TIMED))
+    check("[where] a place named means no Meet",
+          not resolve_virtual({**TIMED, "location": "Sala 5"}))
+    check("[where] a blank place is still no place",
+          resolve_virtual({**TIMED, "location": "   "}))
+    check("[where] an explicit virtual:false wins over the default",
+          not resolve_virtual({**TIMED, "virtual": False}))
+    check("[where] an explicit virtual:true wins over a location",
+          resolve_virtual({**TIMED, "location": "Sala 5", "virtual": True}))
+    check("[where] an all-day event is not a meeting and gets no Meet",
+          not resolve_virtual({"title": "Ana's birthday", "start": "2026-09-14"}))
+    check("[where] ...by the flag too, even carrying a datetime",
+          not resolve_virtual({**TIMED, "all_day": True}))
+    prev_view = {"title": "Sync", "start": "2026-09-13T12:00:00-03:00",
+                 "end": "2026-09-13T13:00:00-03:00", "location": "Sala 5"}
+    pbody, pconf = svc._body_from({"start": "2026-09-14T10:00:00-03:00"}, existing=prev_view)
+    check("[where] a reschedule with no place does NOT grow a Meet",
+          pconf is None and "conferenceData" not in pbody)
+
+    async def _created_with(action):
+        h = _cal_handler()
+        await h.run("create", {**action, "confirmed": True})
+        return next(kw for v, kw in h._svc.events().calls if v == "insert")
+
+    r = await _created_with({"title": "Sync", "start": "2026-09-14T10:00:00-03:00"})
+    check("[where] create requests the Meet without being asked",
+          "conferenceData" in r["body"] and r.get("conferenceDataVersion") == 1)
+    r = await _created_with({"title": "Dentist", "start": "2026-09-14T10:00:00-03:00",
+                             "virtual": False})
+    check("[where] ...and virtual:false books a plain event",
+          r["body"].get("conferenceData", "MISSING") is None)
+    r = await _created_with({"title": "Sync", "start": "2026-09-14T10:00:00-03:00",
+                             "location": "Sala 5"})
+    check("[where] ...and a real place is booked as a place",
+          r["body"].get("location") == "Sala 5" and "conferenceData" not in r["body"])
+    r = await _created_with({"title": "Trip", "start": "2026-09-14", "all_day": True})
+    check("[where] ...and a whole day gets no conference call at all",
+          "conferenceData" not in r["body"] and not r.get("conferenceDataVersion"))
+
+    card = compose_create({"task": "calendar.create", **TIMED}, {"session_lang": "pt"}) or ""
+    check("[where] the confirmation card names the video call it is about to create",
+          "Chamada de vídeo" in card or "Video call" in card)
+    plain = compose_create({"task": "calendar.create", **TIMED, "virtual": False},
+                           {"session_lang": "pt"}) or ""
+    check("[where] ...and says nothing of the sort when there is no call",
+          "deo" not in plain)
 
     # --- the post-condition: verify the RESPONSE, not the request -------------------------
     # The live failure: Google returned 200 for the Meet removal with the Meet still attached,

@@ -12,7 +12,7 @@ its `message` is null. Confirmations read from the action (create) or the cached
 `ActionResult.data`. Unsupported languages fall back to the model (see LANGS + the respond node)."""
 from __future__ import annotations
 
-from ..tools.calendar import changes, is_date_only, span_days
+from ..tools.calendar import changes, is_date_only, resolve_virtual, span_days
 
 from datetime import datetime
 
@@ -193,7 +193,10 @@ def compose_create(action: dict, state: dict) -> str | None:
         return None
     lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"],
              *_when(action, lang)]
-    if action.get("virtual"):
+    # NOT `action.get("virtual")`: the video call is often the DEFAULT rather than something the
+    # model asked for (a timed event with no place), and this card is the only place the owner
+    # gets to see that before it happens. Same resolver the handler builds the body from.
+    if resolve_virtual(action):
         lines.append(L["video"])
     elif action.get("location"):
         lines.append(action["location"])
