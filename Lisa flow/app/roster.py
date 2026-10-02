@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date
 from typing import Any, Optional
 
 log = logging.getLogger("mary.roster")
@@ -226,13 +225,18 @@ class DailyCap:
     day, not to be an accounting record. Counting in Postgres would put a write on the hot path
     for a bound that is never normally approached."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, tz_name: str = "UTC") -> None:
         self.limit = limit
+        self.tz_name = tz_name
         self._day: str = ""
         self._counts: dict[str, int] = {}
 
     def _roll(self) -> None:
-        today = date.today().isoformat()
+        # `date.today()` is the container's clock, which is UTC — so "per calendar day" rolled
+        # over at 21:00 in São Paulo, cutting the evening off from its own allowance.
+        from .prompt import now_in
+
+        today = now_in(self.tz_name)[0].date().isoformat()
         if today != self._day:
             self._day, self._counts = today, {}
 

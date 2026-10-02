@@ -13,12 +13,39 @@ from datetime import datetime, timezone
 from .identity import header_for
 
 
+# Fixed English weekday names, for the same reason the agenda layout carries its own
+# (tools/calendar.py:209): strftime("%A") follows the container's locale. The numeric parts of
+# the stamp are locale-proof on their own.
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def now_in(tz_name: str) -> tuple[datetime, str]:
+    """The owner's wall clock, and the zone label to show him.
+
+    Falls back to UTC on an unknown zone rather than raising — a prompt with the wrong date is
+    bad, a brain that will not start is worse. The label returned is the zone actually used, so
+    the prompt can never claim a zone it did not apply."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(tz_name)), tz_name
+    except Exception:
+        return datetime.now(timezone.utc), "UTC"
+
+
 def build_system_prompt(
     owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
     has_actions: bool = False, session_lang: str | None = None,
-    context_block: str | None = None,
+    context_block: str | None = None, tz_name: str = "UTC",
 ) -> str:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # THE OWNER'S clock, not the server's. This line used to read `datetime.now(timezone.utc)`,
+    # and the container runs UTC with no TZ — so for the three hours between 21:00 and midnight
+    # in São Paulo the prompt asserted TOMORROW's date as today, and every "amanhã" she resolved
+    # landed a day late. She was not confused: told "tomorrow is Friday" she answered "Oct 2 is a
+    # Friday, so tomorrow, Oct 3, is a Saturday" — correct arithmetic on a wrong today, and
+    # uncorrectable, because the prompt reasserted it on the very next turn.
+    now, tz_label = now_in(tz_name)
+    today = f"{_WEEKDAYS[now.weekday()]}, {now:%Y-%m-%d}, {now:%H:%M} ({tz_label})"
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
 
@@ -135,4 +162,6 @@ suggested next steps or follow-up questions; give the answer and stop."""
     # "Current date" line — the least authoritative position in the prompt — and would separate
     # the contract from the date it is meant to be read with.
     return (f"{base}{skill_block}{context_block or ''}{action_para}"
-            f"\n\n{contract}\n\nCurrent date: {today}.")
+            f"\n\n{contract}\n\nCurrent date and time: {today}. "
+            f"That is {owner_name}'s own clock — resolve \"today\", \"tomorrow\", \"tonight\", "
+            f"a named weekday and \"next week\" against it, and against nothing else.")

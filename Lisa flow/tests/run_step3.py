@@ -122,6 +122,49 @@ def unit_checks() -> None:
     check("both prompts substitute the owner name (no stray {owner_name})",
           "Marcelo" in sp_cal and "{owner_name}" not in sp_cal and "{owner_name}" not in sp_web)
 
+    # --- the date stamp is the OWNER's clock, not the container's -------------------------
+    # The container runs UTC with no TZ. While the prompt read `datetime.now(timezone.utc)`,
+    # every evening between 21:00 and midnight in Sao Paulo it asserted tomorrow's date as
+    # today, and every relative date she resolved landed a day late.
+    from datetime import datetime, timedelta, timezone as _tz
+    from app.prompt import build_system_prompt, now_in
+
+    sp_tz = build_system_prompt("Marcelo", "@lisa", tz_name="America/Sao_Paulo")
+    check("prompt states the date AND the time", "Current date and time:" in sp_tz)
+    check("prompt names the zone it used", "(America/Sao_Paulo)" in sp_tz)
+    check("prompt pins relative dates to that clock",
+          'resolve "today", "tomorrow"' in sp_tz and "against nothing else" in sp_tz)
+
+    sp_now, sp_label = now_in("America/Sao_Paulo")
+    utc_now, _ = now_in("UTC")
+    check("now_in returns the zone it actually applied", sp_label == "America/Sao_Paulo")
+    check("now_in falls back to UTC on a bad zone", now_in("Not/AZone")[1] == "UTC")
+    check("Sao Paulo is behind UTC", sp_now.utcoffset() < timedelta(0))
+    check("the rendered date is the owner's, not the server's",
+          f"{sp_now:%Y-%m-%d}" in sp_tz)
+    # The regression itself: the two clocks disagree about the DAY for 3h every evening.
+    # Whenever they do, the prompt must carry the owner's day.
+    if sp_now.date() != utc_now.date():
+        check("during the divergence window the prompt shows the owner's day, not UTC's",
+              f"{utc_now:%Y-%m-%d}" not in sp_tz)
+    # A weekday name that is spelled by us, not by the container's locale.
+    from app.prompt import _WEEKDAYS
+    check("the weekday is spelled in English regardless of locale",
+          _WEEKDAYS[sp_now.weekday()] in sp_tz)
+    check("the weekday matches the date shown",
+          _WEEKDAYS[sp_now.weekday()] == sp_now.strftime("%A"))
+
+    # The settings path actually carries the zone through to the prompt.
+    check("system_prompt_for passes the owner's zone through",
+          f"({settings.calendar_timezone})" in sp_cal)
+
+    # The transcription daily cap rolled over on the same wrong clock.
+    from app.roster import DailyCap
+    cap = DailyCap(2, "America/Sao_Paulo")
+    cap._roll()
+    check("the daily cap rolls on the owner's day",
+          cap._day == f"{sp_now:%Y-%m-%d}")
+
     # --- runtime fan-out ---
     h = handlers(settings)
     check("handlers builds a 'calendar' handler and no 'web' handler",

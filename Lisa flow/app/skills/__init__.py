@@ -117,6 +117,7 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         has_actions=bool(skill.enabled_verbs(settings)),
         session_lang=session_lang,
         context_block=context_block,
+        tz_name=getattr(settings, "calendar_timezone", "UTC"),
     )
 
 

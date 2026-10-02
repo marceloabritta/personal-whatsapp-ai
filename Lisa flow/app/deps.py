@@ -76,7 +76,7 @@ def build_deps(settings: Settings | None = None) -> Deps:
     # The roster starts empty and in-memory; the durable tier is attached in the FastAPI
     # lifespan when a DB is present, exactly like the transcript cache.
     roster = Roster(ttl=settings.roster_cache_ttl)
-    caps = DailyCap(settings.auto_transcribe_daily_cap)
+    caps = DailyCap(settings.auto_transcribe_daily_cap, settings.calendar_timezone)
 
     tools = handlers(settings)
 
