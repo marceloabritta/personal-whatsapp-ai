@@ -110,7 +110,7 @@ async def main() -> int:
         ("a request written late last night is for today", today, [
             msg("c1", at(yesterday, 23, 50), f"amanhã às {slot}h no New Dog?", mine=False),
             msg("c2", at(yesterday, 23, 52), "pode ser", mine=True),
-        ], f"bom dia! {tag} marca"),
+        ], f"{tag} marca"),
         (f"last week's '{passed_name}' has passed: ask, don't book it", None, [
             msg("d1", at(today - timedelta(days=9), 10, 0),
                 f"vamos fazer {passed_name} às 15h? no New Dog", mine=False),
