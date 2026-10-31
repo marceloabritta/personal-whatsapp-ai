@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     # service by env. Everything here is observation only: it never touches the reply path.
     review_enabled: bool = False
     review_scope_version: str = ""      # only review loops with this prompt_version ("" = all)
-    review_judge_version: str = "v3"    # the rubric's identity; bump to re-score history
+    review_judge_version: str = "v4"    # the rubric's identity; bump to re-score history
     review_model: str = "claude-opus-4-8"   # NOT claude_model — a model judging itself favours it
     review_effort: str = "medium"
     review_max_tokens: int = 2048
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-09-28-meet-by-default"
+    prompt_version: str = "2026-10-31-message-clock"
 
     @property
     def review_settle_window(self) -> float:

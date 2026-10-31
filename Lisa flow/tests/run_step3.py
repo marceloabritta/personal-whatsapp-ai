@@ -132,8 +132,11 @@ def unit_checks() -> None:
     sp_tz = build_system_prompt("Marcelo", "@lisa", tz_name="America/Sao_Paulo")
     check("prompt states the date AND the time", "Current date and time:" in sp_tz)
     check("prompt names the zone it used", "(America/Sao_Paulo)" in sp_tz)
-    check("prompt pins relative dates to that clock",
-          'resolve "today", "tomorrow"' in sp_tz and "against nothing else" in sp_tz)
+    check("prompt no longer pins every relative date to the current clock",
+          "against nothing else" not in sp_tz)
+    check("prompt resolves a relative date against its own message's day",
+          "against the date of the message it appears in" in sp_tz
+          and '"tomorrow" in a message from yesterday is today' in sp_tz)
 
     sp_now, sp_label = now_in("America/Sao_Paulo")
     utc_now, _ = now_in("UTC")
@@ -1336,6 +1339,88 @@ async def allday_checks() -> None:
     check("[verify] guest ORDER is not a failure (Google reorders them)", missed == [])
 
 
+def message_clock_checks() -> None:
+    """Every line carries when it was sent, so a relative date is read from its own day.
+
+    The bug this guards: "almoço amanhã" written on Tuesday and confirmed with "@lisa agendar" on
+    Wednesday was booked for Thursday, because the transcript had no times and the prompt said to
+    resolve "tomorrow" against the current clock "and against nothing else"."""
+    print("\nStep-3 P8 — the message clock")
+    from datetime import date, datetime, timedelta, timezone
+
+    from app.prompt import _WEEKDAYS, build_system_prompt, now_in
+    from app.review.prompt import build_judge_prompt, render_transcript
+    from app.skills.calendar_format import compose_create, fmt_date
+    from app.whatsapp import build_labeled_transcript, stamp_lines
+
+    tz = "America/Sao_Paulo"
+
+    def ts(y, mo, d, h, mi):  # a São Paulo wall-clock moment as unix seconds (UTC-3, no DST)
+        return int(datetime(y, mo, d, h, mi, tzinfo=timezone(timedelta(hours=-3))).timestamp())
+
+    late = ts(2026, 10, 27, 23, 30)   # 02:30 UTC on the 28th
+    t = build_labeled_transcript([
+        {"text": "almoço amanhã?", "push_name": "Rodolfo", "ts": late},
+        {"text": "bora", "from_me": True, "ts": ts(2026, 10, 28, 8, 42)},
+        {"text": "@lisa agendar", "from_me": True, "ts": 0},
+    ], "Marcelo", tz)
+    lines = t.split("\n")
+    check("a message at 23:30 in São Paulo sits under the São Paulo day, not UTC's",
+          lines[:2] == ["── Tuesday, 27 Oct 2026 ──", "23:30 Rodolfo: almoço amanhã?"],
+          detail=repr(lines[:2]))
+    check("a divider opens the next local day",
+          lines[2:4] == ["── Wednesday, 28 Oct 2026 ──", "08:42 Marcelo: bora"], detail=repr(lines))
+    check("a record with no send time is unstamped and stays in the current day",
+          lines[4:] == ["Marcelo: @lisa agendar"], detail=repr(lines))
+    check("two messages on one day share one divider",
+          stamp_lines([(ts(2026, 10, 28, 9, 0), "A: x"), (ts(2026, 10, 28, 9, 5), "B: y")], tz)
+          == ["── Wednesday, 28 Oct 2026 ──", "09:00 A: x", "09:05 B: y"])
+    check("a junk timestamp does not raise", stamp_lines([("soon", "A: x")], tz) == ["A: x"])
+
+    sp = build_system_prompt("Marcelo", "@lisa", tz_name=tz)
+    now, _ = now_in(tz)
+    y, tm = now.date() - timedelta(days=1), now.date() + timedelta(days=1)
+    check("the prompt names yesterday as now_in sees it",
+          f"Yesterday was {_WEEKDAYS[y.weekday()]}, {y:%Y-%m-%d}." in sp)
+    check("the prompt names tomorrow as now_in sees it",
+          f"Tomorrow is {_WEEKDAYS[tm.weekday()]}, {tm:%Y-%m-%d}." in sp)
+    check("the prompt tells her each line carries its send time",
+          "Each line starts with the time it was sent" in sp)
+    check("the prompt says to ask when the date has already passed",
+          "has already passed" in sp and "ask before you act" in sp)
+
+    today = date(2026, 10, 28)
+    check("fmt_date: today (pt)", fmt_date("2026-10-28T12:15:00-03:00", "pt", today)
+          == "28/out - Quarta (hoje)")
+    check("fmt_date: tomorrow (pt)", fmt_date("2026-10-29T12:15:00-03:00", "pt", today)
+          == "29/out - Quinta (amanhã)")
+    check("fmt_date: yesterday (en)", fmt_date("2026-10-27", "en", today)
+          == "27/Oct - Tuesday (yesterday)")
+    check("fmt_date: tomorrow (es)", fmt_date("2026-10-29", "es", today)
+          == "29/oct - Jueves (mañana)")
+    check("fmt_date: no tag two days out", fmt_date("2026-10-30", "pt", today) == "30/out - Sexta")
+    check("fmt_date: no tag without a today", fmt_date("2026-10-28", "pt") == "28/out - Quarta")
+    card = compose_create({"task": "calendar.create", "title": "Almoço com Rodolfo",
+                           "start": "2026-10-29T12:15:00-03:00", "location": "New Dog"},
+                          {"session_lang": "pt", "owner_today": "2026-10-28"})
+    check("the confirmation says (amanhã) when he meant today",
+          "29/out - Quinta (amanhã), 12:15" in (card or ""), detail=repr(card))
+
+    judged = render_transcript([
+        {"who": "Rodolfo", "text": "almoço amanhã?", "wa_ts": late},
+        {"who": "AI Assistant", "text": "Confirmando", "wa_ts": None},
+    ], tz_name=tz)
+    check("the judge reads the same stamps Lisa does",
+          judged == "── Tuesday, 27 Oct 2026 ──\n23:30 Rodolfo: almoço amanhã?\nAI Assistant: Confirmando",
+          detail=repr(judged))
+    jp = build_judge_prompt()
+    check("the judge resolves a relative date against its own message's day",
+          "against the date of the message it appears in" in jp
+          and '"amanhã" in a message from yesterday is today' in jp)
+    check("the judge files a wrong-day booking as wrong_details",
+          "resolved against the wrong day is wrong — that is wrong_details" in jp)
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -1350,4 +1435,5 @@ if __name__ == "__main__":
     asyncio.run(confirmation_checks())
     asyncio.run(presence_checks())
     asyncio.run(allday_checks())
+    message_clock_checks()
     _finish()

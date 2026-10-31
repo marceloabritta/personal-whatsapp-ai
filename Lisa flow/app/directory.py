@@ -45,9 +45,17 @@ from typing import Any, Optional, TypedDict
 log = logging.getLogger("mary.directory")
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-# Transcript speaker labels, which build_labeled_transcript prepends to every line. Scanning them
-# would let Lisa match on her own header or on a push name.
-_LABEL_RE = re.compile(r"^[^:\n]{0,40}:", re.MULTILINE)
+# Transcript scaffolding, which build_labeled_transcript adds around every message: the day
+# divider, and the "18:40 Speaker (annotation):" prefix (no time when the record had none).
+# Scanning them would let Lisa match on her own header, on a push name or on a weekday. The time
+# and the annotations are spelled out because without them a stamped line only lost "18:", and
+# a voice-note label is longer than the 40 characters a bare name is allowed.
+_LABEL_RE = re.compile(
+    r"^(?:── [^\n]* ──[ \t]*$"
+    r"|(?:\d{2}:\d{2} )?[^:\n]{0,40}?"
+    r"(?: \((?:voice message — transcribed|image|PDF[^)\n]*)\))?:)",
+    re.MULTILINE,
+)
 # Name tokens shorter than this are never indexed; nor are these.
 _MIN_TOKEN = 3
 _STOP = {

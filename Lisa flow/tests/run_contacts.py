@@ -181,6 +181,17 @@ def retrieval_checks():
     check("literal email matches",
           [c["name"] for c, _ in d.mentions("o email e bruno@t.co")] == ["Bruno Tavares"])
     check("speaker labels are not scanned", d.mentions("Ana Silva: bom dia") == [])
+    # The transcript stamps every line with its send time and opens each day with a divider.
+    # Without the time in the pattern, "18:40 Ana Silva:" lost only "18:" and the name came back.
+    check("a stamped speaker label is not scanned",
+          d.mentions("── Thursday, 29 Oct 2026 ──\n18:40 Ana Silva: bom dia") == [])
+    check("a voice-note label is not scanned",
+          d.mentions("09:12 Ana Silva (voice message — transcribed): bom dia") == [])
+    check("a PDF label with a colon in its filename is not scanned",
+          d.mentions("09:12 Ana Silva (PDF: ata: final.pdf): segue") == [])
+    check("the message after a stamped label still is",
+          [c["name"] for c, _ in d.mentions("09:12 Marcelo: marca com a Carla amanha")]
+          == ["Carla Mendes"])
     check("cold directory matches nothing",
           Directory(settings()).mentions("Ana Silva", phone="5511987654321") == [])
 

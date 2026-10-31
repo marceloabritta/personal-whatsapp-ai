@@ -2,9 +2,9 @@
 
 The judge is a stand-in for an attentive person reading the WhatsApp chat. It sees the chat and
 nothing else — not Lisa's private reasoning, not the tool calls she ran, not token counts, not the
-prompt version, and above all NOT ANY TIMING. It IS told when the turn happened — a date is not
-a duration, and without one it cannot check a weekday or resolve "amanhã". Latency is scored
-separately, in code (timing.py),
+prompt version, and above all NOT ANY TIMING. It IS told when the turn happened and when each
+message was sent — a date is not a duration, and without them it cannot check a weekday or
+resolve an "amanhã" written the day before. Latency is scored separately, in code (timing.py),
 so the judge's opinion of a reply can never be coloured by how long it took, and a well-written
 answer can never talk the clock out of a budget breach.
 
@@ -13,6 +13,7 @@ never built to meet — marking her down for not doing things she has no tool fo
 silent when silence is exactly what her own prompt tells her to do."""
 from __future__ import annotations
 
+from ..whatsapp import stamp_lines
 from .taxonomy import JUDGE_CODES, TASK_CLASSES
 
 SILENT_MARKER = "(stayed silent — sent nothing)"
@@ -68,9 +69,10 @@ Judge what a person in that chat would have experienced. You cannot see her reas
 tools she ran, and you should not speculate about them: if she says she created an event, the \
 question is whether the chat bears that out, not how the call was made.
 
-Do not judge speed. You are not being shown any timing and must not guess at it.
+Do not judge speed. The times on the messages are there so you can tell which day each one was \
+written; they are not a measure of how fast she answered, and speed is scored elsewhere.
 
-WHEN IT HAPPENED. The turn carries the date and time it was taken, and you can rely on it. Resolve "hoje", "amanhã", "sábado", "next week" against that stamp before you decide anything is wrong. A date she worked out correctly from the conversation is CORRECT — not invented, not a guess. Call a date wrong only when it genuinely contradicts what the chat says, never because you could not check it yourself.
+WHEN IT HAPPENED. The turn carries the date and time it was taken, and every message carries the time it was sent, under a dated line for each day. You can rely on both. A relative date means what it meant to the person who wrote it, on the day they wrote it: "amanhã" in a message from yesterday is today, and a "sexta" said last week may already be over. Resolve each one against the date of the message it appears in, not against the turn's date. A date she worked out correctly that way is CORRECT — not invented, not a guess. A date she resolved against the wrong day is wrong — that is wrong_details, and it is major, because it puts the event on a day nobody agreed to. Call a date wrong only when it genuinely contradicts what the chat says, never because you could not check it yourself.
 
 WHAT IS DELIBERATE, AND NOT A FAULT. These are design decisions. Marking them down would mean asking for them to be removed:
   - Asking once, before she creates, changes or deletes an event, whether to go ahead. She is REQUIRED to get {owner_name}'s go-ahead before touching the calendar, even when he has just told her to do it. One ask followed by one yes is the system working correctly. It becomes a fault only when he already answered that same question and she puts it again.
@@ -109,8 +111,14 @@ the ask, NOT an opinion about how long it should take:
 """
 
 
-def render_transcript(lines: list[dict], max_lines: int = 60) -> str:
-    """The chat as the judge sees it: `Speaker: text`, oldest first, newest last.
+def render_transcript(lines: list[dict], max_lines: int = 60,
+                      tz_name: str = "America/Sao_Paulo") -> str:
+    """The chat as the judge sees it: `HH:MM Speaker: text` under day dividers, oldest first.
+
+    The stamps are Lisa's own, from the same formatter, so the judge reads each message's day
+    exactly as she did. Without them it graded "amanhã" against the turn's date, and passed both
+    bookings in the log that landed a day late. Her own replies carry no WhatsApp send time in the
+    log, so they stay unstamped inside their day.
 
     Trims from the OLDEST end — the turn being judged is at the bottom and the messages nearest
     it carry the most weight."""
@@ -118,12 +126,14 @@ def render_transcript(lines: list[dict], max_lines: int = 60) -> str:
     out = []
     if len(kept) < len(lines):
         out.append(f"[... {len(lines) - len(kept)} earlier messages omitted ...]")
+    items = []
     for ln in kept:
         who = ln.get("who") or "?"
         text = (ln.get("text") or "").strip()
         if not text:
             continue
-        out.append(f"{who}: {text}")
+        items.append((ln.get("wa_ts"), f"{who}: {text}"))
+    out.extend(stamp_lines(items, tz_name))
     return "\n".join(out)
 
 

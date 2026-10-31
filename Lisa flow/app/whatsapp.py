@@ -5,7 +5,15 @@ transcript idea): the same account sends everything, so the speaker label comes 
 the reply header, not the message direction."""
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+from typing import Iterable, Optional
+
 from .identity import is_own_message
+
+# Fixed English names for the day dividers, for the same reason prompt._WEEKDAYS spells its own:
+# strftime("%A"/"%b") follows the container's locale.
+_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 def extract_text(msg: dict | None) -> str:
@@ -229,12 +237,62 @@ def label_for(record: dict, owner_name: str) -> str:
     return speaker
 
 
-def build_labeled_transcript(records: list[dict], owner_name: str) -> str:
-    """Chronological "Speaker: text" lines. Empty-text records are skipped."""
-    lines = []
+def local_time(ts, tz_name: str) -> Optional[datetime]:
+    """A WhatsApp send time (unix seconds) on the owner's wall clock, or None when there is none.
+
+    0 means "no timestamp": the race-guard record in the context node falls back to it when the
+    webhook carried none. An unknown zone falls back to UTC, as prompt.now_in does."""
+    try:
+        secs = int(ts or 0)
+    except (TypeError, ValueError):
+        return None
+    if secs <= 0:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.fromtimestamp(secs, ZoneInfo(tz_name))
+    except Exception:
+        return datetime.fromtimestamp(secs, timezone.utc)
+
+
+def day_divider(d: date) -> str:
+    """'── Thursday, 29 Oct 2026 ──'. Absolute on purpose, never "yesterday": the transcript is
+    frozen into the checkpoint, and a loop that crosses midnight would carry a stale label. The
+    relative names live in the system prompt, which is rebuilt every turn."""
+    return f"── {_DAY_NAMES[d.weekday()]}, {d.day} {_MONTH_ABBR[d.month - 1]} {d.year} ──"
+
+
+def stamp_lines(items: Iterable[tuple], tz_name: str) -> list[str]:
+    """(send time, line) pairs → `HH:MM line`, with a day divider wherever the local date changes.
+
+    A line with no send time is left unstamped, inside whatever day block it falls in. Shared by
+    Lisa's transcript and the review judge's, so both read the same stamps."""
+    out: list[str] = []
+    day = None
+    for ts, line in items:
+        when = local_time(ts, tz_name)
+        if when is None:
+            out.append(line)
+            continue
+        if when.date() != day:
+            day = when.date()
+            out.append(day_divider(day))
+        out.append(f"{when:%H:%M} {line}")
+    return out
+
+
+def build_labeled_transcript(records: list[dict], owner_name: str, tz_name: str) -> str:
+    """Chronological "HH:MM Speaker: text" lines under day dividers. Empty-text records are
+    skipped.
+
+    The send time is what makes a relative date readable. Without it, "almoço amanhã" written
+    yesterday reached the model looking exactly like one written a minute ago, so she booked it a
+    day late. `tz_name` is the owner's zone, the same one the prompt's clock uses."""
+    items = []
     for r in records:
         text = (r.get("text") or "").strip()
         if not text:
             continue
-        lines.append(f"{label_for(r, owner_name)}: {text}")
-    return "\n".join(lines)
+        items.append((r.get("ts"), f"{label_for(r, owner_name)}: {text}"))
+    return "\n".join(stamp_lines(items, tz_name))
