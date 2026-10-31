@@ -14,9 +14,18 @@ from __future__ import annotations
 
 from ..tools.calendar import changes, is_date_only, resolve_virtual, span_days
 
-from datetime import datetime
+from datetime import date, datetime
 
 LANGS = {"pt", "en", "es"}
+
+# The owner's relative name for an event's day, appended to the date on every card. A date and a
+# weekday alone did not catch a booking made a day late: he approved "20/out - Terça" when he
+# meant that same Monday. "Terça (amanhã)" says it in the words he was thinking in.
+_RELATIVE = {
+    "pt": {-1: "ontem", 0: "hoje", 1: "amanhã"},
+    "en": {-1: "yesterday", 0: "today", 1: "tomorrow"},
+    "es": {-1: "ayer", 0: "hoy", 1: "mañana"},
+}
 
 _MONTHS = {
     "pt": ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"],
@@ -122,10 +131,23 @@ def _lang(state: dict) -> str:
     return code if code in _L else "en"
 
 
-def fmt_date(iso: str, lang: str) -> str:
-    """'04/ago - Terça-feira'."""
+def _today(state: dict) -> date | None:
+    """The owner's date when the card is composed. The confirm and respond nodes put it on the
+    state they hand the composers; without it the cards simply carry no relative day."""
+    raw = state.get("owner_today")
+    try:
+        return date.fromisoformat(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def fmt_date(iso: str, lang: str, today: date | None = None) -> str:
+    """'04/ago - Terça', and '04/ago - Terça (amanhã)' when `today` makes it yesterday, today or
+    tomorrow. The event's own offset is the owner's, so its calendar day is his."""
     d = datetime.fromisoformat(iso)
-    return f"{d.day:02d}/{_MONTHS[lang][d.month - 1]} - {_WEEKDAYS[lang][d.weekday()]}"
+    out = f"{d.day:02d}/{_MONTHS[lang][d.month - 1]} - {_WEEKDAYS[lang][d.weekday()]}"
+    rel = _RELATIVE[lang].get((d.date() - today).days) if today else None
+    return f"{out} ({rel})" if rel else out
 
 
 def fmt_time(iso: str, lang: str) -> str:
@@ -134,11 +156,11 @@ def fmt_time(iso: str, lang: str) -> str:
     return d.strftime("%I:%M %p") if d.hour < 12 else d.strftime("%H:%M")
 
 
-def _dt(iso: str, lang: str) -> str:
-    return f"{fmt_date(iso, lang)}, {fmt_time(iso, lang)}"
+def _dt(iso: str, lang: str, today: date | None = None) -> str:
+    return f"{fmt_date(iso, lang, today)}, {fmt_time(iso, lang)}"
 
 
-def _when(ev: dict, lang: str) -> list:
+def _when(ev: dict, lang: str, today: date | None = None) -> list:
     """The date/time line(s) for any event, either kind — THE one renderer.
 
     Returns a list because an all-day event reads as two lines (the day, then "Dia inteiro")
@@ -150,14 +172,14 @@ def _when(ev: dict, lang: str) -> list:
         return []
     all_day = ev.get("all_day", is_date_only(iso))
     if not all_day:
-        return [_dt(iso, lang)]
+        return [_dt(iso, lang, today)]
     iso = iso[:10]                      # coerce, exactly as the handler does
     last = (ev.get("end") or iso)[:10]
     try:
         n = span_days(iso, last)
         if n <= 1:
-            return [fmt_date(iso, lang), L["all_day"]]
-        return [f"{fmt_date(iso, lang)} \u2192 {fmt_date(last, lang)}",
+            return [fmt_date(iso, lang, today), L["all_day"]]
+        return [f"{fmt_date(iso, lang, today)} \u2192 {fmt_date(last, lang, today)}",
                 f"{L['all_day']} \u00b7 {n} {L['days']}"]
     except ValueError:
         # A date we cannot parse is a model typo, not a reason to drop the whole card —
@@ -192,7 +214,7 @@ def compose_create(action: dict, state: dict) -> str | None:
     if not action.get("start"):
         return None
     lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"],
-             *_when(action, lang)]
+             *_when(action, lang, _today(state))]
     # NOT `action.get("virtual")`: the video call is often the DEFAULT rather than something the
     # model asked for (a timed event with no place), and this card is the only place the owner
     # gets to see that before it happens. Same resolver the handler builds the body from.
@@ -228,7 +250,7 @@ def compose_update(action: dict, state: dict) -> str | None:
 
     lines = [f"{L['confirm_update']}:", "", header or L["event"]]
     if ev.get("start"):
-        lines.extend(_when(ev, lang))
+        lines.extend(_when(ev, lang, _today(state)))
 
     described: list[str] = []
     chs = changes(action, ev)
@@ -243,7 +265,7 @@ def compose_update(action: dict, state: dict) -> str | None:
         }
         if "all_day" in by:
             described.append(L["u_all_day"] if after["all_day"] else L["u_timed"])
-        when = _when(after, lang)
+        when = _when(after, lang, _today(state))
         if when:
             described.append(f"{(L['u_date'] if after['all_day'] else L['u_time'])}: {when[0]}")
             described.extend(when[1:])
@@ -251,7 +273,7 @@ def compose_update(action: dict, state: dict) -> str | None:
     for ch in chs:
         if ch["field"] in ("start", "end", "all_day"):
             continue
-        described.extend(_describe_change(ch, L, lang, names))
+        described.extend(_describe_change(ch, L, lang, names, _today(state)))
 
     if not described:
         # Nothing identifiable is changing. Saying "Posso alterar?" over an empty list asks the
@@ -265,7 +287,8 @@ def compose_update(action: dict, state: dict) -> str | None:
     return _joined(lines)
 
 
-def _describe_change(ch: dict, L: dict, lang: str, names: dict | None = None) -> list[str]:
+def _describe_change(ch: dict, L: dict, lang: str, names: dict | None = None,
+                     today: date | None = None) -> list[str]:
     """One change-set entry → the line(s) the owner reads. Removals get their own words."""
     f, kind, new = ch["field"], ch["kind"], ch["new"]
     if f == "virtual":
@@ -275,7 +298,7 @@ def _describe_change(ch: dict, L: dict, lang: str, names: dict | None = None) ->
     if f == "location":
         return [L["u_where_off"]] if kind == "clear" else [f"{L['u_where']}: {new}"]
     if f in ("start", "end"):
-        return [f"{L['u_time']}: {_dt(new, lang)}"]
+        return [f"{L['u_time']}: {_dt(new, lang, today)}"]
     if f == "attendees":
         if kind == "clear":
             return [L["u_guests_off"]]
@@ -297,7 +320,7 @@ def compose_delete(action: dict, state: dict) -> str | None:
         return None
     lines = [f"{L['confirm_delete']}:", "", ev.get("title") or L["event"]]
     if ev.get("start"):
-        lines.extend(_when(ev, lang))
+        lines.extend(_when(ev, lang, _today(state)))
     if ev.get("attendees"):
         names = _guest_names(state)
         lines.append(L["participants"])
@@ -315,7 +338,7 @@ def fmt_create(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['created']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang))
+    lines.extend(_when(d, lang, _today(state)))
     if d.get("attendees"):
         lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
     if d.get("html_link"):
@@ -329,7 +352,7 @@ def fmt_update(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['updated']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang))
+    lines.extend(_when(d, lang, _today(state)))
     if d.get("attendees"):
         lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
     lines += ["", L["u_done"]]
@@ -342,7 +365,7 @@ def fmt_delete(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['cancelled']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang))
+    lines.extend(_when(d, lang, _today(state)))
     if d.get("had_attendees"):
         lines.append(L["guests_did"] if d.get("notified", True) else L["guests_silent"])
     return _joined(lines)
@@ -383,4 +406,6 @@ def fmt_list(results: list, state: dict) -> str:
             t = fmt_time(iso, lang)
         by_day[day].append(f"{t} - {e.get('title') or L['untitled']}")
     # The day header is bold (WhatsApp *…* — it has no underline) so each day stands out.
-    return "\n\n".join(f"*{fmt_date(iso, lang)}*\n" + "\n".join(by_day[iso[:10]]) for iso in order)
+    today = _today(state)
+    return "\n\n".join(f"*{fmt_date(iso, lang, today)}*\n" + "\n".join(by_day[iso[:10]])
+                       for iso in order)

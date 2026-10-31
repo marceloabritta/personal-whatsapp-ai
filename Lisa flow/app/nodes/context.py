@@ -320,7 +320,8 @@ async def context_node(
     # transcription so both passes have marked their rows before the transcript string is built.
     media_blocks = await _attach_media(new, evolution, settings, trace, tid, loop_id)
 
-    transcript = build_labeled_transcript(new, owner)
+    tz_name = settings.calendar_timezone
+    transcript = build_labeled_transcript(new, owner, tz_name)
     ids = [r["id"] for r in new if r.get("id")]
     newest = ids[-1] if ids else state.get("last_whatsapp_message_id")
     if setup_open and records:
@@ -350,7 +351,7 @@ async def context_node(
     # messages before the tag, both sides — as the loop's opening context. On a window
     # continuation log only the new inbound; Mary's own replies are logged by `act`.
     if card_keys:  # a marked card changed the records, so re-render the labeled transcript
-        transcript = build_labeled_transcript(raw if reset else new, owner)
+        transcript = build_labeled_transcript(raw if reset else new, owner, tz_name)
     _log_transcript(trace, tid, loop_id, raw if reset else new, owner)
     trace.code(
         tid, node="context", loop_id=loop_id,

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Read-only SQL against Lisa's and Mary's logs on the production droplet.
+#
+#   .claude/scripts/lisa-log-sql "select loop_id, started_at from lisa_log.loops order by 2 desc limit 5"
+#   .claude/scripts/lisa-log-sql -x "select * from lisa_log.loops limit 1"     # expanded rows
+#   .claude/scripts/lisa-log-sql -A "select ..."                               # unaligned, '|' separated
+#
+# Every query runs in a read-only transaction with a 60s timeout. It connects as `lisa_reader`
+# when that role exists on the droplet (SELECT on lisa_log and mary_log, nothing else), and
+# otherwise as `evolution`. As `evolution` the read-only transaction is the only guard, so this
+# script refuses anything that could switch it off or reach past the database: the SQL goes in
+# through `psql -c`, which never runs a backslash command, and the patterns below are rejected
+# before anything leaves this machine.
+set -euo pipefail
+
+fmt=""
+while [[ $# -gt 1 ]]; do
+  case "$1" in
+    -x) fmt+=" -x" ;;
+    -A) fmt+=" -A -F '|'" ;;
+    -t) fmt+=" -t" ;;
+    *) break ;;
+  esac
+  shift
+done
+sql="${1:-}"
+if [[ $# -ne 1 || -z "$sql" ]]; then
+  echo 'usage: lisa-log-sql [-x] [-A] [-t] "<SELECT statements>"' >&2
+  exit 2
+fi
+
+# Ways out of a read-only transaction, or past the database onto the server.
+if grep -Eiq 'read[_[:space:]]*write|transaction_read_only[[:space:]]*(=|to([^a-z_]|$))|(^|[^a-z_])(reset|discard|copy|program|dblink)([^a-z_]|$)|set_config|session_authorization|set[[:space:]]+role|alter[[:space:]]+system|lo_import|lo_export|pg_read_|pg_ls_|pg_stat_file|pg_file_|pg_terminate|pg_cancel|pg_reload' <<<"$sql"; then
+  echo "lisa-log-sql: refused. The query names a setting or function this read-only path does not allow." >&2
+  exit 3
+fi
+
+read -r -d '' remote <<'REMOTE' || true
+sql=$(cat)
+user=evolution
+if docker exec evolution_postgres psql -U evolution -d evolution -XAtc "select 1 from pg_roles where rolname = 'lisa_reader'" | grep -q 1; then
+  user=lisa_reader
+fi
+exec docker exec -e PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=60s" \
+  evolution_postgres psql -U "$user" -d evolution -X -v ON_ERROR_STOP=1 -P pager=off __FMT__ -c "$sql"
+REMOTE
+remote="${remote//__FMT__/$fmt}"
+
+printf '%s' "$sql" | ssh -o ConnectTimeout=10 -o BatchMode=yes secretaria-droplet "$remote"

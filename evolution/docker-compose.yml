@@ -128,7 +128,22 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-09-28-meet-by-default"
+      PROMPT_VERSION: "2026-10-31-message-clock"
+      # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
+      # a chat is enrolled via "@lisa setup" in the chat with myself.
+      AUTO_TRANSCRIBE_ENABLED: "true"
+      AUTO_TRANSCRIBE_MAX_SECONDS: "600"
+      AUTO_TRANSCRIBE_DAILY_CAP: "40"
+      AUTO_TRANSCRIBE_REPORT_FAILURES: "false"
+      AUTO_TRANSCRIBE_QUOTE_REPLY: "true"
+      SETUP_WINDOW_SECONDS: "300"
+      # Session review — grades each turn once a session closes (app/review/). Reads the log,
+      # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
+      # prompt_version so it never re-grades turns from code that no longer exists.
+      REVIEW_ENABLED: "true"
+      REVIEW_SCOPE_VERSION: "2026-10-31-message-clock"
+      REVIEW_JUDGE_VERSION: "v4"
+      REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
       ASSEMBLYAI_LANGUAGE: auto
@@ -142,6 +157,18 @@ services:
       GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
       CALENDAR_TIMEZONE: America/Sao_Paulo
+      # Contact memory — Lisa reads the address book on calendar turns and writes back the
+      # addresses she learns. It has its OWN refresh token: the calendar one is shared by
+      # both lisa and mary, and google-auth only warns on a missing scope, so reissuing it to add
+      # contacts would risk two live calendars at once.
+      CONTACTS_ENABLED: "true"
+      GOOGLE_CONTACTS_REFRESH_TOKEN: ${GOOGLE_CONTACTS_REFRESH_TOKEN}
+      CONTACTS_DEFAULT_REGION: "BR"
+      # Creating BRAND-NEW people in the real address book is held off for the first run. The
+      # trigger is only "a two-token name with no match", so "a Ana Silva da contabilidade,
+      # contato@escritorio.com.br" would mint a contact. Learning addresses for people already
+      # in the book is unaffected and fully on. Flip to "true" to enable.
+      CONTACTS_CREATE_PEOPLE: "false"
     networks:
       - evolution-net
 

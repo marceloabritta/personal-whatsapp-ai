@@ -13,6 +13,7 @@ code and routes to `confirm` — skipping reason ②. Best-effort; anything it c
 reason ②."""
 from __future__ import annotations
 
+from ..prompt import today_in
 from ..skills.calendar_format import LANGS
 from ..state import MessageState
 from ..trace import Trace
@@ -72,7 +73,9 @@ async def respond_node(
     if policy is None:
         route = "act"
     elif getattr(policy, "mode", "llm") == "code" and all_ok and lang in LANGS:
-        update["reply_body"] = await policy.assemble(results=results, state=state)
+        # The owner's date, so the result card names the day the way the confirmation did.
+        card_state = {**state, "owner_today": today_in(settings.calendar_timezone)}
+        update["reply_body"] = await policy.assemble(results=results, state=card_state)
         route = "act"
     elif transient and lang in LANGS and hasattr(policy, "assemble_failure"):
         said = await policy.assemble_failure(results=results, state=state)

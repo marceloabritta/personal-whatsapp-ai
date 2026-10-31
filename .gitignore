@@ -11,6 +11,9 @@ venv/
 *.egg-info/
 .pytest_cache/
 
+# Personal Claude Code permissions
+.claude/settings.local.json
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -43,8 +43,10 @@ class Judge:
         sent, or None when she stayed silent — silence is a decision and is judged too. `turn_ts`
         is when the turn was taken: the judge needs a date to resolve "amanhã" and to check a
         weekday, and without one it filed wrong_details against dates that were right."""
-        transcript = render_transcript(lines, max_lines=self.s.review_max_context_lines)
-        when = format_when(turn_ts, getattr(self.s, "calendar_timezone", "America/Sao_Paulo"))
+        tz_name = getattr(self.s, "calendar_timezone", "America/Sao_Paulo")
+        transcript = render_transcript(lines, max_lines=self.s.review_max_context_lines,
+                                       tz_name=tz_name)
+        when = format_when(turn_ts, tz_name)
         content = build_turn_message(transcript, reply_text, when)
 
         try:

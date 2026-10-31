@@ -15,6 +15,7 @@ import hashlib
 import logging
 import re
 
+from ..prompt import today_in
 from ..state import MessageState
 from ..trace import Trace
 
@@ -116,7 +117,9 @@ async def confirm_node(
         # A write awaiting go-ahead: compose the confirmation in code and hold it as pending.
         # The node's RETURN value is invisible to code running inside the node, so the composer is
         # handed the stripped pairs directly rather than being expected to read what we return.
-        composed = (policy.compose(action, {**state, "side_effects": stripped})
+        # The owner's date goes in the same way, so the card can say "(amanhã)" next to the day.
+        composed = (policy.compose(action, {**state, "side_effects": stripped,
+                                            "owner_today": today_in(settings.calendar_timezone)})
                     if pending is None else None)
         if composed:
             pending, ask_message = action, composed

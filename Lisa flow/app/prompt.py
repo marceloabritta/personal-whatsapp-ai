@@ -8,7 +8,7 @@ rendered from identity.header_for — the same function that stamps the real hea
 and the wire can never drift."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .identity import header_for
 
@@ -33,6 +33,11 @@ def now_in(tz_name: str) -> tuple[datetime, str]:
         return datetime.now(timezone.utc), "UTC"
 
 
+def today_in(tz_name: str) -> str:
+    """The owner's date, ISO. The calendar cards compare an event's day against it."""
+    return now_in(tz_name)[0].date().isoformat()
+
+
 def build_system_prompt(
     owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
     has_actions: bool = False, session_lang: str | None = None,
@@ -46,6 +51,11 @@ def build_system_prompt(
     # uncorrectable, because the prompt reasserted it on the very next turn.
     now, tz_label = now_in(tz_name)
     today = f"{_WEEKDAYS[now.weekday()]}, {now:%Y-%m-%d}, {now:%H:%M} ({tz_label})"
+    # Spelled out rather than left to her: the calendar skill runs without thinking, so she should
+    # look yesterday and tomorrow up, not compute them.
+    yesterday, tomorrow = (now.date() + timedelta(days=n) for n in (-1, 1))
+    legend = (f"Yesterday was {_WEEKDAYS[yesterday.weekday()]}, {yesterday:%Y-%m-%d}. "
+              f"Tomorrow is {_WEEKDAYS[tomorrow.weekday()]}, {tomorrow:%Y-%m-%d}.")
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
 
@@ -72,7 +82,9 @@ it, and the people in the chat see and reply to what you say.
 
 How the system works:
 - Each turn, you are given the recent conversation as a transcript labeled by speaker — \
-{owner_name}, the other person, or you (AI Assistant).
+{owner_name}, the other person, or you (AI Assistant). Each line starts with the time it was \
+sent, on {owner_name}'s clock, and a dated line such as "── Thursday, 29 Oct 2026 ──" marks \
+where each day begins.
 - Whatever you choose to say is delivered into the chat by the system. It sends your message as \
 if from {owner_name}'s account, under a header it adds automatically in the session's language — \
 {en_header} in English, {pt_header} in Portuguese — so everyone can tell it came from you and \
@@ -161,7 +173,19 @@ suggested next steps or follow-up questions; give the answer and stop."""
     # concatenating onto the returned string would land it after the JSON contract and the
     # "Current date" line — the least authoritative position in the prompt — and would separate
     # the contract from the date it is meant to be read with.
+    #
+    # The date rule reads each relative date from ITS OWN message's day. This line used to pin
+    # every "tomorrow" to the current clock "and against nothing else", so a lunch agreed for
+    # "amanhã" on Tuesday and confirmed with "@lisa agendar" on Wednesday was booked for
+    # Thursday. Both such bookings in the log were a day late.
     return (f"{base}{skill_block}{context_block or ''}{action_para}"
             f"\n\n{contract}\n\nCurrent date and time: {today}. "
-            f"That is {owner_name}'s own clock — resolve \"today\", \"tomorrow\", \"tonight\", "
-            f"a named weekday and \"next week\" against it, and against nothing else.")
+            f"That is {owner_name}'s own clock. {legend}\n\n"
+            f"Every line of the conversation shows when it was sent. A relative date means what "
+            f"it meant to the person who wrote it, on the day they wrote it: \"tomorrow\" in a "
+            f"message from yesterday is today, and a \"Friday\" said last week may already be "
+            f"over. Resolve each relative date against the date of the message it appears in, "
+            f"never against the current date. When {owner_name}'s request only points back "
+            f"(\"book it\", \"marca isso\"), take the date from the message he is pointing at. If "
+            f"the date you arrive at has already passed, or a message sent just after midnight "
+            f"leaves it unclear which day was meant, ask before you act.")

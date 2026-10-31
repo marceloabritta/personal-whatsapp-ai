@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -891,8 +892,10 @@ async def p14_setup_starts_clean():
           st.get("context_message_ids") == ["NEW1"], detail=str(st.get("context_message_ids")))
     seen = [m for m in (st.get("messages") or []) if getattr(m, "type", "") != "ai"]
     content = getattr(seen[0], "content", "") if seen else ""
+    # One message, under its day divider and send time.
     check("the turn handed to the model is just that message",
-          content == "Marcelo: @lisa setup", detail=repr(content))
+          re.fullmatch(r"── [^\n]+ ──\n\d{2}:\d{2} Marcelo: @lisa setup", content) is not None,
+          detail=repr(content))
     check("none of the abandoned attempt reaches the model",
           "familia marciana" not in str(reasoner.calls[0]["messages"]).lower()
           and "in&out" not in str(reasoner.calls[0]["messages"]))

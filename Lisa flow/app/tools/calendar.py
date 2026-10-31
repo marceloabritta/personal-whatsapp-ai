@@ -221,7 +221,7 @@ GUIDANCE = """Calendar — you manage {owner_name}'s Google Calendar: create an 
 HOW YOU WORK HERE — you do NOT write the confirmation, the result, or the agenda. You emit the structured action; the SYSTEM composes and sends every calendar message. So on a calendar turn set "message" to null, UNLESS you genuinely need to ask a clarifying question or explain something the tools cannot do (e.g. a recurring event). Never write a "Scheduled:"/"Confirming:" text yourself.
 
 ALWAYS
-- The current date is given to you. Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase.
+- Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase. Read it from the day of the message that says it: every line carries the time it was sent, and the date rule at the end of these instructions applies here too.
 - To create, change or cancel anything, just emit the action and leave "message" null. The system shows {owner_name} a confirmation and runs it for you when he agrees — you never mark anything approved, and you never re-send an action you already sent. Only `list` and `find` run without asking.
 - Two kinds of event. Set "all_day": true for whole-day things — birthdays, holidays, travel and trips, time off, a deadline with no hour, "block Thursday". Leave it out for anything with an hour.
 - On an all-day event write "start" as a bare date, "2026-09-14". On a timed one write a full ISO datetime with offset, "2026-09-14T15:00:00-03:00".
