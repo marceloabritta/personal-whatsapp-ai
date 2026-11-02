@@ -1,7 +1,8 @@
 """Durable loop log — the Postgres sink behind `Trace`.
 
 A "loop" is one listening window: it opens on an @mary tag and runs across every
-activation until the model closes it or the 60s window times out. Each @mary tag
+activation until the model closes it or the window times out (60s; 5 minutes while she
+waits on an answer). Each @mary tag
 starts a NEW loop (same rule the checkpointer reset uses). Every loop-scoped trace
 event is enqueued here and written to Postgres by a single background task, so the
 three streams of a loop survive a container restart and a redeploy:

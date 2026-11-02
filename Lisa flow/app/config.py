@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # Listening loop + webhook dedup. In-memory fallback when redis_url is unset.
     redis_url: str | None = None
     loop_ttl_seconds: int = 60  # the listening-window TTL
+    # The window while Lisa is waiting on an answer — a confirmation card out, details still to
+    # gather, or a question she asked. Finding someone's email or checking a date takes minutes:
+    # in the log, answers to her cards landed 70-210s after she asked, past the 60s window, and
+    # the fresh tag that followed threw the held booking away.
+    await_window_seconds: int = 300
 
     # Memory: how many WhatsApp messages seed a fresh thread.
     context_window_messages: int = 30
@@ -147,14 +152,17 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-10-31-message-clock"
+    prompt_version: str = "2026-10-31-await-answer"
 
     @property
     def review_settle_window(self) -> float:
         """A loop is reviewable once it has been quiet for longer than the listening window plus
         a grace margin — long enough that the window has truly expired AND the log writer has
-        flushed the loop's last events."""
-        return float(self.loop_ttl_seconds + self.review_settle_seconds)
+        flushed the loop's last events. The LONGEST window counts: a loop waiting on an answer
+        (or a setup loop) is still open long after the conversational TTL, and grading it then
+        would score a session that has not ended."""
+        longest = max(self.loop_ttl_seconds, self.await_window_seconds, self.setup_window_seconds)
+        return float(longest + self.review_settle_seconds)
 
     @property
     def owner_key(self) -> str:

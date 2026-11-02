@@ -96,7 +96,7 @@ class MessageState(TypedDict, total=False):
     domain: Optional[str]  # "calendar" | "web" | ...
 
     # reasoning output + metadata (for the record)
-    llm_state: str  # "keep_listening" | "close"
+    llm_state: str  # "keep_listening" | "awaiting_answer" | "close"
     reply_body: Optional[str]  # the model's message, or None (silence)
     lang: Optional[str]  # language the model wrote in this turn
     provider: Optional[str]

@@ -375,6 +375,10 @@ async def context_node(
         "action_results": [],
         "last_ran": 0,
         "last_results": [],
+        # The window decision is per-activation too. A path that never reaches `reason` (the
+        # owner's yes runs the held write straight through) would otherwise act on the PREVIOUS
+        # turn's state — the "awaiting_answer" of the question he just answered.
+        "llm_state": "keep_listening",
     }
     if reset:
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
