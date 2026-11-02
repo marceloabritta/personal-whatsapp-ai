@@ -12,12 +12,14 @@ it asks). Skills with no confirm policy pass straight through. The resolved-id g
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 
 from ..prompt import today_in
 from ..state import MessageState
 from ..trace import Trace
+from .act import AWAITING
 
 log = logging.getLogger("mary.confirm")
 
@@ -75,6 +77,13 @@ def _signature(action: dict, text: str) -> str:
     """Fingerprint of a confirmation actually sent — the task plus the exact words."""
     task = (action or {}).get("task", "")
     return hashlib.sha1(f"{task}|{text}".encode("utf-8")).hexdigest()[:16]
+
+
+def action_fingerprint(action: dict) -> str:
+    """Fingerprint of the write itself, bookkeeping keys aside. It ties a sent card to the exact
+    proposal it asked about, so a card can never vouch for a different write held later."""
+    body = {k: v for k, v in (action or {}).items() if not k.startswith("_")}
+    return hashlib.sha1(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
 async def confirm_node(
@@ -147,6 +156,7 @@ async def confirm_node(
     if observations:
         update["messages"] = observations
     repeated = False
+    close_overridden = False
     if ask_message and route == "act":
         # Backstop against the defect this whole path was built around: asking the SAME question
         # twice in one session. The composer is stateless, so a retry that reaches here again
@@ -155,13 +165,18 @@ async def confirm_node(
         # yes still resolves it — and log loudly, because arriving here means something upstream
         # did not report its failure.
         sig = _signature(pending, ask_message)
+        # A card is a question, and this turn's window decision is the code's, not the model's: it
+        # composed the card, so it knows he has to answer it. The model once returned "close" with
+        # the very booking the card was asking about, `act` honoured it, and the owner's "sim" five
+        # seconds later met a closed window and was dropped.
+        close_overridden = state.get("llm_state") == "close"
+        update["llm_state"] = AWAITING
         if sig == state.get("last_confirm_sig"):
             repeated = True
             route = "act"
             update["confirm_route"] = "act"
             update["pending_action"] = pending   # keep it live; just do not re-ask
             update["reply_body"] = None
-            update["llm_state"] = "keep_listening"
             log.warning(
                 '{"confirm":"suppressed_repeat","task":"%s","loop_id":"%s"}',
                 (pending or {}).get("task"), state.get("loop_id"),
@@ -170,6 +185,7 @@ async def confirm_node(
             update["pending_action"] = pending
             update["reply_body"] = ask_message
             update["last_confirm_sig"] = sig
+            update["card_out"] = action_fingerprint(pending)  # `act` records which message it was
     elif ask_message and approved:
         # The routing bug this hides: `if approved: route = "execute"` above wins, and the composed
         # confirmation was thrown away with nothing storing the pending — so a find/list batched
@@ -181,6 +197,7 @@ async def confirm_node(
         # Recording it would make the repeat-suppressor above swallow the real ask on the next
         # pass, and the owner would get silence in answer to "book a meeting".
         update["pending_action"] = pending
+        update["pending_card"] = None  # this proposal has no card yet; an older one is not its
 
     # A side effect batched with a gated write RIDES WITH THE PROPOSAL and fires only on the
     # owner's yes — otherwise a proposal he corrects ("no, her old address") would already have
@@ -201,7 +218,7 @@ async def confirm_node(
     trace.code(
         tid, node="confirm", loop_id=state.get("loop_id"), domain=domain,
         approved=len(approved), blocked=len(observations), pending=bool(update.get("pending_action")),
-        route=route, repeated=repeated,
+        route=route, repeated=repeated, close_overridden=close_overridden or None,
         side_effects=[a.get("task") for a in stripped] or None,
         side_effects_dropped=[a.get("task") for a in dropped] or None,
     )

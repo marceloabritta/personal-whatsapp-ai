@@ -30,6 +30,11 @@ Two rails worth spelling out:
   * The reply stays in the pending write's DOMAIN. A keyword-less follow-up ("at 5pm instead")
     would be misrouted to web by the stateless router.
 
+"His reply" is every message of his this activation ingested (`owner_replies`), not only the one
+that woke it, and a message an earlier activation already read is not read again. A fresh tag
+that found his yes under the card in the chat above arrives as `carried_yes` (carry.py) and is
+his yes, the same as one inside the window.
+
 No pending action → straight through to `route` (the normal domain router)."""
 from __future__ import annotations
 
@@ -49,11 +54,35 @@ async def resolve_pending_node(
     task = (pending or {}).get("task", "")
     domain, _, _ = task.partition(".")
     policy = confirm_policies.get(domain)
-    text = state.get("text") or ""
-    verdict = policy.detect(text) if (policy and hasattr(policy, "detect")) else "other"
-    # `from_me` is Evolution's flag for the owner's own account, and the gate has already dropped
-    # the assistant's own messages — so this is Marcelo, and nobody else.
-    is_owner = bool(state.get("from_me"))
+
+    def detect(text: str) -> str:
+        return policy.detect(text, pending) if (policy and hasattr(policy, "detect")) else "other"
+
+    replies = state.get("owner_replies")
+    carried = state.get("carried_yes")
+    if carried:
+        # A fresh tag found his yes under this write's card in the chat above (carry.py) — the
+        # yes the window would have run had it still been open.
+        verdict, is_owner, read = "yes", True, "carried"
+    elif replies:
+        # What HE said this activation — every message of his it ingested, not just the one that
+        # woke it. One verdict for all of them: "sim" then "mas às 16h" is a correction, not a yes.
+        verdicts = {detect(t) for t in replies}
+        verdict = verdicts.pop() if len(verdicts) == 1 else "other"
+        is_owner, read = True, "owner"
+    elif replies is not None and state.get("from_me"):
+        # His message, already read by an earlier activation that ingested it ahead of its own
+        # turn. It has been answered; reading it again could approve a write he never saw — the
+        # earlier turn may have replaced the proposal his "sim" was about.
+        trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
+                   pending=task, verdict="seen", owner=True, route="hold")
+        return {"resolve_route": "hold", "domain": domain,
+                "reply_body": None, "llm_state": "keep_listening"}
+    else:
+        # A contact's message (or a caller that does not publish `owner_replies`): the trigger.
+        # `from_me` is Evolution's flag for the owner's own account, and the gate has already
+        # dropped the assistant's own messages — so a from_me trigger is Marcelo, and nobody else.
+        verdict, is_owner, read = detect(state.get("text") or ""), bool(state.get("from_me")), "trigger"
 
     if verdict == "yes" and is_owner:
         action = {**pending, APPROVED_BY: OWNER_YES}
@@ -69,9 +98,9 @@ async def resolve_pending_node(
                 directory.spawn(_run_side_effects(handler, riders, state))
         trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
                    pending=task, verdict="yes", owner=True, route="execute",
-                   riders=len(riders) or None)
+                   riders=len(riders) or None, read=read, carried=carried or None)
         return {"actions": [action], "domain": domain, "pending_action": None,
-                "pending_side_effects": [], "resolve_route": "execute"}
+                "pending_side_effects": [], "pending_card": None, "resolve_route": "execute"}
 
     if verdict == "no" and is_owner:
         # He declined. "other" is the FIXING loop — it keeps the proposal so a correction can
@@ -81,9 +110,10 @@ async def resolve_pending_node(
         # `workflow` goes too. It is the gather memory toward a goal, and the goal was just
         # refused; leaving it would have the model resume the same booking next turn.
         trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
-                   pending=task, verdict="no", owner=True, route="reason", dropped=True)
+                   pending=task, verdict="no", owner=True, route="reason", dropped=True,
+                   read=read)
         return {"domain": domain, "resolve_route": "reason",
-                "pending_action": None, "pending_side_effects": [],
+                "pending_action": None, "pending_side_effects": [], "pending_card": None,
                 "workflow": None, "last_confirm_sig": None}
 
     if verdict in ("yes", "no"):
@@ -99,7 +129,7 @@ async def resolve_pending_node(
                 "reply_body": None, "llm_state": "keep_listening"}
 
     trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
-               pending=task, verdict=verdict, route="reason", domain=domain)
+               pending=task, verdict=verdict, route="reason", domain=domain, read=read)
     # The pending SURVIVES a non-yes turn (that is the fixing loop), but its riders do not. This
     # turn is a correction — "no, her other address" — and the model will re-propose. Carrying the
     # old riders forward would write the address he just rejected the moment he says yes to the

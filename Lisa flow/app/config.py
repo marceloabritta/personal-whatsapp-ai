@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # in the log, answers to her cards landed 70-210s after she asked, past the 60s window, and
     # the fresh tag that followed threw the held booking away.
     await_window_seconds: int = 300
+    # How old a card may be for a fresh tag to run the yes under it (carry.py). In the log the
+    # re-tag came 46-169s after the card; past half an hour the chat has likely moved on.
+    carry_confirm_max_age_seconds: int = 1800
 
     # Memory: how many WhatsApp messages seed a fresh thread.
     context_window_messages: int = 30

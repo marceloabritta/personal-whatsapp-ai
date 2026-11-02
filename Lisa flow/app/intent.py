@@ -68,13 +68,28 @@ _YES_WORDS = {
     "sim", "s", "isso", "pode", "manda", "mande", "confirma", "confirmado", "vai", "beleza",
     "blz", "ta", "certo", "perfeito", "claro", "fechado", "combinado", "positivo",
     "si", "dale", "hazlo", "correcto", "perfecto", "vale", "adelante",
+    # "@lisa pode seguir" was read as a correction: "seguir" was unknown, so one word sent an
+    # unambiguous go-ahead to the model, which re-proposed the same card.
+    "seguir", "segue", "siga", "prossiga", "prosseguir", "bora", "proceed",
 }
 # Multi-word affirmatives (normalized, space-joined). Matched as contiguous bigrams.
 _YES_PHRASES = {
     "go ahead", "do it", "send it", "sounds good", "that works", "yes please", "go for it",
     "pode ser", "pode sim", "pode mandar", "manda ver", "vai la", "isso mesmo", "pode agendar",
-    "esta certo", "ta bom", "por favor",
+    "esta certo", "ta bom", "por favor", "em frente", "pode ir", "manda bala",
     "hazlo ya", "esta bien", "de acuerdo",
+}
+# A reply that is only the card's OWN command word is a go-ahead to that card: "agendar" under
+# "Posso agendar?", "cancela" under "Posso cancelar?". Keyed by the held write's verb, because the
+# same word can mean the opposite under another card: "cancela" approves a cancellation and calls
+# a booking off, so it is a yes only when the card is a delete (and never a refusal — see _NO_WORDS).
+_PROCEED_WORDS = {
+    "create": {"agendar", "agenda", "agende", "marcar", "marca", "marque", "criar", "cria", "crie",
+               "schedule", "book", "create"},
+    "update": {"alterar", "altera", "altere", "mudar", "muda", "mude", "atualizar", "atualiza",
+               "atualize", "trocar", "troca", "troque", "update", "change"},
+    "delete": {"cancelar", "cancela", "cancele", "apagar", "apaga", "apague", "excluir", "exclui",
+               "exclua", "deletar", "deleta", "remover", "remove", "remova", "cancel", "delete"},
 }
 # Declining a proposal. Deliberately NARROW: a word only belongs here if it cannot also mean
 # "yes" to the question being asked. "cancela" is the sharpest example and is excluded — on a
@@ -102,12 +117,13 @@ _CONFIRM_FILLER = {
 }
 
 
-def classify_confirmation(text: str) -> str:
+def classify_confirmation(text: str, verb: str | None = None) -> str:
     """"yes" | "no" | "other" — what does this reply do to a pending proposal? (no model call).
 
     "yes" only when every substantive token is affirmative (or filler). "no" on the same rule for
     declines — a clean refusal and nothing else. Everything in between ("sim, mas 17h", "não, 16h",
-    a question) is "other", which keeps the proposal alive for the model to correct.
+    a question) is "other", which keeps the proposal alive for the model to correct. `verb` is the
+    held write's verb ("create", "update", "delete"): its own command word reads as a yes too.
 
     The distinction matters because "other" is the FIXING loop: the pending write is deliberately
     kept so a correction can replace it. Without a "no", answering "não precisa" left the proposal
@@ -140,10 +156,11 @@ def classify_confirmation(text: str) -> str:
             matched[i] = matched[i + 1] = True
     hit = any(matched)
     other = False
+    proceed = _PROCEED_WORDS.get(verb or "", set())
     for i, tok in enumerate(tokens):
         if matched[i]:
             continue
-        if tok in _YES_WORDS:
+        if tok in _YES_WORDS or tok in proceed:
             hit = True
         elif tok not in _CONFIRM_FILLER:
             other = True

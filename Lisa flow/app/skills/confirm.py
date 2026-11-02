@@ -4,7 +4,7 @@ A confirm policy owns the whole confirmation step for a skill, all of it program
 
   needs               which verbs need a go-ahead before they run
   compose(action, st) build the confirmation PROMPT the owner sees (per verb) — no LLM writes it
-  detect(text)        decide if the owner's reply is a clean "yes" (classify_confirmation)
+  detect(text, act)   decide if the owner's reply to that action is a clean "yes" (classify_confirmation)
   confirm(action)     the structural gate — may this action run this turn?
 
 `FlagConfirm` is the calendar policy: a write runs only when `confirmed` is set (by the owner's
@@ -18,6 +18,10 @@ from ..intent import classify_confirmation
 from ..state import APPROVED_BY, OWNER_YES
 
 
+def _verb(action: Optional[dict]) -> str:
+    return (action or {}).get("task", "").partition(".")[2]
+
+
 class ConfirmDecision(TypedDict, total=False):
     ok: bool                 # may this action proceed to execute?
     message: Optional[str]   # optional prompt the skill authors itself (else the node frames one)
@@ -28,7 +32,7 @@ class ConfirmDecision(TypedDict, total=False):
 class ConfirmPolicy(Protocol):
     needs: set
     def compose(self, action: dict, state: dict) -> Optional[str]: ...
-    def detect(self, text: str) -> str: ...
+    def detect(self, text: str, action: Optional[dict] = None) -> str: ...
     async def confirm(self, *, action: dict, state: dict, deps: Any) -> ConfirmDecision: ...
 
 
@@ -50,9 +54,10 @@ class FlagConfirm:
         except Exception:  # any formatting gap → fall back to the model
             return None
 
-    def detect(self, text: str) -> str:
-        """"yes" | "other" — a clean affirmative reply? (skill default = the shared classifier)."""
-        return classify_confirmation(text)
+    def detect(self, text: str, action: Optional[dict] = None) -> str:
+        """"yes" | "no" | "other" — a clean reply to `action`? (skill default = the shared
+        classifier). The action's verb lets the card's own command word count as a yes."""
+        return classify_confirmation(text, _verb(action))
 
     async def confirm(self, *, action: dict, state: dict, deps: Any) -> ConfirmDecision:
         """Approval is a CODE signal, never a field the model filled in.
@@ -75,8 +80,8 @@ class LLMConfirm:
     def compose(self, action: dict, state: dict) -> Optional[str]:
         return None
 
-    def detect(self, text: str) -> str:
-        return classify_confirmation(text)
+    def detect(self, text: str, action: Optional[dict] = None) -> str:
+        return classify_confirmation(text, _verb(action))
 
     async def confirm(self, *, action: dict, state: dict, deps: Any) -> ConfirmDecision:
         raise NotImplementedError("LLMConfirm is a v2 seam; v1 skills use FlagConfirm or None")

@@ -45,6 +45,14 @@ class MessageState(TypedDict, total=False):
     participant_phones: list  # phones that have spoken in this chat; the room, for the address book
     side_effects: list  # side-effect actions stripped this turn (feeds the guest-name renderer)
     pending_side_effects: list  # side effects waiting on the same yes as pending_action
+    # The card that asked about `pending_action`: {id, ts, text, sig}, where `sig` fingerprints the
+    # action it asked about (confirm.action_fingerprint). It is how a fresh tag finds the card in
+    # the chat above and checks the owner's answer to it (carry.py).
+    pending_card: Optional[dict]
+    # The owner's messages the resolver has already read this loop. An activation can ingest
+    # messages that arrived after its own trigger; when their own activations run later, the
+    # messages are not new and must not be answered (or approve something) a second time.
+    seen_owner_ids: list
 
     # --- per-turn scratch ---
     raw: dict
@@ -91,6 +99,10 @@ class MessageState(TypedDict, total=False):
 
     context_message_ids: list  # WhatsApp ids ingested this run
     turn_text: str  # the labeled transcript this turn — what the address-book scan reads
+    owner_replies: list  # texts of the owner's messages first ingested this run, oldest first
+    # A fresh tag found the owner's yes to the card in the chat above: {yes_id, card_id, age_s}.
+    # resolve_pending runs the held write on it, exactly as on a yes inside the window.
+    carried_yes: Optional[dict]
 
     # routing (route node) — which skill serves this turn; set programmatically
     domain: Optional[str]  # "calendar" | "web" | ...
@@ -115,6 +127,7 @@ class MessageState(TypedDict, total=False):
     last_ran: int  # actions executed in the latest execute pass (respond reads this)
     last_results: list  # results of the latest execute pass (for a Programmatic render)
     confirm_route: str  # confirm node's routing verdict: "execute" | "reason" | "act"
+    card_out: Optional[str]  # confirm sent a card this turn: the fingerprint of the action it asks about
     respond_route: str  # respond node's routing verdict: "reason" | "confirm" | "act"
     resolve_route: str  # resolve_pending node's verdict: "execute" (clean yes) | "route"
 

@@ -10,6 +10,8 @@ The message goes out verbatim. The reply header is localised to the session lang
 which is locked at the tag that opened the window."""
 from __future__ import annotations
 
+import time
+
 from ..identity import frame
 from ..state import MessageState
 from ..trace import Trace
@@ -53,6 +55,7 @@ async def act_node(
 
     reply = None
     sent = False
+    sent_id = None
     delivery = "silent"
 
     if body:
@@ -122,4 +125,9 @@ async def act_node(
     # model text (not the framed header) is what the model should see it said.
     if body and sent:
         update["messages"] = [{"role": "assistant", "content": body.rstrip()}]
+    if sent and state.get("card_out"):
+        # Which message the card was, so a fresh tag can find it in the chat above and read the
+        # owner's answer under it. The framed text is the fallback when Evolution gave no id.
+        update["pending_card"] = {"id": sent_id or None, "ts": int(time.time()),
+                                  "text": reply, "sig": state["card_out"]}
     return update
