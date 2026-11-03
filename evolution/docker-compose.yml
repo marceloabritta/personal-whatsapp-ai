@@ -76,7 +76,10 @@ services:
       OWNER_NAME: "Marcelo"
       # Window TTL for untagged continuations. Keep >= each flow's own window so a
       # valid continuation is never dropped before the flow's gate would close it.
-      WINDOW_TTL: "120"
+      # It counts from the last HUMAN message (a flow's reply never refreshes it), while
+      # Lisa's 5-minute AWAIT_WINDOW_SECONDS counts from her reply — so it is that window
+      # plus two minutes for her to reason and send.
+      WINDOW_TTL: "420"
       # Own DB index, clear of Evolution's cache and the flows' session stores.
       REDIS_URL: redis://redis:6379/4
       # tag → flow wiring (forwarded by Docker service DNS on evolution-net).
@@ -115,6 +118,8 @@ services:
       # Listening-window marker + webhook dedup. Own DB, clear of Evolution's cache.
       REDIS_URL: redis://redis:6379/1
       LOOP_TTL_SECONDS: "60"
+      # While she waits on an answer (a confirmation card, an email, a date) — 5 minutes.
+      AWAIT_WINDOW_SECONDS: "300"
       # Memory: seed size + the LangGraph checkpointer (reuses the Evolution Postgres).
       CONTEXT_WINDOW_MESSAGES: "30"
       DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution
@@ -128,7 +133,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-11-02-quoted-reply"
+      PROMPT_VERSION: "2026-11-02-await-answer"
       # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
       # a chat is enrolled via "@lisa setup" in the chat with myself.
       AUTO_TRANSCRIBE_ENABLED: "true"
@@ -141,7 +146,7 @@ services:
       # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
-      REVIEW_SCOPE_VERSION: "2026-11-02-quoted-reply"
+      REVIEW_SCOPE_VERSION: "2026-11-02-await-answer"
       REVIEW_JUDGE_VERSION: "v4"
       REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).

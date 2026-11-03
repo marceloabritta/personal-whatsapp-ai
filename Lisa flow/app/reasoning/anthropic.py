@@ -122,7 +122,7 @@ class AnthropicReasoner:
             reasoning = data.get("reasoning")  # the model's stated rationale, for the log
             actions = data.get("actions") or []
             workflow = data.get("workflow")
-            if state not in ("keep_listening", "close"):
+            if state not in ("keep_listening", "awaiting_answer", "close"):
                 state = "keep_listening"
         except (ValueError, TypeError):
             log.error("could not parse enforced JSON: %r", text[:300])

@@ -154,7 +154,10 @@ suggested next steps or follow-up questions; give the answer and stop."""
         f"deciding this turn — whether the latest message is for you, what (if anything) you are "
         f"saying or doing, and why you keep the conversation open or close it. This is a private "
         f"note for {owner_name}'s records; it is never sent to the chat. Write it first, then decide.",
-        '- "state": "keep_listening" to stay in the conversation, or "close" to step out.',
+        '- "state": "keep_listening" to stay in the conversation; "awaiting_answer" when your '
+        "message asks something you need answered before you can go on (an email, a date, "
+        "which one, may I) — you will wait minutes for the reply instead of seconds; or "
+        '"close" to step out.',
         '- "message": the WhatsApp text to send (message only — no analysis, labels, or header), '
         "or null to stay silent.",
         '- "lang": the ISO 639-1 code of the language you are writing in (e.g. "en", "pt", "es") '

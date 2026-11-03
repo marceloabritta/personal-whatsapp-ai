@@ -61,7 +61,7 @@ def output_schema_for(domain: str, skills: dict = SKILLS, settings=None) -> dict
     skill = skills[domain]
     props: dict[str, Any] = {
         "reasoning": {"type": "string"},
-        "state": {"type": "string", "enum": ["keep_listening", "close"]},
+        "state": {"type": "string", "enum": ["keep_listening", "awaiting_answer", "close"]},
         "message": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "lang": {"type": "string"},
     }

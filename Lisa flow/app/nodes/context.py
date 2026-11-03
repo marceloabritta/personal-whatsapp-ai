@@ -12,6 +12,7 @@ import asyncio
 
 from langchain_core.messages import RemoveMessage
 
+from ..carry import carried_yes, kept_on_carry
 from ..identity import is_own_message
 from ..skills.setup import setup_matcher
 from ..state import MessageState
@@ -273,7 +274,8 @@ def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[
 
 
 async def context_node(
-    state: MessageState, *, evolution, echoes, settings, trace: Trace, transcription=None
+    state: MessageState, *, evolution, echoes, settings, trace: Trace, transcription=None,
+    confirm_policies: dict | None = None,
 ) -> dict:
     tid = state["trace_id"]
     jid = state["remote_jid"]
@@ -398,10 +400,38 @@ async def context_node(
         # No wa_id: the log dedups transcript lines on (loop_id, wa_message_id), and the quoted
         # message's own line usually holds that id already, so this one would vanish.
         trace.user(tid, quote[1], quote[2], loop_id=loop_id, source="quote")
+
+    # His messages that are new to this loop. An activation reads everything since the cursor, so
+    # it can ingest messages that arrived after its own trigger — a contact's "Boa !" carried his
+    # "sim" in with it, the resolver only read "Boa !", and the card went out a second time. The
+    # resolver reads these instead; and when each one's own activation runs later, it is already
+    # here, so it is not read (or allowed to approve anything) twice.
+    if reset:
+        # Everything already in the chat at a tag is history to the new loop, not an answer to
+        # anything in it — and a cursor that falls out of the fetched range re-reads it later.
+        prior_seen = [r["id"] for r in records if r.get("from_me") and r.get("id")]
+    else:
+        prior_seen = list(state.get("seen_owner_ids") or [])
+    fresh = [r for r in new
+             if r.get("from_me") and r.get("id") not in prior_seen
+             and not is_own_message(r.get("text") or "", owner)]
+    owner_replies = [(r.get("text") or "").strip() for r in fresh]
+    seen_owner_ids = (prior_seen + [r["id"] for r in fresh if r.get("id")])[-200:]
+
+    # A fresh tag under a card he already said yes to runs that write instead of dropping it
+    # (carry.py). Decided before the reset below clears the held write.
+    carried, carry_why = None, None
+    if reset and not setup_open and state.get("pending_action"):
+        domain = (state["pending_action"].get("task") or "").partition(".")[0]
+        carried, carry_why = carried_yes(
+            state, records, policy=(confirm_policies or {}).get(domain), echoes=echoes,
+            settings=settings)
+
     trace.code(
         tid, node="context", loop_id=loop_id,
         initialized=bool(state.get("initialized")),
         reset=reset, setup_open=setup_open, ingested=len(new), context_message_ids=ids,
+        carry=carry_why, carried_yes=carried,
     )
 
     update: dict = {
@@ -420,11 +450,20 @@ async def context_node(
         "action_results": [],
         "last_ran": 0,
         "last_results": [],
+        # The window decision is per-activation too. A path that never reaches `reason` (the
+        # owner's yes runs the held write straight through) would otherwise act on the PREVIOUS
+        # turn's state — the "awaiting_answer" of the question he just answered.
+        "llm_state": "keep_listening",
+        "card_out": None,
+        "carried_yes": carried,
+        "owner_replies": owner_replies,
+        "seen_owner_ids": seen_owner_ids,
     }
     if reset:
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
         # loop can never bleed into this one (the anti-delirium invariant). A fresh tag is a new
-        # request, so a write awaiting confirmation is abandoned (cleared), not silently run.
+        # request, so a write awaiting confirmation is abandoned (cleared), not silently run —
+        # unless he already said yes under its card, which `carried` (above) re-keeps at the end.
         update["workflow"] = None
         update["loop_domain"] = None
         update["seen_event_ids"] = []
@@ -433,6 +472,7 @@ async def context_node(
         update["seen_chats"] = {}
         update["listed_chats"] = {}
         update["pending_action"] = None
+        update["pending_card"] = None
         update["last_confirm_sig"] = None
         # Contact memory is checkpointed, not per-turn scratch (the same reason seen_event_ids
         # needs clearing), so a stale address or a pending write cannot bleed into the next loop.
@@ -468,4 +508,7 @@ async def context_node(
         msgs.append({"role": "user", "content": content})
     if msgs:
         update["messages"] = msgs
+    if carried:
+        # The new loop starts clean except for the approved write and what running it needs.
+        update.update(kept_on_carry(state))
     return update

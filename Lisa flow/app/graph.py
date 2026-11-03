@@ -69,7 +69,8 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "context",
         partial(context_node, evolution=deps.evolution, echoes=deps.echoes,
-                settings=deps.settings, trace=deps.trace, transcription=deps.transcription),
+                settings=deps.settings, trace=deps.trace, transcription=deps.transcription,
+                confirm_policies=deps.confirm_policies or {}),
     )
     g.add_node(
         "resolve_pending",

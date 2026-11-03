@@ -1,17 +1,43 @@
 """act — apply the model's JSON decision to the wire and the window, then emit the
 one-row activation record (§10/§12).
 
-  keep_listening · message → send, refresh the 60s window
-  keep_listening · null    → stay silent, keep the window
-  close · message          → send (model writes its own sign-off), drop the window
-  close · null             → drop the window, nothing sent
+  keep_listening · message  → send, refresh the 60s window
+  awaiting_answer · message → send, hold the window for AWAIT_WINDOW_SECONDS (5 min)
+  any · null                → stay silent, keep the window — never shorter than it was
+  close · message           → send (model writes its own sign-off), drop the window
+  close · null              → drop the window, nothing sent
 The message goes out verbatim. The reply header is localised to the session language,
 which is locked at the tag that opened the window."""
 from __future__ import annotations
 
+import time
+
 from ..identity import frame
 from ..state import MessageState
 from ..trace import Trace
+
+AWAITING = "awaiting_answer"
+
+
+def _waiting(state: MessageState) -> bool:
+    """Is Lisa waiting on an answer? A held write (a confirmation card is out) and a gather goal
+    with open questions are read off the state — no model judgment involved. The model's own
+    "awaiting_answer" covers the question that is neither, like "shall I book just the next one?"."""
+    workflow = state.get("workflow") or {}
+    return bool(state.get("llm_state") == AWAITING or state.get("pending_action")
+                or workflow.get("open_questions"))
+
+
+def window_ttl(state: MessageState, settings) -> int:
+    """How long the window stays open after this turn. A setup loop holds a longer window:
+    finding a contact and forwarding their card means leaving this chat. So does a question:
+    looking up an email or checking a date takes minutes, not the conversational seconds."""
+    ttl = settings.loop_ttl_seconds
+    if state.get("loop_domain") == "setup":
+        ttl = max(ttl, settings.setup_window_seconds)
+    if _waiting(state):
+        ttl = max(ttl, settings.await_window_seconds)
+    return ttl
 
 
 async def act_node(
@@ -29,6 +55,7 @@ async def act_node(
 
     reply = None
     sent = False
+    sent_id = None
     delivery = "silent"
 
     if body:
@@ -53,10 +80,12 @@ async def act_node(
         if reaper is not None:
             reaper.offer(state.get("loop_id"))
     else:
-        # A setup loop holds a longer window: finding a contact and forwarding their card means
-        # leaving this chat, which takes far more than the conversational TTL.
-        ttl = (settings.setup_window_seconds
-               if state.get("loop_domain") == "setup" else None)
+        ttl = window_ttl(state, settings)
+        if not sent:
+            # A silent turn asked nothing and answered nothing, so whatever Lisa is waiting on
+            # still stands. Someone else's chatter while she waits must not cut a 5-minute window
+            # back to 60s; only her next message decides what she is waiting for.
+            ttl = max(ttl, sessions.ttl_left(jid))
         sessions.open(jid, ttl)  # refresh the window TTL
 
     # activation record (prompt_version stitched here so _record stays dependency-free)
@@ -96,4 +125,9 @@ async def act_node(
     # model text (not the framed header) is what the model should see it said.
     if body and sent:
         update["messages"] = [{"role": "assistant", "content": body.rstrip()}]
+    if sent and state.get("card_out"):
+        # Which message the card was, so a fresh tag can find it in the chat above and read the
+        # owner's answer under it. The framed text is the fallback when Evolution gave no id.
+        update["pending_card"] = {"id": sent_id or None, "ts": int(time.time()),
+                                  "text": reply, "sig": state["card_out"]}
     return update

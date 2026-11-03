@@ -12,7 +12,7 @@ from typing import Optional, Protocol, TypedDict
 
 
 class ReasonResult(TypedDict, total=False):
-    state: str  # "keep_listening" | "close"
+    state: str  # "keep_listening" | "awaiting_answer" | "close"
     message: Optional[str]  # prose to send, or None (silence)
     lang: Optional[str]  # ISO 639-1 code the reply is written in
     reasoning: Optional[str]  # the model's stated rationale this turn, for the log
