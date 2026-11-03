@@ -51,8 +51,10 @@ def settings() -> Settings:
                     transcription_enabled=False, auto_transcribe_enabled=False)
 
 
-async def run(history: list, tag_text: str, tag_ts: int) -> tuple[dict, str]:
-    """One scenario → (the proposed action, or {}; what she sent into the chat)."""
+async def run(history: list, tag_text: str, tag_ts: int,
+              quote: tuple | None = None) -> tuple[dict, str]:
+    """One scenario → (the proposed action, or {}; what she sent into the chat). `quote` is
+    (message id, text) when the tag is sent as a WhatsApp reply to that message."""
     s = settings()
     evo = FakeEvolution(history)
     deps = Deps(settings=s, evolution=evo, sessions=InMemorySessions(ttl=60),
@@ -66,6 +68,9 @@ async def run(history: list, tag_text: str, tag_ts: int) -> tuple[dict, str]:
         "message": {"conversation": tag_text},
         "messageTimestamp": tag_ts, "pushName": "Marcelo",
     }}
+    if quote:
+        body["data"]["contextInfo"] = {"stanzaId": quote[0],
+                                       "quotedMessage": {"conversation": quote[1]}}
     config = {"configurable": {"thread_id": make_thread_id("secretaria", CONTACT_JID)}}
     st = await graph.ainvoke({"raw": body}, config=config)
     pending = st.get("pending_action") or {}
@@ -83,8 +88,8 @@ async def main() -> int:
     now, _ = now_in(tz)
     today = now.date()
     yesterday, tomorrow = today - timedelta(days=1), today + timedelta(days=1)
-    if now.hour >= 21:
-        print("Too late in the day: the 'later today' slot would cross midnight. Run before 21:00.")
+    if now.hour > 21:
+        print("Too late in the day: the 'later today' slot would cross midnight. Run before 22:00.")
         return 2
     slot = now.hour + 2                                    # still ahead today
 
@@ -116,12 +121,19 @@ async def main() -> int:
                 f"vamos fazer {passed_name} às 15h? no New Dog", mine=False),
             msg("d2", at(today - timedelta(days=9), 10, 5), "fechado", mine=True),
         ], f"{tag} agendar"),
+        # The proposal is buried under 35 later messages, outside the 30-message window; the
+        # tag is a WhatsApp reply to it, which is the only thing that says what to book.
+        ("a reply to yesterday's 'amanhã', outside the window, is today", today, [
+            msg("e1", at(yesterday, 10, 0), f"almoço amanhã às {slot}h no New Dog?", mine=False),
+            *(msg(f"e{i}", at(yesterday, 14, i), ("kkk", "boa!", "show", "verdade", "haha")[i % 5],
+                  mine=i % 2 == 0) for i in range(2, 37)),
+        ], f"{tag} agendar", ("e1", f"almoço amanhã às {slot}h no New Dog?")),
     ]
 
     failed = 0
     print(f"Owner's clock: {_WEEKDAYS[now.weekday()]} {now:%Y-%m-%d %H:%M} ({tz})\n")
-    for name, want, history, tag_text in scenarios:
-        pending, said = await run(history, tag_text, tag_ts)
+    for name, want, history, tag_text, *quote in scenarios:
+        pending, said = await run(history, tag_text, tag_ts, quote[0] if quote else None)
         start = str(pending.get("start") or "")
         got = start[:10] or "(no booking proposed)"
         if want is None:

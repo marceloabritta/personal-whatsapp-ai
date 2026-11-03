@@ -16,7 +16,35 @@ from ..identity import is_own_message
 from ..skills.setup import setup_matcher
 from ..state import MessageState
 from ..trace import Trace
-from ..whatsapp import build_labeled_transcript, chat_key, label_for
+from ..whatsapp import build_labeled_transcript, chat_key, label_for, when_label
+
+
+def _quoted_line(state: dict, records: list[dict], owner: str,
+                 tz_name: str) -> tuple[str, str, str] | None:
+    """The text message this one replies to → (transcript line, log speaker, log text), or None.
+
+    A WhatsApp reply is how he points at the message he means: "@lisa marca" under a lunch
+    proposed two days ago. Nothing else tells her which message that is, and it may be outside
+    the window altogether. The quote payload carries neither the sender nor the send time, and the
+    time is what its "amanhã" is read from, so the message is looked up by id in the fetched
+    history. When the history no longer has it, the quote's own text is used, marked undated.
+    Her own messages are skipped: she has them already, and a quoted card is many lines long."""
+    qid = state.get("quoted_text_id")
+    if not qid:
+        return None
+    rec = next((r for r in records if r.get("id") == qid), None)
+    text = ((rec or {}).get("text") or state.get("quoted_text") or "").strip()
+    if not text or is_own_message(text, owner):
+        return None
+    text = " / ".join(part.strip() for part in text.splitlines() if part.strip())
+    replier = owner if state.get("from_me") else (state.get("push_name") or "Contact")
+    if rec is None:
+        source = f'an earlier message, sent at a time not known: "{text}"'
+    else:
+        when = when_label(rec.get("ts"), tz_name)
+        sent = f", sent {when}" if when else ""
+        source = f'this message from {label_for(rec, owner)}{sent}: "{text}"'
+    return f"[{replier} is replying to {source}]", f"{replier} (replying to a message)", source
 
 
 def _participant_phones(records: list[dict]) -> list[str]:
@@ -330,6 +358,11 @@ async def context_node(
         # branch exists to skip.
         newest = records[-1]["id"]
 
+    # Lines that sit after the transcript: what this message replies to. Collected rather than
+    # appended on the spot, because a forwarded card re-renders the transcript below and used to
+    # drop the voice-note line with it.
+    reply_lines: list[str] = []
+
     # Compositional reply-to-audio: the owner referenced a voice note that isn't in the window.
     # Transcribe it and inject one explicit line — no speaker-label guessing about who spoke it.
     qid = state.get("quoted_audio_id")
@@ -337,11 +370,16 @@ async def context_node(
         qres = await transcription.get(qid, language=lang)
         qtext = (qres.get("text") or "").strip()
         if qtext:
-            line = f'[{owner} replied to a voice message — transcribed: "{qtext}"]'
-            transcript = f"{transcript}\n{line}" if transcript.strip() else line
+            reply_lines.append(f'[{owner} replied to a voice message — transcribed: "{qtext}"]')
             if loop_id:
                 trace.user(tid, f"{owner} (replied-to voice message)", qtext,
                            loop_id=loop_id, wa_id=qid, source="audio")
+
+    # Reply to a text message — added even when that message is in the window, because the
+    # window does not say which message he is pointing at.
+    quote = _quoted_line(state, records, owner, tz_name)
+    if quote:
+        reply_lines.append(quote[0])
 
     # Forwarded contact cards. Marked into the transcript, and their numbers remembered as
     # resolved ids for this loop — that is what lets `setup.enroll` name a contact at all.
@@ -352,7 +390,14 @@ async def context_node(
     # continuation log only the new inbound; Mary's own replies are logged by `act`.
     if card_keys:  # a marked card changed the records, so re-render the labeled transcript
         transcript = build_labeled_transcript(raw if reset else new, owner, tz_name)
+    if reply_lines:
+        transcript = "\n".join(t for t in (transcript, *reply_lines) if t.strip())
     _log_transcript(trace, tid, loop_id, raw if reset else new, owner)
+    if quote and loop_id:
+        # After the seed, so the judge reads it where Lisa did: under the message that quotes it.
+        # No wa_id: the log dedups transcript lines on (loop_id, wa_message_id), and the quoted
+        # message's own line usually holds that id already, so this one would vanish.
+        trace.user(tid, quote[1], quote[2], loop_id=loop_id, source="quote")
     trace.code(
         tid, node="context", loop_id=loop_id,
         initialized=bool(state.get("initialized")),

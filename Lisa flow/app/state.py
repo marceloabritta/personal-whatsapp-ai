@@ -68,6 +68,10 @@ class MessageState(TypedDict, total=False):
     # `transcribe_only` is the matcher verdict — gate routes it to the fast lane.
     quoted_audio_id: Optional[str]
     transcribe_only: bool
+    # A reply to a text message: its id, and the text the quote itself carries (the fallback
+    # when the fetched history no longer has the message). Turned into one line in `context`.
+    quoted_text_id: Optional[str]
+    quoted_text: Optional[str]
 
     # This message's OWN audio (the automatic path). `auto_rule` is the roster rule the gate
     # matched; `auto_then_run` means a listening window was also open, so the turn continues

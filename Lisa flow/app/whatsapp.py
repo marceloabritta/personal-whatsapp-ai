@@ -256,6 +256,16 @@ def local_time(ts, tz_name: str) -> Optional[datetime]:
         return datetime.fromtimestamp(secs, timezone.utc)
 
 
+def when_label(ts, tz_name: str) -> Optional[str]:
+    """'Tuesday, 27 Oct 2026, 19:31' — a send time spelled out in full, for a line that sits
+    outside the day blocks. None when there is no send time."""
+    when = local_time(ts, tz_name)
+    if when is None:
+        return None
+    return (f"{_DAY_NAMES[when.weekday()]}, {when.day} {_MONTH_ABBR[when.month - 1]} "
+            f"{when.year}, {when:%H:%M}")
+
+
 def day_divider(d: date) -> str:
     """'── Thursday, 29 Oct 2026 ──'. Absolute on purpose, never "yesterday": the transcript is
     frozen into the checkpoint, and a loop that crosses midnight would carry a stale label. The
