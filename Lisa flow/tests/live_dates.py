@@ -121,12 +121,13 @@ async def main() -> int:
                 f"vamos fazer {passed_name} às 15h? no New Dog", mine=False),
             msg("d2", at(today - timedelta(days=9), 10, 5), "fechado", mine=True),
         ], f"{tag} agendar"),
-        # The proposal is buried under 35 later messages, outside the 30-message window; the
-        # tag is a WhatsApp reply to it, which is the only thing that says what to book.
+        # The agreed proposal is buried under 35 later messages, outside the 30-message window;
+        # the tag is a WhatsApp reply to it, which is the only thing that says what to book.
         ("a reply to yesterday's 'amanhã', outside the window, is today", today, [
             msg("e1", at(yesterday, 10, 0), f"call amanhã às {slot}h?", mine=False),
+            msg("e2", at(yesterday, 10, 1), "fechado", mine=True),
             *(msg(f"e{i}", at(yesterday, 14, i), ("kkk", "boa!", "show", "verdade", "haha")[i % 5],
-                  mine=i % 2 == 0) for i in range(2, 37)),
+                  mine=i % 2 == 0) for i in range(3, 38)),
         ], f"{tag} agendar", ("e1", f"call amanhã às {slot}h?")),
     ]
 
