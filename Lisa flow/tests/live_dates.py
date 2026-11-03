@@ -104,16 +104,16 @@ async def main() -> int:
 
     scenarios = [
         ("yesterday's 'amanhã' is today", today, [
-            msg("a1", at(yesterday, 18, 40), f"almoço amanhã então? {slot}h no New Dog", mine=False),
+            msg("a1", at(yesterday, 18, 40), f"call amanhã então? {slot}h", mine=False),
             msg("a2", at(yesterday, 18, 41), "fechado", mine=True),
         ], f"{tag} agendar"),
         ("today's 'amanhã' is tomorrow", tomorrow, [
-            msg("b1", now - timedelta(minutes=20), f"almoço amanhã então? {slot}h no New Dog",
+            msg("b1", now - timedelta(minutes=20), f"call amanhã então? {slot}h",
                 mine=False),
             msg("b2", now - timedelta(minutes=19), "fechado", mine=True),
         ], f"{tag} agendar"),
         ("a request written late last night is for today", today, [
-            msg("c1", at(yesterday, 23, 50), f"amanhã às {slot}h no New Dog?", mine=False),
+            msg("c1", at(yesterday, 23, 50), f"call amanhã às {slot}h?", mine=False),
             msg("c2", at(yesterday, 23, 52), "pode ser", mine=True),
         ], f"{tag} marca"),
         (f"last week's '{passed_name}' has passed: ask, don't book it", None, [
@@ -124,10 +124,10 @@ async def main() -> int:
         # The proposal is buried under 35 later messages, outside the 30-message window; the
         # tag is a WhatsApp reply to it, which is the only thing that says what to book.
         ("a reply to yesterday's 'amanhã', outside the window, is today", today, [
-            msg("e1", at(yesterday, 10, 0), f"almoço amanhã às {slot}h no New Dog?", mine=False),
+            msg("e1", at(yesterday, 10, 0), f"call amanhã às {slot}h?", mine=False),
             *(msg(f"e{i}", at(yesterday, 14, i), ("kkk", "boa!", "show", "verdade", "haha")[i % 5],
                   mine=i % 2 == 0) for i in range(2, 37)),
-        ], f"{tag} agendar", ("e1", f"almoço amanhã às {slot}h no New Dog?")),
+        ], f"{tag} agendar", ("e1", f"call amanhã às {slot}h?")),
     ]
 
     failed = 0
