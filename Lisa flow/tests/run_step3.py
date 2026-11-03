@@ -127,7 +127,7 @@ def unit_checks() -> None:
     # every evening between 21:00 and midnight in Sao Paulo it asserted tomorrow's date as
     # today, and every relative date she resolved landed a day late.
     from datetime import datetime, timedelta, timezone as _tz
-    from app.prompt import build_system_prompt, now_in
+    from app.prompt import _WEEKDAYS, build_system_prompt, now_in
 
     sp_tz = build_system_prompt("Marcelo", "@lisa", tz_name="America/Sao_Paulo")
     check("prompt states the date AND the time", "Current date and time:" in sp_tz)
@@ -146,12 +146,14 @@ def unit_checks() -> None:
     check("the rendered date is the owner's, not the server's",
           f"{sp_now:%Y-%m-%d}" in sp_tz)
     # The regression itself: the two clocks disagree about the DAY for 3h every evening.
-    # Whenever they do, the prompt must carry the owner's day.
+    # Whenever they do, the prompt must carry the owner's day. Checked on the "Current date"
+    # line itself: the prompt also names tomorrow, which in that window IS UTC's date.
     if sp_now.date() != utc_now.date():
         check("during the divergence window the prompt shows the owner's day, not UTC's",
-              f"{utc_now:%Y-%m-%d}" not in sp_tz)
+              f"Current date and time: {_WEEKDAYS[sp_now.weekday()]}, {sp_now:%Y-%m-%d}" in sp_tz
+              and f"Current date and time: {_WEEKDAYS[utc_now.weekday()]}, {utc_now:%Y-%m-%d}"
+              not in sp_tz)
     # A weekday name that is spelled by us, not by the container's locale.
-    from app.prompt import _WEEKDAYS
     check("the weekday is spelled in English regardless of locale",
           _WEEKDAYS[sp_now.weekday()] in sp_tz)
     check("the weekday matches the date shown",
@@ -1421,6 +1423,71 @@ def message_clock_checks() -> None:
           "resolved against the wrong day is wrong — that is wrong_details" in jp)
 
 
+async def quoted_reply_checks() -> None:
+    """A WhatsApp reply brings the message it points at, with its sender and send time.
+
+    "@lisa marca" sent as a reply to a lunch proposed yesterday: without this the model saw only
+    "@lisa marca", and the proposal itself was often outside the 30-message window."""
+    print("\nStep-3 P9 — replies to a text message")
+    from datetime import datetime, timedelta, timezone
+
+    sp = timezone(timedelta(hours=-3))
+    old_ts = int(datetime(2026, 10, 27, 19, 31, tzinfo=sp).timestamp())
+    fill_ts = int(datetime(2026, 10, 28, 8, 0, tzinfo=sp).timestamp())
+    history = [{"id": "OLD", "from_me": False, "text": "almoço amanhã?", "push_name": "Rodolfo",
+                "ts": old_ts}]
+    history += [{"id": f"f{i}", "from_me": i % 2 == 0, "text": f"kkk {i}", "push_name": "Rodolfo",
+                 "ts": fill_ts + i} for i in range(35)]
+
+    def reply(text, mid, quoted_id, quoted_text, audio=False):
+        quoted = ({"audioMessage": {"seconds": 5}} if audio
+                  else {"conversation": quoted_text})
+        return {"data": {
+            "key": {"remoteJid": OWNER_JID, "fromMe": True, "id": mid},
+            "message": {"conversation": text},
+            "contextInfo": {"stanzaId": quoted_id, "quotedMessage": quoted},
+            "messageTimestamp": fill_ts + 100, "pushName": "Tester",
+        }}
+
+    deps, evo, stub, cal, graph = make_toolenv(history=history)
+    stub.script = [{"message": "ok"}]
+    st = await _invoke(graph, reply("@mary marca", "q1", "OLD", "almoço amanhã?"))
+    seen = stub.calls[0]["messages"][-1]
+    seen = seen["content"] if isinstance(seen, dict) else getattr(seen, "content", "")
+    check("[quote] the quoted message is outside the window",
+          "OLD" not in (st.get("context_message_ids") or []))
+    check("[quote] the model reads who sent it and when, from the history",
+          '[Marcelo is replying to this message from Rodolfo, sent Tuesday, 27 Oct 2026, 19:31: '
+          '"almoço amanhã?"]' in seen, detail=repr(seen[-160:]))
+    check("[quote] the line comes last, after the message that quotes it",
+          seen.rstrip().endswith('"almoço amanhã?"]'))
+    check("[quote] it is logged for the judge, under the quoting message",
+          any(r.get("who") == "Marcelo (replying to a message)" and "19:31" in (r.get("text") or "")
+              for r in deps.trace.transcript))
+
+    deps, evo, stub, cal, graph = make_toolenv(history=history)
+    stub.script = [{"message": "ok"}]
+    await _invoke(graph, reply("@mary marca", "q2", "GONE", "jantar sexta?"))
+    seen = stub.calls[0]["messages"][-1]
+    seen = seen["content"] if isinstance(seen, dict) else getattr(seen, "content", "")
+    check("[quote] a message the history lost still comes through, marked undated",
+          '[Marcelo is replying to an earlier message, sent at a time not known: "jantar sexta?"]'
+          in seen, detail=repr(seen[-160:]))
+
+    deps, evo, stub, cal, graph = make_toolenv(history=history)
+    stub.script = [{"message": "ok"}]
+    await _invoke(graph, reply("@mary marca", "q3", "LISA",
+                               "*[Marcelo's AI Assistant]:*\n\nConfirming:\n\nLunch"))
+    seen = stub.calls[0]["messages"][-1]
+    seen = seen["content"] if isinstance(seen, dict) else getattr(seen, "content", "")
+    check("[quote] a reply to her own card adds no line", "is replying to" not in seen)
+
+    deps, evo, stub, cal, graph = make_toolenv(history=history)
+    st = await _invoke(graph, reply("@mary marca", "q4", "VOICE", "", audio=True))
+    check("[quote] a voice-note reply stays on the audio path",
+          st.get("quoted_text_id") is None and st.get("quoted_audio_id") == "VOICE")
+
+
 def _finish() -> None:
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
@@ -1436,4 +1503,5 @@ if __name__ == "__main__":
     asyncio.run(presence_checks())
     asyncio.run(allday_checks())
     message_clock_checks()
+    asyncio.run(quoted_reply_checks())
     _finish()

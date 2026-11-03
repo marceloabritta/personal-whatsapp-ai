@@ -33,6 +33,9 @@ def parse_node(
     # whether this is a pure transcribe request — the fast lane — with NO model call.
     quoted = get_quoted(data)
     quoted_audio_id = quoted["id"] if (quoted and quoted["has_audio"]) else None
+    # A reply to a TEXT message: the context node looks it up for its sender and send time.
+    quoted_text_id = (quoted["id"] if (quoted and not quoted["has_audio"] and quoted["text"])
+                      else None)
     transcribe_only = False
     if (
         from_me and tag and quoted_audio_id and settings.transcription_enabled
@@ -68,7 +71,8 @@ def parse_node(
     trace.code(
         tid, node="parse", chat=remote_jid, from_me=from_me,
         is_own=is_own_message(text, owner_name), tag=tag, text_preview=text[:80],
-        quoted_audio=bool(quoted_audio_id), transcribe_only=transcribe_only,
+        quoted_audio=bool(quoted_audio_id), quoted_text=bool(quoted_text_id),
+        transcribe_only=transcribe_only,
         is_audio=is_audio, cards=len(cards),
     )
 
@@ -85,6 +89,8 @@ def parse_node(
         "is_own": is_own_message(text, owner_name),
         "tag": tag,
         "quoted_audio_id": quoted_audio_id,
+        "quoted_text_id": quoted_text_id,
+        "quoted_text": quoted["text"] if quoted_text_id else None,
         "transcribe_only": transcribe_only,
         "is_audio": is_audio,
         "audio_seconds": audio_seconds(message),

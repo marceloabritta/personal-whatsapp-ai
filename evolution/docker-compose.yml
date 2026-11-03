@@ -128,7 +128,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-10-31-message-clock"
+      PROMPT_VERSION: "2026-11-02-quoted-reply"
       # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
       # a chat is enrolled via "@lisa setup" in the chat with myself.
       AUTO_TRANSCRIBE_ENABLED: "true"
@@ -141,7 +141,7 @@ services:
       # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
-      REVIEW_SCOPE_VERSION: "2026-10-31-message-clock"
+      REVIEW_SCOPE_VERSION: "2026-11-02-quoted-reply"
       REVIEW_JUDGE_VERSION: "v4"
       REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).
