@@ -51,6 +51,26 @@ def _normalize(s: str) -> str:
     return " ".join(s.split())
 
 
+# What setup is CALLED, as nouns. A message that opens with one of these right after the tag —
+# "@lisa setup …", "@lisa configurações …" — is asking for setup by name, whatever follows it:
+# "@lisa setup não quero e-mail pros convidados" is a preset even though "convidados" is calendar
+# vocabulary. Verbs stay out ("ajuste a reunião", "configura o servidor amanhã" are requests to do
+# something else), and so does any setup word later in the sentence: that is setup_matcher's job,
+# which runs after the other skills' matchers.
+_SETUP_NAMES = {
+    "setup", "settings", "config", "configuracao", "configuracoes", "configuracion",
+    "preferences", "preferencias", "ajustes", "presets", "preset", "defaults",
+}
+
+
+def setup_invoked(text: str) -> bool:
+    """Does this message open with setup's own name? Only the first word after any @tags counts,
+    and only an exact name: an explicit call, not a guess."""
+    words = [w for w in (text or "").split() if not w.startswith("@")]
+    first = _normalize(words[0]).split() if words else []
+    return bool(first) and first[0] in _SETUP_NAMES
+
+
 def setup_matcher(text: str, *, threshold: float = 0.86) -> str:
     """"yes" | "no" — is this turn asking to configure the assistant? (no model call).
 
@@ -158,6 +178,8 @@ SETUP = Skill(
         "resolve": LLMReadback(),
     },
     matcher=setup_matcher,
+    # Called by name, setup wins over every other skill's matcher (see _SETUP_NAMES).
+    invoked_by=setup_invoked,
     only_self_chat=True,
     resolve_gate=setup_resolve_gate,
     # A setup loop keeps its untagged follow-ups. Its subject now overlaps the calendar's

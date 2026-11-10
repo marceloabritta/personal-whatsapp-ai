@@ -44,6 +44,10 @@ class Skill:
     # here even when another skill's matcher fires on it. For a skill that is a MODE (setup),
     # whose answers share another skill's vocabulary. A fresh tag still re-decides.
     holds_loop: bool = False
+    # `invoked_by(text) -> bool`: the message calls this skill BY NAME ("@lisa setup …"). Checked
+    # before every skill's matcher, so a name beats another skill's vocabulary in what follows it.
+    # Still subject to only_self_chat / owner_only like any route. None = no such name.
+    invoked_by: Optional[Callable] = None
 
     # The settings attribute that switches this whole skill on. Off, it cannot be routed to or called,
     # and nothing about it reaches any other skill's prompt or schema. None = always on.

@@ -210,10 +210,21 @@ async def nothing_set_books_as_before():
     return card and event, f"held={p} {start}->{end} meet={bool(body.get('conferenceData'))}"
 
 
+async def default_asked_of_the_calendar():
+    """Found on the first live run: a default asked outside setup got "Combinado, a partir de
+    agora não envio" from the calendar, with nothing saved. It must point to setup instead."""
+    deps, graph = fresh()
+    st = await say(graph, "@lisa a partir de agora não manda mais e-mail pros convidados",
+                   jid=ANA_JID)
+    reply = st.get("reply") or ""
+    ok = (not held(st) and "setup" in reply.lower() and deps.presets.notify_guests() is True)
+    return ok, f"domain={st.get('domain')} held={held(st)} reply={reply!r}"
+
+
 SCENARIOS = [
     set_length_and_video, guest_emails_off, save_a_place, remove_a_place, menu_then_meetings,
     untagged_answer_stays_in_setup, book_at_saved_place, ask_for_meet_anyway,
-    nothing_set_books_as_before,
+    nothing_set_books_as_before, default_asked_of_the_calendar,
 ]
 
 

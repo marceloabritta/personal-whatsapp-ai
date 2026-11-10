@@ -134,6 +134,13 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
             and SKILLS[loop_domain].holds_loop):
         return loop_domain, "loop"
 
+    # 1a. A skill called by name wins over every matcher — "@lisa setup … convidados …" is setup,
+    #     though "convidados" is calendar's word.
+    for name in entry:
+        invoked = SKILLS[name].invoked_by
+        if invoked is not None and invoked(text):
+            return name, "invoked"
+
     # 1. An explicit matcher signal always wins — even to switch domain mid-loop.
     for name in entry:
         skill = SKILLS[name]

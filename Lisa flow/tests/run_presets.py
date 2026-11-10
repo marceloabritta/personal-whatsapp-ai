@@ -527,6 +527,11 @@ async def p6_gating():
           "meeting presets" not in _classify_system("Marcelo", presets=False))
     check("on: it is", "meeting presets" in _classify_system("Marcelo", presets=True))
 
+    check("off: the calendar is not told about defaults",
+          "HIS DEFAULTS" not in system_prompt_for("calendar", off))
+    check("on: it is told it cannot change one, and where they are changed",
+          "you cannot change a default" in system_prompt_for("calendar", on))
+
     deps, _, _ = build(off)
     check("off: no presets object is built", deps.presets is None)
     block, _ = context_block_for("calendar", {"text": "x"},
@@ -582,6 +587,25 @@ async def p8_router():
     d, _ = await route_domain({**held, "is_self_chat": False}, s, reasoner=StubReasoner())
     check("outside the self-chat setup is never held", d != "setup")
     check("only setup holds its loop", [n for n, sk in SKILLS.items() if sk.holds_loop] == ["setup"])
+
+    # Called by name, setup beats the calendar's vocabulary in what follows (found live: "@lisa
+    # setup não quero que os convidados recebam e-mail" went to the calendar, which promised).
+    me = {"is_self_chat": True, "from_me": True, "loop_opened": True}
+    for text in ("@lisa setup não quero que os convidados recebam e-mail por padrão",
+                 "@lisa configurações: reuniões de 30 minutos",
+                 "@lisa, Setup: salva o endereço casa",
+                 "@lisa presets sem google meet"):
+        d, how = await route_domain({**me, "text": text}, s, reasoner=StubReasoner())
+        check(f"by name -> setup: {text!r}", d == "setup" and how == "invoked", detail=f"{d}/{how}")
+    for text in ("@lisa marca uma reunião pra configurar o servidor amanhã",
+                 "@lisa ajuste a reunião de amanhã pra 15h",
+                 "@lisa marca reunião amanhã, depois vejo o setup"):
+        d, how = await route_domain({**me, "text": text}, s, reasoner=StubReasoner())
+        check(f"not by name -> calendar: {text!r}", d == "calendar", detail=f"{d}/{how}")
+    d, how = await route_domain({**me, "is_self_chat": False,
+                                 "text": "@lisa setup não quero e-mail pros convidados"}, s,
+                                reasoner=StubReasoner())
+    check("by name outside the self-chat is still not setup", d != "setup", detail=f"{d}/{how}")
 
 
 # ============================ P9 — through the graph ======================================

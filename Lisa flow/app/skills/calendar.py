@@ -11,8 +11,8 @@ import unicodedata
 
 from ..presets import MEETING_MINUTES
 from ..tools.calendar import (
-    CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DESCRIBE, GUIDANCE, GoogleCalendarService,
-    apply_presets,
+    CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DEFAULTS_GUIDANCE, DESCRIBE, GUIDANCE,
+    GoogleCalendarService, apply_presets,
 )
 from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
@@ -235,7 +235,8 @@ CALENDAR = Skill(
     # so the build is the pre-feature one rather than one that merely never injects the block.
     gated_verbs={"remember": "contacts_enabled"},
     gated_guidance=[("contacts_enabled", CONTACTS_GUIDANCE),
-                    ("contacts_crud_on", CONTACTS_CALL_GUIDANCE)],
+                    ("contacts_crud_on", CONTACTS_CALL_GUIDANCE),
+                    ("presets_enabled", DEFAULTS_GUIDANCE)],
     calls={"contacts"},
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",

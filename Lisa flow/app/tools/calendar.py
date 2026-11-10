@@ -319,6 +319,12 @@ CONTACTS_CALL_GUIDANCE = """THE CONTACTS SKILL — the list above only holds peo
 - A card of yours still standing is withdrawn when you call. When you come back, propose it again if it still applies.
 - A plain correction to an address on an invite is not a contact change: his address wins for the invite, as above, and nothing is called."""
 
+# Appended only when the meeting presets are on. Without it, "from now on don't email the guests"
+# reached here got "Combinado, a partir de agora não envio" — a promise with nowhere to keep it.
+DEFAULTS_GUIDANCE = """HIS DEFAULTS — his standard meeting length, whether meetings get a video call, whether guests are emailed, and his saved places are changed in setup, never here.
+- He asks to change one of them from now on ("não manda mais e-mail pros convidados", "minhas reuniões são de 30 min", "salva o endereço do escritório") rather than for one event -> emit no action, and do not say it is done or that you will remember it: you cannot change a default. Tell him in one line to tag you with the word setup followed by what he wants, in his chat with himself.
+- The same thing for one event ("não manda convite nessa") is an ordinary field on that event, as above."""
+
 
 
 class GoogleCalendarService:
