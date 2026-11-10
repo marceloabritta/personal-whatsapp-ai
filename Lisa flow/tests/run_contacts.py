@@ -93,6 +93,8 @@ class FakeStore:
         self.next_id = 1
         self.upserts: list = []
         self.links: dict = {}
+        self.sources: dict = {}        # phone -> the evidence a link was written on
+        self.unlinked: list = []
         self.failed: list = []
         self.replaced: list = []
 
@@ -124,6 +126,11 @@ class FakeStore:
 
     async def link(self, phone, rn, source):
         self.links[phone] = rn
+        self.sources[phone] = source
+
+    async def unlink(self, phone):
+        self.unlinked.append(phone)
+        self.links.pop(phone, None)
 
 
 def settings(**kw):
@@ -542,14 +549,12 @@ async def outbox_checks():
     check("a terminal failure rolls the optimistic patch back",
           "carla@x.com" not in d2._contacts["people/3"]["emails"])
 
-    # note_used writes the identity link
+    # note_used records the address the owner used (the identity link has its own section)
     d3 = book()
     d3.store = FakeStore()
-    await d3.note_used("ana.silva@acme.com", phone="5511987654321")
+    await d3.note_used(["ana.silva@acme.com"], phone="5511987654321")
     check("a successful booking records the preferred address",
           d3._contacts["people/1"]["preferred"] == "ana.silva@acme.com")
-    check("a successful booking binds the identity link",
-          d3.store.links.get("+5511987654321") == "people/1")
 
     # Case. The model writes the address however the human typed it, so `preferred` was stored
     # "Thiago.avelino@..." against an `emails` list holding it lowercase — `preferred in emails`
@@ -578,6 +583,124 @@ async def outbox_checks():
                      "emailAddresses": [{"value": "Mixed.Case@Example.COM"}]})
     check("Google-sourced addresses are stored lowercase",
           v["emails"] == ["mixed.case@example.com"])
+
+
+# --- 6b. identity links -------------------------------------------------------------------
+
+async def link_checks():
+    """A booking binds a 1:1 chat's number to a card only when it proves who the chat is.
+
+    The reported defect: a booking with Felipe and Ana, made from Felipe's chat, linked his
+    number to Ana's card (one link per guest, last one winning), and from then on Lisa took Ana
+    for the person she was talking to. Production had exactly that row: one chat bound to the
+    card of the second guest on a two-guest invite."""
+    print("\nidentity links")
+    from app.tools.calendar import GoogleCalendarService
+
+    felipe = "5511992890847"            # Felipe's 1:1; no card carries this number
+    felipe_e164 = "+5511992890847"
+    carla = "551134567890"              # the number on Carla's card
+    carla_e164 = "+551134567890"
+    owner = "5511900001111"
+
+    def fresh(links=None):
+        d = Directory(settings(owner_jid=owner + "@s.whatsapp.net"))
+        d.load([
+            contact("people/f", "Felipe Dias", ["felipe@x.com"]),
+            contact("people/a", "Ana Silva", ["ana@x.com", "ana.silva@gmail.com"]),
+            contact("people/c", "Carla Mendes", ["carla@x.com"], ["+55 11 3456-7890"]),
+        ], links=links)
+        d.store = FakeStore()
+        return d
+
+    def in_chat(d, phone):
+        return [c["resource_name"] for c, _w in d.mentions("bom dia", phone=phone)]
+
+    d = fresh()
+    await d.note_used(["felipe@x.com", "ana@x.com"], phone=felipe)
+    check("a booking with two guests binds the chat to neither",
+          d.store.links == {} and d._links == {}, str(d.store.links))
+    check("...so Felipe's chat does not answer Ana", d._resolve_phone(felipe) == [])
+    check("...and mentions() does not take Ana for the person in the chat",
+          "people/a" not in in_chat(d, felipe), str(in_chat(d, felipe)))
+    check("...while both addresses still count as used",
+          d._contacts["people/f"]["preferred"] == "felipe@x.com"
+          and d._contacts["people/a"]["preferred"] == "ana@x.com")
+    d = fresh()
+    await d.note_used(["ana@x.com", "felipe@x.com"], phone=felipe)
+    check("the guests' order changes nothing", d.store.links == {}, str(d.store.links))
+
+    d = fresh()
+    await d.note_used(["felipe@x.com"], phone=felipe)
+    check("a booking with one guest binds the chat to him",
+          d.store.links == {felipe_e164: "people/f"} and d.store.sources[felipe_e164] == "booked",
+          str(d.store.links))
+    check("...and the chat now answers him", in_chat(d, felipe) == ["people/f"])
+    d = fresh()
+    await d.note_used("felipe@x.com", phone=felipe)
+    check("a bare address is a booking with that one address",
+          d.store.links == {felipe_e164: "people/f"})
+
+    d = fresh()
+    await d.note_used(["ana@x.com", "ANA.SILVA@gmail.com"], phone=felipe)
+    check("two addresses of one person are one guest", d.store.links == {felipe_e164: "people/a"})
+    d = fresh()
+    await d.note_used(["felipe@x.com", "stranger@y.com"], phone=felipe)
+    check("a guest the book does not know still counts as a second person", d.store.links == {})
+    d = fresh()
+    await d.note_used(["felipe@x.com"], phone=None)
+    check("a group binds nothing", d.store.links == {})
+    d = fresh()
+    await d.note_used(["felipe@x.com"], phone=owner)
+    check("the owner's chat with himself binds nothing: he is not his own guest",
+          d.store.links == {} and d._links == {})
+
+    # The book already knows whose number it is.
+    d = fresh()
+    await d.note_used(["carla@x.com", "felipe@x.com"], phone=carla)
+    check("a guest whose card has the number needs no row", d.store.links == {})
+    check("...and the chat still answers her", in_chat(d, carla) == ["people/c"])
+    d = fresh()
+    await d.note_used(["felipe@x.com"], phone=carla)
+    check("a booking with someone else does not take a number off the card that holds it",
+          d.store.links == {} and in_chat(d, carla) == ["people/c"])
+    d = fresh(links={carla_e164: "people/a"})          # the kind of row the old rule wrote
+    await d.note_used(["ana@x.com", "carla@x.com"], phone=carla)
+    check("a stale link is repaired by a booking with the card's owner on it",
+          d.store.links == {carla_e164: "people/c"}
+          and d.store.sources[carla_e164] == "booked+card", str(d.store.links))
+    check("...so the chat answers her again", in_chat(d, carla) == ["people/c"])
+    d = Directory(settings())
+    d.load([contact("people/1", "Um", ["um@x.com"], ["+5511912345678"]),
+            contact("people/2", "Dois", ["dois@x.com"], ["+5511912345678"])])
+    d.store = FakeStore()
+    await d.note_used(["um@x.com", "felipe@x.com"], phone="5511912345678")
+    check("a number on two cards is settled by which one is on the invite",
+          d.store.links == {"+5511912345678": "people/1"}, str(d.store.links))
+
+    # Two bookings that disagree about who the chat is.
+    d = fresh(links={felipe_e164: "people/f"})
+    await d.note_used(["ana@x.com"], phone=felipe)
+    check("a one-guest booking that contradicts a link drops it instead of replacing it",
+          d.store.unlinked == [felipe_e164] and felipe_e164 not in d._links, str(d._links))
+    check("...so the chat answers nobody rather than the wrong person", in_chat(d, felipe) == [])
+    d = fresh(links={felipe_e164: "people/f"})
+    await d.note_used(["ana@x.com", "carla@x.com"], phone=felipe)
+    check("a booking with several people leaves an existing link alone",
+          d._links == {felipe_e164: "people/f"} and d.store.unlinked == [])
+
+    # The caller: GoogleCalendarService.run hands over the whole guest list, once.
+    svc = GoogleCalendarService(settings())
+    svc.directory = d = fresh()
+    svc._create = lambda inputs: {"ok": True, "summary": "created", "data": {}}
+    await svc.run("create", {"title": "x", "attendees": ["felipe@x.com", "ana@x.com"],
+                             "_phone": felipe})
+    check("calendar.create with Felipe and Ana from his chat writes no link",
+          d.store.links == {} and d._contacts["people/a"]["preferred"] == "ana@x.com",
+          str(d.store.links))
+    await svc.run("create", {"title": "x", "attendees": ["felipe@x.com"], "_phone": felipe})
+    check("calendar.create with Felipe alone binds his chat",
+          d.store.links == {felipe_e164: "people/f"}, str(d.store.links))
 
 
 # --- 7. the confirm node --------------------------------------------------------------------
@@ -835,6 +958,7 @@ async def main() -> int:
     await people_checks()
     await sync_checks()
     await outbox_checks()
+    await link_checks()
     await confirm_checks()
     await graph_regression_checks()
     card_checks()

@@ -186,6 +186,11 @@ class ContactStore:
                         linked_at = now()""",
                 (phone, resource_name, source))
 
+    async def unlink(self, phone: str) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.schema}.contact_links WHERE phone = %s", (phone,))
+
     def _ddl(self) -> str:
         s = self.schema
         return f"""

@@ -853,8 +853,10 @@ class GoogleCalendarService:
 
         attempts = self._attempts_for(verb, inputs)
         # Which addresses this write actually put on an invite — recorded after success so the
-        # address book learns the owner's real preference and binds the chat's identity. This is
-        # the only producer of contact_links rows.
+        # address book learns the owner's real preference and, when the guest list proves it,
+        # who the chat is. This is the only producer of contact_links rows. The list goes over
+        # WHOLE: who else is on the invite is the evidence, and one call per guest bound the
+        # chat to whichever guest came last.
         used = list(inputs.get("attendees") or []) if verb in ("create", "update") else []
 
         last: Exception | None = None
@@ -862,11 +864,10 @@ class GoogleCalendarService:
             try:
                 res = await asyncio.to_thread(getattr(self, method), inputs)
                 if res.get("ok") and used and self.directory is not None:
-                    for addr in used:
-                        try:
-                            await self.directory.note_used(addr, phone=inputs.get("_phone"))
-                        except Exception as exc:  # bookkeeping must never fail a calendar write
-                            log.warning("note_used failed for %s: %s", addr, exc)
+                    try:
+                        await self.directory.note_used(used, phone=inputs.get("_phone"))
+                    except Exception as exc:  # bookkeeping must never fail a calendar write
+                        log.warning("note_used failed for %s: %s", used, exc)
                 return res
             except Exception as exc:  # never raise into the graph
                 last = exc
