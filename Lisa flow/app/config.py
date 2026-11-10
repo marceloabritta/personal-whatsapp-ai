@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-11-10-contacts-handoff"
+    prompt_version: str = "2026-11-10-date-table"
 
     @property
     def contacts_crud_on(self) -> bool:
