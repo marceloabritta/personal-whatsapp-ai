@@ -1350,7 +1350,7 @@ def message_clock_checks() -> None:
     print("\nStep-3 P8 — the message clock")
     from datetime import date, datetime, timedelta, timezone
 
-    from app.prompt import _WEEKDAYS, build_system_prompt, now_in
+    from app.prompt import _WEEKDAYS, build_system_prompt, date_legend, now_in
     from app.review.prompt import build_judge_prompt, render_transcript
     from app.skills.calendar_format import compose_create, fmt_date
     from app.whatsapp import build_labeled_transcript, stamp_lines
@@ -1383,9 +1383,20 @@ def message_clock_checks() -> None:
     now, _ = now_in(tz)
     y, tm = now.date() - timedelta(days=1), now.date() + timedelta(days=1)
     check("the prompt names yesterday as now_in sees it",
-          f"Yesterday was {_WEEKDAYS[y.weekday()]}, {y:%Y-%m-%d}." in sp)
+          f"- {_WEEKDAYS[y.weekday()]}, {y:%Y-%m-%d} (yesterday)" in sp)
     check("the prompt names tomorrow as now_in sees it",
-          f"Tomorrow is {_WEEKDAYS[tm.weekday()]}, {tm:%Y-%m-%d}." in sp)
+          f"- {_WEEKDAYS[tm.weekday()]}, {tm:%Y-%m-%d} (tomorrow)" in sp)
+    # Live on 2026-11-10, "amanhã" agreed on Monday was booked for Wednesday in 11 of 30 runs:
+    # "tomorrow from Monday's message, so Tuesday 11 Nov" — the right weekday, the wrong date.
+    leg = date_legend(datetime(2026, 11, 10, 19, 55))
+    check("yesterday's 'amanhã' is resolved to today's date, in so many words",
+          'In a message sent yesterday (Monday, 2026-11-09), "tomorrow" / "amanhã" means TODAY, '
+          'Tuesday, 2026-11-10' in leg, leg)
+    check("every nearby day carries its own weekday and date",
+          "- Tuesday, 2026-11-10 (TODAY)" in leg and "- Friday, 2026-11-13\n" in leg
+          and "- Tuesday, 2026-11-03\n" in leg and "- Monday, 2026-11-23" in leg, leg)
+    check("a time later today is said to be ahead", "It is 19:55 now" in leg and "still ahead" in leg)
+    check("no line that names a date as plain 'Tomorrow is'", "Tomorrow is" not in sp)
     check("the prompt tells her each line carries its send time",
           "Each line starts with the time it was sent" in sp)
     check("the prompt says to ask when the date has already passed",

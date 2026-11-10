@@ -38,6 +38,32 @@ def today_in(tz_name: str) -> str:
     return now_in(tz_name)[0].date().isoformat()
 
 
+def date_legend(now: datetime) -> str:
+    """The days around today, to look up rather than compute, and what "tomorrow" means in a
+    message from yesterday.
+
+    Spelled out because the calendar skill runs without thinking. This used to say only
+    "Yesterday was Monday, 2026-11-09. Tomorrow is Wednesday, 2026-11-11." On 2026-11-10, a
+    "call amanhã 21h" agreed on Monday was booked for Wednesday in 11 of 30 runs. The model's own
+    reasoning read "tomorrow from Monday's message, so Tuesday 11 Nov": the right weekday, with the
+    date copied from the line that said Tomorrow. So every nearby day gets its weekday and its date
+    side by side, and yesterday's "tomorrow" is resolved here, to the date."""
+    today = now.date()
+
+    def day(n: int) -> str:
+        d = today + timedelta(days=n)
+        return f"{_WEEKDAYS[d.weekday()]}, {d:%Y-%m-%d}"
+
+    marks = {-1: " (yesterday)", 0: " (TODAY)", 1: " (tomorrow)"}
+    table = "\n".join(f"- {day(n)}{marks.get(n, '')}" for n in range(-7, 15))
+    return (f"The days around today, each weekday with its date. Look a date up here; never work "
+            f"one out:\n{table}\n"
+            f"In a message sent yesterday ({day(-1)}), \"tomorrow\" / \"amanhã\" means TODAY, "
+            f"{day(0)}, and \"today\" / \"hoje\" means yesterday. In a message sent today, "
+            f"\"tomorrow\" is {day(1)}. It is {now:%H:%M} now, so a time later today is still "
+            f"ahead, not past.")
+
+
 def called_by_block(owner_name: str, frame: dict) -> str:
     """What a skill is told while another one is waiting on it (nodes/handoff.py)."""
     caller = frame.get("domain")
@@ -65,11 +91,7 @@ def build_system_prompt(
     # uncorrectable, because the prompt reasserted it on the very next turn.
     now, tz_label = now_in(tz_name)
     today = f"{_WEEKDAYS[now.weekday()]}, {now:%Y-%m-%d}, {now:%H:%M} ({tz_label})"
-    # Spelled out rather than left to her: the calendar skill runs without thinking, so she should
-    # look yesterday and tomorrow up, not compute them.
-    yesterday, tomorrow = (now.date() + timedelta(days=n) for n in (-1, 1))
-    legend = (f"Yesterday was {_WEEKDAYS[yesterday.weekday()]}, {yesterday:%Y-%m-%d}. "
-              f"Tomorrow is {_WEEKDAYS[tomorrow.weekday()]}, {tomorrow:%Y-%m-%d}.")
+    legend = date_legend(now)
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
 
@@ -234,7 +256,7 @@ suggested next steps or follow-up questions; give the answer and stop."""
     # Thursday. Both such bookings in the log were a day late.
     return (f"{base}{skill_block}{context_block or ''}{action_para}"
             f"\n\n{contract}\n\nCurrent date and time: {today}. "
-            f"That is {owner_name}'s own clock. {legend}\n\n"
+            f"That is {owner_name}'s own clock.\n\n{legend}\n\n"
             f"Every line of the conversation shows when it was sent. A relative date means what "
             f"it meant to the person who wrote it, on the day they wrote it: \"tomorrow\" in a "
             f"message from yesterday is today, and a \"Friday\" said last week may already be "
