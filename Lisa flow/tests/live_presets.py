@@ -48,13 +48,29 @@ class _ListingEvents(_Events):
         return _Req({"items": []})
 
 
+class _NoContacts:
+    """The contacts skill's tool, unplugged. The contacts FLAGS follow the live env, so the prompts
+    and schemas are production's (the calendar can call contacts when CRUD is on there), but no
+    call ever reaches his real address book."""
+
+    directory = None
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    async def run(self, verb, inputs):
+        self.calls.append((verb, inputs))
+        return {"ok": False, "error": "unavailable",
+                "summary": "The address book cannot be reached in this test."}
+
+
 def settings() -> Settings:
-    # Everything that reaches outside the process is off; the model settings and the key come
-    # from the env, exactly as the live service has them. Setup is as it is live, plus presets.
+    # Everything that reaches outside the process is off; the model settings, the key and the
+    # contacts switches come from the env, exactly as the live service has them. Setup is as it
+    # is live, plus presets.
     return Settings(evolution_apikey="x", redis_url=None, database_url=None,
                     MARY_TRIGGER_TAG="@lisa", owner_jid=OWNER_JID, presets_enabled=True,
-                    contacts_enabled=False, contacts_crud_enabled=False, review_enabled=False,
-                    media_enabled=False, transcription_enabled=False,
+                    review_enabled=False, media_enabled=False, transcription_enabled=False,
                     auto_transcribe_enabled=True)
 
 
@@ -64,6 +80,9 @@ def fresh(presets=None):
     google = FakeGoogle()
     google._events = _ListingEvents()
     deps.tools["calendar"]._svc = google
+    deps.tools["calendar"].directory = None
+    if "contacts" in deps.tools:
+        deps.tools["contacts"] = _NoContacts()
     ev.history[OWNER_JID] = []
     ev.history[ANA_JID] = []
     return deps, graph
@@ -236,6 +255,9 @@ async def _one(fn):
 
 
 async def main() -> int:
+    s = settings()
+    print(f"contacts: enabled={s.contacts_enabled} crud_on={s.contacts_crud_on} (from the env; "
+          f"the tool itself is a stub)")
     failed = 0
     for fn in SCENARIOS:
         runs = await asyncio.gather(*[_one(fn) for _ in range(REPEAT)])
