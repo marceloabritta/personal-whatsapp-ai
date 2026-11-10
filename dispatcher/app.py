@@ -13,7 +13,7 @@ via env) and point a fresh @tag at it — the core @lisa flow keeps running, unt
 new feature can never break it.
 
 Routing invariants (mirror each flow's own gate, which stays as the final arbiter):
-  - a tag only *summons* when it comes from the OWNER (fromMe) — a contact typing "@mary"
+  - a tag only *summons* when it comes from the OWNER (fromMe) — a contact typing "@lisa"
     does not open a window; it can only continue one already open;
   - the tag always wins and (re)assigns ownership of the chat;
   - an untagged message follows the last owner while that chat's window is live;
@@ -109,11 +109,6 @@ class Config:
                 os.getenv("LISA_URL", "http://lisa:8000/webhook"),
             ),
         ]
-        # Mary — the experimental orchestrator flow (@mary). Appended only when its URL is
-        # wired in the env, so the core @lisa route above is never affected by its presence.
-        mary_url = os.getenv("MARY_URL")
-        if mary_url:
-            self.routes.append((_tags(os.getenv("MARY_TAGS", "@mary")), mary_url))
         # Automatic transcription needs to see voice notes that carry NO tag and open no window,
         # which every rule below would otherwise drop. When this is wired, audio is additionally
         # forwarded to that flow — which decides for itself whether the chat is enrolled. Leave

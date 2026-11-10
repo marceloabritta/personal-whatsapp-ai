@@ -5,7 +5,7 @@ under Anthropic's 16 union / 24 optional caps), the hybrid router picks domains 
 the skill-owned confirm/render policies drive the tool loop through the graph. No network, no
 Postgres, no Anthropic key, no Google.
 
-    cd "Mary flow" && python tests/run_step3.py
+    cd "Lisa flow" && python tests/run_step3.py
 Exits non-zero on the first failed check.
 """
 from __future__ import annotations

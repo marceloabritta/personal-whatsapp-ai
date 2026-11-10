@@ -78,8 +78,10 @@ Off by default. Turn it on with `PRESETS_ENABLED=true` on the flow; they are sto
 
 The dispatcher fans out by tag, so a new/experimental feature ships as its **own tag → its
 own agent**, leaving the core `@lisa` flow untouched. Add one `(tags, url)` route in
-`dispatcher/app.py` (or via `*_TAGS` / `*_URL` env), point a fresh `@tag` at a new service,
-and iterate there — a new feature can never break `@lisa`.
+`dispatcher/app.py` (read from its own `*_TAGS` / `*_URL` env, like Lisa's), point a fresh
+`@tag` at a new service, and iterate there — a new feature can never break `@lisa`.
+
+Lisa is the only flow today.
 
 ## Run it
 
@@ -98,6 +100,10 @@ two tag-selected designs (`@assistant`/`@assistente` → the legacy skills stack
 newer Mary skills) — has been retired now that Lisa covers the core. It is preserved on the git
 branches **`archive/secretary-v1`** and **`wip-snapshot-2026-08-02`**, and remains in this
 repo's history.
+
+A later experimental `@mary` flow — a second LangGraph brain in `Mary flow/`,
+run beside Lisa to try the skills orchestrator — was removed once Lisa had taken over
+everything it did. It remains in this repo's history (`git log -- "Mary flow"`).
 
 ## License
 

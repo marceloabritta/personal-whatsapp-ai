@@ -1,7 +1,7 @@
 # ============================================================================
 #  Dispatcher — the single webhook target that fans out to the flows by @tag.
 #  See app.py. Evolution's instance webhook points here; it forwards to
-#  Mary flow (:3000) and Lisa flow (:8000) on the shared evolution-net.
+#  Lisa flow (:8000) on the shared evolution-net.
 # ============================================================================
 FROM python:3.12-slim
 

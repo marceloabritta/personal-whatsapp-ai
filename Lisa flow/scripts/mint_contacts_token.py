@@ -1,8 +1,8 @@
 """Mint the CONTACTS refresh token — a second token, separate from the calendar one.
 
-Why separate: the live GOOGLE_REFRESH_TOKEN is consumed by BOTH the lisa and mary services, and
-google-auth only *warns* when a granted scope is missing rather than failing. So re-minting that one
-shared variable to add contacts scope risks two production calendars at once, and a scope that
+Why separate: the live GOOGLE_REFRESH_TOKEN is what the production calendar runs on, and
+google-auth only *warns* when a granted scope is missing rather than failing. So re-minting that
+variable to add contacts scope risks the production calendar, and a scope that
 quietly failed to be granted would surface later as a generic error on "book lunch Friday". This
 script never touches the calendar token. It asks for contacts scope only, and it verifies the
 result against the live API before printing anything.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only SQL against Lisa's and Mary's logs on the production droplet.
+# Read-only SQL against Lisa's logs on the production droplet.
 #
 #   .claude/scripts/lisa-log-sql "select loop_id, started_at from lisa_log.loops order by 2 desc limit 5"
 #   .claude/scripts/lisa-log-sql -x "select * from lisa_log.loops limit 1"     # expanded rows
