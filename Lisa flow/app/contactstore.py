@@ -4,6 +4,8 @@ Three jobs, and the middle one is the important one:
 
   contacts        the mirror of Google's book, plus the two columns Google has nowhere to store
                   (`preferred` / `used_at` — which address the owner ACTUALLY uses).
+  contact_tombstones  a copy of every card Lisa deletes. Google's docs do not say a deleted
+                  contact can be restored, so this is the only undo he is sure of. Kept 30 days.
   contact_outbox  the write-ahead record. A learned address is written HERE first and only then
                   handed to the drain worker, so a crash between "Lisa learned it" and "Google has
                   it" loses nothing. It is also the idempotency mechanism: People has no request
@@ -53,8 +55,8 @@ class ContactStore:
             async with self._pool.connection() as conn:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
-                        f"SELECT resource_name, etag, name, nicknames, emails, phones, source, "
-                        f"preferred, extract(epoch from used_at)::bigint AS used_at "
+                        f"SELECT resource_name, etag, name, nicknames, emails, phones, company, "
+                        f"source, preferred, extract(epoch from used_at)::bigint AS used_at "
                         f"FROM {self.schema}.contacts")
                     rows = [dict(r) for r in await cur.fetchall()]
                     await cur.execute(
@@ -125,19 +127,45 @@ class ContactStore:
         async with self._pool.connection() as conn:
             await conn.execute(
                 f"""INSERT INTO {self.schema}.contacts
-                        (resource_name, etag, name, nicknames, emails, phones, source,
+                        (resource_name, etag, name, nicknames, emails, phones, company, source,
                          preferred, used_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
                     ON CONFLICT (resource_name) DO UPDATE SET
                         etag = EXCLUDED.etag, name = EXCLUDED.name,
                         nicknames = EXCLUDED.nicknames,
                         emails = EXCLUDED.emails, phones = EXCLUDED.phones,
+                        company = EXCLUDED.company,
                         source = EXCLUDED.source, preferred = EXCLUDED.preferred,
                         used_at = EXCLUDED.used_at, updated_at = now()""",
                 (c["resource_name"], c.get("etag") or "", c.get("name") or "",
                  list(c.get("nicknames") or []),
                  list(c.get("emails") or []), list(c.get("phones") or []),
+                 c.get("company") or "",
                  c.get("source") or "google", c.get("preferred"), c.get("used_at")))
+
+    async def delete(self, resource_name: str) -> None:
+        """Drop one card from the mirror, with its identity links.
+
+        Only a full sweep used to reap, so a contact deleted between sweeps stayed in the mirror,
+        and a restart loaded it back for a person who no longer exists."""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.schema}.contact_links WHERE resource_name = %s",
+                (resource_name,))
+            await conn.execute(
+                f"DELETE FROM {self.schema}.contacts WHERE resource_name = %s", (resource_name,))
+
+    async def tombstone(self, resource_name: str, person: dict) -> None:
+        """Keep a copy of a card about to be deleted. Raises, so a failed copy stops the delete."""
+        from psycopg.types.json import Jsonb
+
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                f"""DELETE FROM {self.schema}.contact_tombstones
+                    WHERE deleted_at < now() - interval '30 days'""")
+            await conn.execute(
+                f"""INSERT INTO {self.schema}.contact_tombstones (resource_name, person)
+                    VALUES (%s, %s)""", (resource_name, Jsonb(person)))
 
     async def replace(self, contacts: list, sync_token: Optional[str], *, full: bool) -> None:
         """Mirror the snapshot. A FULL sweep is authoritative and reaps anything it did not see."""
@@ -145,18 +173,20 @@ class ContactStore:
             for c in contacts:
                 await conn.execute(
                     f"""INSERT INTO {self.schema}.contacts
-                            (resource_name, etag, name, nicknames, emails, phones, source,
+                            (resource_name, etag, name, nicknames, emails, phones, company, source,
                              preferred, used_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
                         ON CONFLICT (resource_name) DO UPDATE SET
                             etag = EXCLUDED.etag, name = EXCLUDED.name,
                             nicknames = EXCLUDED.nicknames,
                             emails = EXCLUDED.emails, phones = EXCLUDED.phones,
+                            company = EXCLUDED.company,
                             source = EXCLUDED.source, preferred = EXCLUDED.preferred,
                             used_at = EXCLUDED.used_at, updated_at = now()""",
                     (c["resource_name"], c.get("etag") or "", c.get("name") or "",
                      list(c.get("nicknames") or []),
                      list(c.get("emails") or []), list(c.get("phones") or []),
+                     c.get("company") or "",
                      c.get("source") or "google", c.get("preferred"), c.get("used_at")))
             if full and contacts:
                 keep = [c["resource_name"] for c in contacts]
@@ -228,4 +258,12 @@ class ContactStore:
         -- deployed schema never sees a column added to the definition above.
         ALTER TABLE {s}.contacts
             ADD COLUMN IF NOT EXISTS nicknames text[] NOT NULL DEFAULT '{{}}';
+        ALTER TABLE {s}.contacts
+            ADD COLUMN IF NOT EXISTS company text NOT NULL DEFAULT '';
+        CREATE TABLE IF NOT EXISTS {s}.contact_tombstones (
+            id            bigserial PRIMARY KEY,
+            resource_name text NOT NULL,
+            person        jsonb NOT NULL,
+            deleted_at    timestamptz NOT NULL DEFAULT now()
+        );
         """

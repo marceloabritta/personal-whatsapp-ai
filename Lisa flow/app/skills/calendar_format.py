@@ -112,6 +112,11 @@ def _guest_names(state: dict) -> dict:
         name = (info or {}).get("name")
         if name:
             out[email.lower()] = name
+    # Someone the contacts skill looked up for this booking.
+    for person in (state.get("seen_people") or {}).values():
+        for email in (person or {}).get("emails") or []:
+            if person.get("name"):
+                out.setdefault(email.lower(), person["name"])
     for a in state.get("side_effects") or []:
         email = (a or {}).get("email")
         name = (a or {}).get("name")

@@ -41,6 +41,16 @@ class Skill:
     only_self_chat: bool = False
     resolve_gate: Optional[Callable] = None
 
+    # The settings attribute that switches this whole skill on. Off, it cannot be routed to or called,
+    # and nothing about it reaches any other skill's prompt or schema. None = always on.
+    enabled_by: Optional[str] = None
+    # Only the owner's own message can bring a turn here. A loop already here stays here when someone
+    # else speaks, so another person's "ok" does not take the conversation away from it.
+    owner_only: bool = False
+    # The other skills this one may bring in, mid-loop, and hear back from (nodes/handoff.py). Both
+    # ends list each other, because the called skill hands back through the same field.
+    calls: set = field(default_factory=set)
+
     # Verbs that run OUT OF BAND: stripped from `actions` at the confirm node and dispatched
     # detached. They never gate, never render, never reach `respond`, and nothing in the reply path
     # awaits them. For work whose failure must cost the person in the chat nothing — an address-book

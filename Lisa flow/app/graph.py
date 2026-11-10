@@ -9,10 +9,12 @@ A programmatic `route` node picks the skill (state["domain"]) in code; `reason` 
 skill's prompt + schema (+ native tools). If it emits actions the skill's confirm/execute/respond
 path runs; otherwise it goes straight to act.
 
-  reason  -> confirm (has actions)          | act (none)
+  reason  -> confirm (has actions)          | handoff (calls another skill) | act (none)
   confirm -> execute (approved)             | reason (blocked, ask) | act
   execute -> respond
   respond -> reason (LLM readback, reason ②) | act (programmatic render / nothing to read)
+  act     -> END                            | handoff (a write's result is out, and more waits on it)
+  handoff -> reason (now in the other skill) | act / END (stopped)
 
 Confirmation and reply-assembly are the skill's policies, not graph defaults. Compiled WITH a
 checkpointer so each chat's thread state persists per thread_id. LangGraph OSS library."""
@@ -24,12 +26,13 @@ from langgraph.graph import END, StateGraph
 
 from .deps import Deps
 from .skills import resolve_gates as default_resolve_gates
-from .nodes.act import act_node
+from .nodes.act import act_node, route_after_act
 from .nodes.auto_transcribe import auto_transcribe_node, route_after_auto
 from .nodes.confirm import confirm_node, route_after_confirm
 from .nodes.context import context_node
 from .nodes.execute import execute_node
 from .nodes.gate import gate_node, route_after_gate
+from .nodes.handoff import handoff_node, route_after_handoff
 from .nodes.parse import parse_node
 from .nodes.reason import reason_node, route_after_reason
 from .nodes.resolve import resolve_pending_node, route_after_resolve
@@ -110,6 +113,7 @@ def build_graph(deps: Deps, checkpointer=None):
                 echoes=deps.echoes, settings=deps.settings, trace=deps.trace,
                 reaper=deps.reaper),
     )
+    g.add_node("handoff", partial(handoff_node, settings=deps.settings, trace=deps.trace))
 
     g.set_entry_point("parse")
     g.add_edge("parse", "gate")
@@ -132,7 +136,8 @@ def build_graph(deps: Deps, checkpointer=None):
         {"execute": "execute", "reason": "reason", "route": "route", "hold": "act"},
     )
     g.add_edge("route", "reason")
-    g.add_conditional_edges("reason", route_after_reason, {"confirm": "confirm", "act": "act"})
+    g.add_conditional_edges("reason", route_after_reason,
+                            {"confirm": "confirm", "handoff": "handoff", "act": "act"})
     g.add_conditional_edges(
         "confirm", route_after_confirm,
         {"execute": "execute", "reason": "reason", "act": "act"},
@@ -142,6 +147,8 @@ def build_graph(deps: Deps, checkpointer=None):
         "respond", route_after_respond,
         {"reason": "reason", "confirm": "confirm", "act": "act"},
     )
-    g.add_edge("act", END)
+    g.add_conditional_edges("act", route_after_act, {"handoff": "handoff", "end": END})
+    g.add_conditional_edges("handoff", route_after_handoff,
+                            {"reason": "reason", "act": "act", "end": END})
 
     return g.compile(checkpointer=checkpointer)

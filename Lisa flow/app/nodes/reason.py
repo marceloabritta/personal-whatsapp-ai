@@ -44,13 +44,17 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     # or silently dropped a guest from the roster it was rebuilding.
     context_block = None
     seen_contacts: dict = {}
+    seen_people: dict = {}
     if directory is not None:
         context_block, patch = context_block_for(
             domain, state, {"directory": directory, "settings": settings})
         seen_contacts = dict(patch.get("seen_contacts") or {})
+        seen_people = dict(patch.get("seen_people") or {})
 
+    stack = state.get("skill_stack") or []
     system = system_prompt_for(domain, settings, session_lang=locked_lang,
-                               context_block=context_block)
+                               context_block=context_block,
+                               called_by=stack[-1] if stack else None)
     schema = output_schema_for(domain, settings=settings)
     server_tools = server_tools_for(domain, settings)
     runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
@@ -69,6 +73,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
 
     actions = result.get("actions") or []
     workflow = result.get("workflow")
+    call = result.get("call") or None
 
     # Reasoning stream: the model's own turn — its stated rationale, the enforced-JSON decision,
     # and the metadata for the record.
@@ -79,7 +84,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
         reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
         request_id=result.get("provider_request_id"), usage=usage,
         tools=result.get("tool_calls") or [], actions=actions, latency_ms=latency_ms,
-        contacts_shown=len(seen_contacts) or None,
+        contacts_shown=len(seen_contacts) or len(seen_people) or None, call=call,
     )
 
     # NB: history is appended in `act` (the single place a *sent* message enters the thread),
@@ -90,6 +95,7 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
         "lang": result.get("lang"),
         "actions": actions,
         "workflow": workflow,
+        "call": call,
         "provider": settings.llm_provider,
         "model": runtime["model"],
         "provider_request_id": result.get("provider_request_id"),
@@ -103,6 +109,11 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
         # MERGE, never replace — the confirmation composer runs two nodes later and must still be
         # able to name someone the first pass surfaced (this is the seen_events rule).
         update["seen_contacts"] = {**(state.get("seen_contacts") or {}), **seen_contacts}
+    if seen_people:
+        # What is already here wins: a `find` read the whole card, and this block only re-surfaces
+        # the snapshot's fields of the same person. The other way round, the card about to overwrite
+        # his notes could no longer show him what they said.
+        update["seen_people"] = {**seen_people, **(state.get("seen_people") or {})}
     # Lock the session language on the FIRST pass after a tag (when it isn't set yet), so every
     # later read-back pass and window continuation is told to keep writing in it.
     if not locked_lang and result.get("lang"):
@@ -111,5 +122,8 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
 
 
 def route_after_reason(state: MessageState) -> str:
-    """Actions to run → confirm (the skill gates them); otherwise straight to act (send/close)."""
-    return "confirm" if state.get("actions") else "act"
+    """Actions to run → confirm (the skill gates them); a call with nothing to run first → handoff;
+    otherwise straight to act (send/close)."""
+    if state.get("actions"):
+        return "confirm"
+    return "handoff" if state.get("call") else "act"

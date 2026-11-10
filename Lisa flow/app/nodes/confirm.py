@@ -17,7 +17,7 @@ import logging
 import re
 
 from ..prompt import today_in
-from ..state import MessageState
+from ..state import HANDOFF_MARK, MessageState
 from ..trace import Trace
 from .act import AWAITING
 
@@ -53,7 +53,9 @@ def _loop_text(state: dict) -> str:
                 continue
             content = getattr(m, "content", "")
         if isinstance(content, str):
-            parts.append(content)
+            # A skill's request to another skill is the model talking too, under a "user" role.
+            if not content.startswith(HANDOFF_MARK):
+                parts.append(content)
         elif isinstance(content, list):  # media turns carry a block list
             parts.extend(b.get("text", "") for b in content if isinstance(b, dict))
     return "\n".join(p for p in parts if p)
@@ -95,7 +97,7 @@ async def confirm_node(
     policy = confirm_policies.get(domain)
     actions = state.get("actions") or []
     hops = int(state.get("tool_hops") or 0)
-    ctx = {"settings": settings, "reasoner": reasoner}
+    ctx = {"settings": settings, "reasoner": reasoner, "directory": directory}
 
     # --- side-effect verbs: stripped BEFORE the loop, gated here, never executed ------------
     # They must not gate, render, produce an observation or reach `respond`, so they leave the
@@ -127,9 +129,10 @@ async def confirm_node(
         # The node's RETURN value is invisible to code running inside the node, so the composer is
         # handed the stripped pairs directly rather than being expected to read what we return.
         # The owner's date goes in the same way, so the card can say "(amanhã)" next to the day.
+        # A policy that already said why this cannot be proposed gets no card for it.
         composed = (policy.compose(action, {**state, "side_effects": stripped,
                                             "owner_today": today_in(settings.calendar_timezone)})
-                    if pending is None else None)
+                    if pending is None and not decision.get("message") else None)
         if composed:
             pending, ask_message = action, composed
         else:
@@ -151,8 +154,10 @@ async def confirm_node(
     else:
         route = "act"
 
+    # A call sent with actions is what happens AFTER them, so it is spent here either way. With a
+    # read, the result comes back to the model, which simply asks again if it still wants to.
     update: dict = {"actions": approved, "tool_hops": hops, "confirm_route": route,
-                    "side_effects": stripped}
+                    "side_effects": stripped, "call": None}
     if observations:
         update["messages"] = observations
     repeated = False
@@ -210,6 +215,10 @@ async def confirm_node(
     # the address she used for that person forever.
     if update.get("pending_action") is not None:
         update["pending_side_effects"] = stripped
+        update["pending_call"] = state.get("call")  # rides with it too, for the same reason
+        # A new card is a new question: whatever was to follow the last write waits for no one now.
+        update["next_call"] = None
+        update["resume_caller"] = False
     elif stripped and directory is not None:
         handler = (tools or {}).get(domain)
         if handler is not None:

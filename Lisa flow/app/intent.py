@@ -90,6 +90,15 @@ _PROCEED_WORDS = {
                "atualize", "trocar", "troca", "troque", "update", "change"},
     "delete": {"cancelar", "cancela", "cancele", "apagar", "apaga", "apague", "excluir", "exclui",
                "exclua", "deletar", "deleta", "remover", "remove", "remova", "cancel", "delete"},
+    # Contact cards. Their own lists because the words differ, and one of the differences matters:
+    # "cancela" under "Apagar este contato?" means stop, so it is not in `contact_delete`.
+    "contact_create": {"salvar", "salva", "salve", "criar", "cria", "crie", "adicionar", "adiciona",
+                       "adicione", "guardar", "guarda", "guarde", "save", "create", "add"},
+    "contact_update": {"alterar", "altera", "altere", "mudar", "muda", "mude", "atualizar", "atualiza",
+                       "atualize", "trocar", "troca", "troque", "salvar", "salva", "salve",
+                       "update", "change", "save"},
+    "contact_delete": {"apagar", "apaga", "apague", "excluir", "exclui", "exclua", "deletar", "deleta",
+                       "remover", "remove", "remova", "borrar", "borra", "delete"},
 }
 # Declining a proposal. Deliberately NARROW: a word only belongs here if it cannot also mean
 # "yes" to the question being asked. "cancela" is the sharpest example and is excluded — on a

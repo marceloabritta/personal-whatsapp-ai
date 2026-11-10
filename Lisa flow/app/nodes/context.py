@@ -12,7 +12,7 @@ import asyncio
 
 from langchain_core.messages import RemoveMessage
 
-from ..carry import carried_yes, kept_on_carry
+from ..carry import _find_card, carried_yes, kept_on_carry
 from ..identity import is_own_message
 from ..skills.setup import setup_matcher
 from ..state import MessageState
@@ -415,7 +415,17 @@ async def context_node(
     fresh = [r for r in new
              if r.get("from_me") and r.get("id") not in prior_seen
              and not is_own_message(r.get("text") or "", owner)]
-    owner_replies = [(r.get("text") or "").strip() for r in fresh]
+    # A yes typed before the card existed is not an answer to it. One activation can now post a
+    # result and then a new card, so a second "sim" that arrived in between looks fresh to the next
+    # activation, and would approve a booking he had not seen. Read off the chat's own order.
+    held_card = state.get("pending_card")
+    answering = fresh
+    if settings.contacts_crud_on and held_card and not reset:
+        at = _find_card(records, held_card)
+        if at is not None:
+            later = {r.get("id") for r in records[at + 1:]}
+            answering = [r for r in fresh if r.get("id") in later]
+    owner_replies = [(r.get("text") or "").strip() for r in answering]
     seen_owner_ids = (prior_seen + [r["id"] for r in fresh if r.get("id")])[-200:]
 
     # A fresh tag under a card he already said yes to runs that write instead of dropping it
@@ -455,6 +465,10 @@ async def context_node(
         # turn's state — the "awaiting_answer" of the question he just answered.
         "llm_state": "keep_listening",
         "card_out": None,
+        "call": None,
+        "next_call": None,
+        "resume_caller": False,
+        "skill_calls": 0,
         "carried_yes": carried,
         "owner_replies": owner_replies,
         "seen_owner_ids": seen_owner_ids,
@@ -477,8 +491,11 @@ async def context_node(
         # Contact memory is checkpointed, not per-turn scratch (the same reason seen_event_ids
         # needs clearing), so a stale address or a pending write cannot bleed into the next loop.
         update["seen_contacts"] = {}
+        update["seen_people"] = {}
         update["side_effects"] = []
         update["pending_side_effects"] = []
+        update["skill_stack"] = []
+        update["pending_call"] = None
 
     if card_keys:
         prior = [] if reset else list(state.get("seen_chat_keys") or [])

@@ -18,6 +18,11 @@ from langgraph.graph.message import add_messages
 APPROVED_BY = "_approved_by"
 OWNER_YES = "owner_yes"
 
+# Opens every note one skill leaves for another (nodes/handoff.py). The model wrote that text, so it
+# is not evidence of anything: the grounding check skips it, or a made-up address in a skill's request
+# would ground itself (nodes/confirm.py `_loop_text`).
+HANDOFF_MARK = "[handoff] "
+
 
 class MessageState(TypedDict, total=False):
     # --- persisted memory (checkpointer) ---
@@ -42,6 +47,14 @@ class MessageState(TypedDict, total=False):
     # never leave a rejected address behind in the real address book. Both are checkpointed, so
     # both are cleared on tag-reset.
     seen_contacts: dict  # {email: {name, resource_name, n_emails}} surfaced this loop
+    # {resource_name: view} surfaced this loop; gates contact writes and feeds their cards. Keyed by
+    # the card, not the address, because most cards have no email at all.
+    seen_people: dict
+    # One skill calling another (nodes/handoff.py). `skill_stack` is who is waiting for an answer, so
+    # it outlives a turn: the called skill may need the owner to answer or approve something first.
+    # `pending_call` rides with a proposal and fires on the same yes, like pending_side_effects.
+    skill_stack: list  # [{domain, goal, workflow}], newest last; cleared on tag-reset
+    pending_call: Optional[dict]  # {skill, request} to carry out once the held write has run
     participant_phones: list  # phones that have spoken in this chat; the room, for the address book
     side_effects: list  # side-effect actions stripped this turn (feeds the guest-name renderer)
     pending_side_effects: list  # side effects waiting on the same yes as pending_action
@@ -49,6 +62,7 @@ class MessageState(TypedDict, total=False):
     # action it asked about (confirm.action_fingerprint). It is how a fresh tag finds the card in
     # the chat above and checks the owner's answer to it (carry.py).
     pending_card: Optional[dict]
+    spoke_after_card: bool  # she has said something since the last card went out
     # The owner's messages the resolver has already read this loop. An activation can ingest
     # messages that arrived after its own trigger; when their own activations run later, the
     # messages are not new and must not be answered (or approve something) a second time.
@@ -134,6 +148,13 @@ class MessageState(TypedDict, total=False):
     card_out: Optional[str]  # confirm sent a card this turn: the fingerprint of the action it asks about
     respond_route: str  # respond node's routing verdict: "reason" | "confirm" | "act"
     resolve_route: str  # resolve_pending node's verdict: "execute" (clean yes) | "route"
+
+    # handoff (per-activation scratch)
+    call: Optional[dict]  # {skill, request} the model asked for this pass
+    next_call: Optional[dict]  # the approved pending_call, fired once the write's result is out
+    resume_caller: bool  # a called skill's write just finished, so hand back to whoever called it
+    skill_calls: int  # handoffs this activation; bounds two skills calling each other forever
+    handoff_route: str  # handoff node's verdict: "reason" | "act" | "end"
 
     # act output
     reply: Optional[str]  # framed text actually sent

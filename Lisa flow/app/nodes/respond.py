@@ -70,6 +70,8 @@ async def respond_node(
     transient = bool(results) and any(r.get("error") == "transient" for r in results)
 
     update: dict = {}
+    if not all_ok:
+        update["next_call"] = None  # the next step was approved on the strength of this one working
     if policy is None:
         route = "act"
     elif getattr(policy, "mode", "llm") == "code" and all_ok and lang in LANGS:
@@ -93,6 +95,12 @@ async def respond_node(
             route = "reason" if (ran and hops < settings.max_tool_actions) else "act"
     else:  # LLMReadback, a non-transient failure, or an unsupported language → model reads back
         route = "reason" if (ran and hops < settings.max_tool_actions) else "act"
+
+    # A called skill just finished. A verb that renders in code leaves no model pass that knows it has
+    # to hand back, whichever way this message gets written, so the code does: once it is out, the
+    # caller carries on.
+    if getattr(policy, "mode", "llm") == "code" and all_ok:
+        update["resume_caller"] = bool(state.get("skill_stack")) and not state.get("next_call")
 
     trace.code(
         tid, node="respond", loop_id=state.get("loop_id"), domain=domain, verb=verb,

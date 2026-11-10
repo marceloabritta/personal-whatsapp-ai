@@ -40,13 +40,24 @@ _CLASSIFY_SYSTEM = (
     '- "setup": {owner} configuring the assistant itself — which chats have their voice notes '
     "transcribed automatically, and in which direction; listing, changing or removing those "
     'chats. Only ever offered in {owner}\'s chat with himself.\n'
+    '{contacts_rule}'
     '- "web": anything else — general questions, chit-chat, or looking something up online.\n'
     'Respond ONLY as JSON, e.g. {"domain": "calendar"}.'
 )
+_CONTACTS_RULE = (
+    '- "contacts": {owner}\'s address book, Google Contacts — looking up someone\'s number or '
+    "email, saving a new person, or changing or deleting what is on a card. \"atualiza o email do "
+    "Felipe\", \"salva esse número\", \"qual o telefone da Ana?\", \"apaga esse contato\" are "
+    "contacts. Putting a person on an event as a guest is calendar, even when it takes their "
+    "email.\n"
+)
 
 
-def _classify_system(owner: str) -> str:
-    return _CLASSIFY_SYSTEM.replace("{owner}", owner or "the owner")
+def _classify_system(owner: str, domains: list[str] | None = None) -> str:
+    # The rule only exists when the domain does: told about an option its schema then refuses, the
+    # classifier has to land a contacts request somewhere it never would otherwise.
+    rule = _CONTACTS_RULE if domains and "contacts" in domains else ""
+    return _CLASSIFY_SYSTEM.replace("{contacts_rule}", rule).replace("{owner}", owner or "the owner")
 
 
 def _neutral(messages: list) -> list[dict]:
@@ -69,7 +80,7 @@ async def classify_domain(state: dict, domains: list[str], reasoner, settings) -
     if not convo:  # no thread yet (e.g. a unit test) → fall back to the bare text
         convo = [{"role": "user", "content": state.get("text") or ""}]
     data = await reasoner.classify(
-        system=_classify_system(settings.owner_name),
+        system=_classify_system(settings.owner_name, domains),
         messages=convo,
         schema=_classify_schema(domains),
         max_tokens=32,
@@ -96,10 +107,14 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     text = state.get("text") or ""
     # Skills that only exist in the owner's chat with himself are invisible elsewhere — checked
     # before anything else, so neither a matcher nor the classifier can reach them.
-    allowed = routable(state, SKILLS)
+    allowed = routable(state, SKILLS, settings)
+    # An `owner_only` skill is not somewhere anybody else can send a turn. It stays in `allowed`
+    # for step 2, so a loop already there is not knocked out of it by what someone else says.
+    from_owner = bool(state.get("from_me"))
+    entry = [n for n in allowed if from_owner or not SKILLS[n].owner_only]
 
     # 1. An explicit matcher signal always wins — even to switch domain mid-loop.
-    for name in allowed:
+    for name in entry:
         skill = SKILLS[name]
         if skill.matcher is not None and skill.matcher(text) == "yes":
             return name, "matcher"
@@ -116,7 +131,7 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     if reasoner is None:
         return settings.default_domain, "default"
     try:
-        return await classify_domain(state, allowed, reasoner, settings), "classifier"
+        return await classify_domain(state, entry, reasoner, settings), "classifier"
     except Exception as exc:  # any classifier/transport error → safe default
         log.warning("domain classifier failed (%s); defaulting to %s", exc, settings.default_domain)
         return settings.default_domain, "default"

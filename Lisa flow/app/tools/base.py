@@ -13,6 +13,7 @@ class ActionResult(TypedDict, total=False):
     summary: str             # one line the model reads back (appended to the thread)
     data: Optional[dict]     # structured payload, e.g. {"items": [...]}, {"event_id": ...}
     error: Optional[str]     # classification when not ok: "auth" | "not_found" | "validation" | str
+    private: bool            # the summary reads out someone's details: the model sees it, the log does not
 
 
 class ToolHandler(Protocol):

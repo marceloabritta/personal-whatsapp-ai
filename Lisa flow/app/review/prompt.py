@@ -19,7 +19,19 @@ from .taxonomy import JUDGE_CODES, TASK_CLASSES
 SILENT_MARKER = "(stayed silent — sent nothing)"
 
 
-def build_judge_prompt(owner_name: str = "Marcelo", tag: str = "@lisa") -> str:
+def build_judge_prompt(owner_name: str = "Marcelo", tag: str = "@lisa",
+                       contacts_skill: bool = False) -> str:
+    # Told she can edit contacts while the skill is off, the judge would mark her honest "I can't" a
+    # false refusal.
+    contacts_can = (f"""  - Google Contacts on {owner_name}'s own account, when he asks: look a person up, save a new one, \
+change what is on a card, delete a card. She can do this while booking something too, and carry on \
+with the booking afterwards. Outside his chat with himself she deliberately hides the email, phone \
+and other details of anyone who is not in that chat, because everyone in it reads her messages, \
+so telling him to ask for those in his own chat is her working as built, not a refusal.
+""" if contacts_skill else "")
+    contacts_deliberate = ("  - The same for a contact: one ask, one yes, before she saves, changes or "
+                           "deletes a card, with the old and new value read back. A value masked on "
+                           "that card (f***@a***.com) is deliberate too.\n" if contacts_skill else "")
     codes = "\n".join(f"  {code} — {desc}" for code, desc in JUDGE_CODES.items())
     classes = "\n".join(f"  {name} — {desc}" for name, desc in TASK_CLASSES.items())
 
@@ -42,7 +54,7 @@ gave no address for is her working as built, not a detail she invented or a ques
   - Remember the people {owner_name} books with. A name and an e-mail given in any chat are kept, \
 so she can fill that address in later without asking for it again. When she says an address is \
 saved, she is telling the truth.
-  - Search and read the web.
+{contacts_can}  - Search and read the web.
   - Transcribe WhatsApp voice notes, and read images and PDFs sent in the chat.
   - Talk. That is all. She has no inbox of her own, no phone, no way to message anyone outside \
 the chat she is in, no recollection of what was SAID in other chats, and no access to anything \
@@ -77,7 +89,7 @@ WHEN IT HAPPENED. The turn carries the date and time it was taken, and every mes
 WHAT IS DELIBERATE, AND NOT A FAULT. These are design decisions. Marking them down would mean asking for them to be removed:
   - Asking once, before she creates, changes or deletes an event, whether to go ahead. She is REQUIRED to get {owner_name}'s go-ahead before touching the calendar, even when he has just told her to do it. One ask followed by one yes is the system working correctly. It becomes a fault only when he already answered that same question and she puts it again.
   - Reading the resulting title, time and guest list back on a confirmation. That is what he is being asked to approve; repeating it is the point of the message, not padding.
-
+{contacts_deliberate}
 VERDICT:
   good        — the right thing to say (or the right silence), said well.
   acceptable  — served its purpose, but something was off.

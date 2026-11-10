@@ -125,9 +125,17 @@ async def act_node(
     # model text (not the framed header) is what the model should see it said.
     if body and sent:
         update["messages"] = [{"role": "assistant", "content": body.rstrip()}]
+    if sent:
+        update["spoke_after_card"] = not state.get("card_out")
     if sent and state.get("card_out"):
         # Which message the card was, so a fresh tag can find it in the chat above and read the
         # owner's answer under it. The framed text is the fallback when Evolution gave no id.
         update["pending_card"] = {"id": sent_id or None, "ts": int(time.time()),
                                   "text": reply, "sig": state["card_out"]}
     return update
+
+
+def route_after_act(state: MessageState) -> str:
+    """Almost every turn ends here. The exception is a write that has more waiting behind it: this
+    message is its result, and now the next step, or the skill that called this one, carries on."""
+    return "handoff" if state.get("next_call") or state.get("resume_caller") else "end"

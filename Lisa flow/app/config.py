@@ -139,13 +139,20 @@ class Settings(BaseSettings):
     contacts_write_attempts: int = 3          # OUTBOX retries; the API call itself is always 1
     # Q1: Lisa may create people — but only on a phone-confirmed identity (see Directory).
     contacts_create_people: bool = True
+    # The contacts skill: find, create, update and delete on his say-so, card by card. Separate from
+    # contacts_create_people, which is about what she may do silently while booking something. Ships
+    # OFF: with it off nothing about the skill reaches a schema or a prompt, and that includes the
+    # calendar's ability to call it.
+    contacts_crud_enabled: bool = False
+    # Handoffs between skills per activation (nodes/handoff.py). One lookup and back takes two.
+    max_skill_calls: int = 4
 
     # Session review — a second model grades every turn once a session closes (app/review/).
     # OFF in code so this module ships inert to any flow that has not opted in; turned on per
     # service by env. Everything here is observation only: it never touches the reply path.
     review_enabled: bool = False
     review_scope_version: str = ""      # only review loops with this prompt_version ("" = all)
-    review_judge_version: str = "v4"    # the rubric's identity; bump to re-score history
+    review_judge_version: str = "v5"    # the rubric's identity; bump to re-score history
     review_model: str = "claude-opus-4-8"   # NOT claude_model — a model judging itself favours it
     review_effort: str = "medium"
     review_max_tokens: int = 2048
@@ -155,7 +162,13 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-11-02-await-answer"
+    prompt_version: str = "2026-11-05-contacts"
+
+    @property
+    def contacts_crud_on(self) -> bool:
+        """The contacts skill needs the address book behind it, as well as its own switch."""
+        return bool(self.contacts_crud_enabled and self.contacts_enabled
+                    and self.google_contacts_refresh_token)
 
     @property
     def review_settle_window(self) -> float:
