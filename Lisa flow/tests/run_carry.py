@@ -326,6 +326,71 @@ async def burst_checks() -> None:
     check("[sim + correction] and nothing is left held", st.get("pending_action") is None)
 
 
+async def refusal_checks() -> None:
+    print("\nHe calls the card off in his own words — and his next ok runs nothing")
+
+    # "não cancela", "pode deixar", "não, deixa": no word list catches every way of saying no, so
+    # each is "other", the fixing loop, and the held write stays. The model can only answer him
+    # ("ok, não vou cancelar"); it has no way to withdraw the write. His "ok" to that answer then
+    # read as a yes to the card, and ran the write he had just refused.
+    c = Chat()
+    c.cal.responses["find"] = {"ok": True, "summary": "1 [id=E7]", "data": {"items": [
+        {"event_id": "E7", "title": "Dentista", "start": START}]}}
+    c.cal.responses["delete"] = {"ok": True, "summary": "cancelled", "data": {
+        "event_id": "E7", "title": "Dentista", "start": START, "had_attendees": False}}
+    c.stub.script = [{"actions": [{"task": "calendar.find", "query": "dentista"}],
+                      "workflow": {"task": "calendar.delete", "known_inputs": []}}]
+    st = await c.say("@mary cancela meu dentista")
+    check("[não cancela] the cancellation card went out",
+          c.evo.cards() == 1 and (st.get("pending_action") or {}).get("task") == "calendar.delete")
+    c.stub.script = [{"message": "Ok, não vou cancelar."}]
+    await c.say("não cancela")
+    c.stub.script = [{"message": None}]
+    st = await c.say("ok")
+    check("[não cancela] his ok to her answer cancels nothing", c.cal.n("delete") == 0,
+          str(st.get("action_results")))
+    check("[não cancela] and sends no cancellation", not any("Cancelled" in t for _, t in c.evo.sent))
+
+    for refusal in ("pode deixar", "não, deixa"):
+        c = Chat()
+        await c.card()
+        c.stub.script = [{"message": "Tudo bem, não vou agendar."}]
+        await c.say(refusal)
+        c.stub.script = [{"message": None}]
+        await c.say("ok")
+        check(f"[{refusal}] his ok to her answer books nothing", c.cal.n("create") == 0)
+        await c.say("sim")
+        check(f"[{refusal}] nor does a sim after it", c.cal.n("create") == 0)
+
+    # The same rule, from the other side: a yes after she answered a question is an answer to
+    # her answer. The model reads it and asks again, and that card must go out — the repeat
+    # suppressor would otherwise swallow it, and every yes after it would be read the same way.
+    c = Chat()
+    await c.card()
+    c.stub.script = [{"message": "Fica na Arlene Menna Barreto 253."}]
+    await c.say("qual o endereço mesmo?")
+    c.stub.script = [{"actions": [dict(CREATE)]}]  # it re-proposes the same booking
+    calls = len(c.stub.calls)
+    await c.say("pode agendar")
+    check("[after her answer] his yes goes to the model, not to the old card",
+          c.cal.n("create") == 0 and len(c.stub.calls) == calls + 1)
+    check("[after her answer] the same card goes out again", c.evo.cards() == 2,
+          f"{c.evo.cards()} cards")
+    st = await c.say("sim")
+    check("[after her answer] his sim under it books it", c.cal.n("create") == 1)
+    check("[after her answer] and nothing is left held", st.get("pending_action") is None)
+
+    # A real correction still re-proposes, and his yes to the corrected card books that.
+    c = Chat()
+    await c.card()
+    c.stub.script = [{"actions": [{**CREATE, "start": "2027-03-05T16:00:00-03:00"}]}]
+    await c.say("sim mas às 16h")
+    check("[correction] 'sim mas às 16h' re-proposes", c.evo.cards() == 2 and c.cal.n("create") == 0)
+    await c.say("sim")
+    check("[correction] and his sim books the 16h",
+          c.cal.n("create") == 1 and c.cal.calls[-1][1].get("start", "").startswith("2027-03-05T16"))
+
+
 def unit_checks() -> None:
     print("\nThe carry rules and the yes words — units")
     s = Settings(evolution_apikey="x")
@@ -414,6 +479,7 @@ async def main() -> None:
     await carry_checks()
     await no_carry_checks()
     await burst_checks()
+    await refusal_checks()
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
 

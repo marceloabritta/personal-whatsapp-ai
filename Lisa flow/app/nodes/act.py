@@ -126,6 +126,8 @@ async def act_node(
     if body and sent:
         update["messages"] = [{"role": "assistant", "content": body.rstrip()}]
     if sent:
+        # Is her card still the last thing she said? A yes answers her last message, so once she
+        # has said anything else, the card is no longer what he is saying yes to (resolve.py).
         update["spoke_after_card"] = not state.get("card_out")
     if sent and state.get("card_out"):
         # Which message the card was, so a fresh tag can find it in the chat above and read the
