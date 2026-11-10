@@ -92,6 +92,25 @@ async def lifespan(app: FastAPI):
             log.warning("transcribe-roster disabled: %s", exc)
             rstore = None
 
+    # Meeting presets — durable tier when a DB is present, in-memory otherwise. Best-effort: a
+    # store that cannot open or load leaves every preset reading as today's default, which is
+    # exactly how Lisa booked before presets existed.
+    pstore = None
+    if s.database_url and deps.presets is not None:
+        from .presets import PresetStore
+
+        pstore = PresetStore(s.database_url, schema=s.log_schema)
+        try:
+            await pstore.open()
+            deps.presets.store = pstore
+            await deps.presets.refresh(force=True)
+            deps.presets.start()
+            log.info("%s", '{"boot":"meeting-presets"}')
+        except Exception as exc:  # presets must never block startup
+            log.warning("meeting-presets durable tier disabled: %s", exc)
+            deps.presets.store = None
+            pstore = None
+
     # The owner's own JID, for recognising his chat with himself (where setup runs). Configured
     # explicitly, or asked of Evolution once at boot so a fresh deployment needs no hand-copied
     # phone number. Unknown → no chat is the self-chat and setup is simply unreachable.
@@ -189,6 +208,10 @@ async def lifespan(app: FastAPI):
             await reaper.aclose()
             await reviewer.store.aclose()
         await deps.roster.aclose()
+        if deps.presets is not None:
+            await deps.presets.aclose()
+        if pstore is not None:
+            await pstore.aclose()
         if rstore is not None:
             await rstore.aclose()
         if tstore is not None:

@@ -39,8 +39,9 @@ MENU = _verb([], {})
 # No inputs: it is the same answer every time, which is the point of it being a verb at all.
 HELP = _verb([], {})
 
-# list — what is enrolled right now. `item` scopes it to one setup item (only "transcription"
-# exists today) and is optional because the bare list is the useful default.
+# list — what is configured right now. `item` scopes it to one setup item ("transcription", or
+# "meetings" when presets are on) and is optional because the bare list — everything — is the
+# useful default.
 LIST = _verb([], {"item": _STR})
 
 # resolve — find one of the owner's GROUPS by name. A contact is never resolved here: it is
@@ -70,7 +71,30 @@ UPDATE = _verb(
 # remove — drop a rule. It stops being transcribed and disappears from the list.
 REMOVE = _verb([], {"ordinal": _INT, "chat_key": _STR, "confirmed": _CONFIRMED})
 
+# --- meeting presets (gated on PRESETS_ENABLED; see skills/setup.py gated_verbs) -------------
+#
+# Shown with `list` and `item: "meetings"` — no read verb of their own.
+
+# set_presets — the three settings, any subset in ONE action ("30 minutes, no video" is one
+# card, not two). None is required: a contract that demanded all three would make the model
+# invent the two he did not mention. The handler refuses an action that carries none.
+SET_PRESETS = _verb(
+    [],
+    {"meeting_minutes": _INT, "video_call": _BOOL, "notify_guests": _BOOL,
+     "confirmed": _CONFIRMED},
+)
+
+# save_place — a named address. Saving a name that exists replaces its address. Places are
+# addressed BY NAME, never by number: the numbers on the list belong to the chats, and a place
+# verb that took an ordinal would let "remove 2" mean two different things.
+SAVE_PLACE = _verb(["name", "address"],
+                   {"name": _STR, "address": _STR, "confirmed": _CONFIRMED})
+
+# remove_place — forget a named address.
+REMOVE_PLACE = _verb(["name"], {"name": _STR, "confirmed": _CONFIRMED})
+
 SETUP_TASK_SCHEMAS = {
     "menu": MENU, "help": HELP, "list": LIST, "resolve": RESOLVE,
     "enroll": ENROLL, "update": UPDATE, "remove": REMOVE,
+    "set_presets": SET_PRESETS, "save_place": SAVE_PLACE, "remove_place": REMOVE_PLACE,
 }

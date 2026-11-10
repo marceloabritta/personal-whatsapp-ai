@@ -133,7 +133,7 @@ services:
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
       WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-11-05-contacts"
+      PROMPT_VERSION: "2026-11-10-meeting-presets"
       # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
       # a chat is enrolled via "@lisa setup" in the chat with myself.
       AUTO_TRANSCRIBE_ENABLED: "true"
@@ -142,11 +142,14 @@ services:
       AUTO_TRANSCRIBE_REPORT_FAILURES: "false"
       AUTO_TRANSCRIBE_QUOTE_REPLY: "true"
       SETUP_WINDOW_SECONDS: "300"
+      # Meeting presets, set from "@lisa setup": standard length, video call, guest emails and
+      # saved places. Stored in lisa_log.owner_presets; an unset preset books as before.
+      PRESETS_ENABLED: "true"
       # Session review — grades each turn once a session closes (app/review/). Reads the log,
       # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
-      REVIEW_SCOPE_VERSION: "2026-11-05-contacts"
+      REVIEW_SCOPE_VERSION: "2026-11-10-meeting-presets"
       REVIEW_JUDGE_VERSION: "v5"
       REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).

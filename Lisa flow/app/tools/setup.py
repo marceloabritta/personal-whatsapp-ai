@@ -1,4 +1,4 @@
-"""The setup tool — CRUD over the auto-transcription roster.
+"""The setup tool — CRUD over the auto-transcription roster, and the owner's meeting presets.
 
 One handler behind the `execute` node. It never raises into the graph: every failure comes back
 as an ActionResult with `ok=False` and a classified `error`, so the reply path can speak
@@ -15,6 +15,9 @@ import logging
 from typing import Any, Optional
 
 from .. import chatfind
+from ..presets import (
+    MAX_ADDRESS, MAX_MINUTES, MAX_NAME, MEETING_MINUTES, MIN_MINUTES, NOTIFY_GUESTS, VIDEO_CALL,
+)
 from ..roster import (
     SCOPE_KIND, make_rule, make_scope, normalize_direction, normalize_scope,
 )
@@ -29,7 +32,7 @@ DESCRIBE = ("Configure which chats have their voice notes transcribed automatica
 
 GUIDANCE = """You are running SETUP: {owner_name} is configuring how his assistant behaves. This only ever happens in his chat with himself, so there is no one else in the conversation and no one else to consider.
 
-One thing is configurable today: **Transcription** — which chats get their voice notes transcribed automatically, and in which direction. A chat is set to one of exactly three directions. **Always offer them as this numbered list, in this order**, so he can answer with a single digit:
+**Transcription** — which chats get their voice notes transcribed automatically, and in which direction. A chat is set to one of exactly three directions. **Always offer them as this numbered list, in this order**, so he can answer with a single digit:
 
 1. **inbound** — audio the other person sends
 2. **outbound** — audio {owner_name} sends
@@ -56,33 +59,102 @@ Working with the list:
 
 Confirmation. `enroll`, `update` and `remove` all change his configuration, so they need his go-ahead. Emit the action with `confirmed: false` and say nothing about it — the system composes the confirmation question, shows it to him, and runs the action itself when he agrees. Never claim something is registered before it has run; a result line tells you it happened.
 
+While setup is open, every message he sends without tagging you comes here. If one is not about configuration — a meeting to book, a question — do not try to handle it: say in one line that setup is open, and that he should tag you with the request.
+
 Keep every message short. State what changed, or ask the one question you need."""
 
-# The setup items. A second item (quiet hours, reply language) drops in here.
-ITEMS = [
-    {"key": "transcription", "title": "Transcription",
-     "summary": "Auto-transcribe voice notes — per chat, or across all contacts / all groups."},
-]
+# Appended to GUIDANCE only when presets are ENABLED — with the feature off the model must not
+# be told about verbs its schema does not have.
+PRESETS_GUIDANCE = """**Meetings** — {owner_name}'s presets for the meetings you book for him. Four of them:
+
+- **Standard length** — how many minutes a meeting lasts when he gives no end. `setup.set_presets` with `meeting_minutes`, a whole number: "half an hour" is 30, "1h" is 60.
+- **Video call** — whether a meeting with no place gets a Google Meet link. `video_call: true` (on, the default) or `false`.
+- **Guest emails** — whether the guests are emailed the invite, and later its changes and cancellation. `notify_guests: true` (on, the default) or `false`.
+- **Places** — named addresses ("casa", "the office") so he can book a meeting at one by name. `setup.save_place` with `name` and `address`; `setup.remove_place` with `name`. Saving a name that already exists replaces its address. Keep the name the way he said it. Write the address EXACTLY as he gave it — never complete it, correct it or look it up. If he gives a name with no address, ask for the address.
+
+To show them: `setup.list` with `item: "meetings"`. When he picks Meetings from the menu, that is the call.
+
+Several settings in one sentence ("30 minutes, and no video") are ONE `setup.set_presets` carrying both fields — never two actions. Send only the fields he mentioned.
+
+Places are never numbered. The numbers on the transcription list belong to the chats, so never pass one to a place verb, and never use a place's position as its name.
+
+`set_presets`, `save_place` and `remove_place` change his configuration too: `confirmed: false`, say nothing, and the system asks him."""
+
+# The setup items, in menu order. A further item (quiet hours, reply language) drops in here.
+TRANSCRIPTION_ITEM = {
+    "key": "transcription", "title": "Transcription",
+    "summary": "Auto-transcribe voice notes — per chat, or across all contacts / all groups.",
+}
+MEETINGS_ITEM = {
+    "key": "meetings", "title": "Meetings",
+    "summary": "Standard length, video call, guest emails, and your saved places.",
+}
+ITEMS = [TRANSCRIPTION_ITEM]
+
+
+def items_for(settings) -> list[dict]:
+    """The menu for these settings. Meetings exists only when presets are on."""
+    out = [TRANSCRIPTION_ITEM]
+    if getattr(settings, "presets_enabled", False):
+        out.append(MEETINGS_ITEM)
+    return out
+
+
+# What `list`'s `item` may be called. Anything unrecognised lists everything, which is never
+# wrong — only longer.
+_ITEM_WORDS = {
+    "transcription": ("transcri", "audio", "voice"),
+    "meetings": ("meet", "reuni", "preset", "padr", "place", "local", "lugar", "ender",
+                 "address", "calend", "agenda"),
+}
+
+
+def normalize_item(value: str | None) -> Optional[str]:
+    """"transcription" | "meetings" | None (= everything)."""
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    for item, stems in _ITEM_WORDS.items():
+        if any(s in text for s in stems):
+            return item
+    return None
 
 _DIRECTION_HELP = 'direction must be one of: inbound, outbound, both (shown as "in & out")'
 
 
+def presets_summary(snap: dict) -> str:
+    """The presets as the MODEL reads them in a result line."""
+    places = "; ".join(f"{p['name']} = {p['address']}" for p in snap.get("places") or [])
+    return (f"Meetings — standard length {snap[MEETING_MINUTES]} min; "
+            f"video call {'on' if snap[VIDEO_CALL] else 'off'}; "
+            f"guest emails {'on' if snap[NOTIFY_GUESTS] else 'off'}; "
+            f"places: {places or 'none saved'}.")
+
+
 class RosterService:
-    """Local handler for the six setup verbs. `roster` and `evolution` are attached after
+    """Local handler for the setup verbs. `roster`, `evolution` and `presets` are attached after
     construction by deps (the skills fan-out builds handlers from settings alone)."""
 
-    _VERBS = ("menu", "help", "list", "resolve", "enroll", "update", "remove")
+    _VERBS = ("menu", "help", "list", "resolve", "enroll", "update", "remove",
+              "set_presets", "save_place", "remove_place")
+    _PRESET_VERBS = ("set_presets", "save_place", "remove_place")
 
-    def __init__(self, settings, *, roster: Any = None, evolution: Any = None) -> None:
+    def __init__(self, settings, *, roster: Any = None, evolution: Any = None,
+                 presets: Any = None) -> None:
         self.s = settings
         self.roster = roster
         self.evolution = evolution
+        self.presets = presets
         self._groups_cache: Optional[list[dict]] = None
 
     async def run(self, verb: str, inputs: dict) -> ActionResult:
         if verb not in self._VERBS:
             return {"ok": False, "error": "unknown_verb", "summary": f"no setup verb {verb!r}"}
-        if self.roster is None:
+        if verb in self._PRESET_VERBS:
+            if self.presets is None:
+                return {"ok": False, "error": "store_unavailable",
+                        "summary": "Meeting presets are not available."}
+        elif self.roster is None:
             return {"ok": False, "error": "store_unavailable",
                     "summary": "Setup is not available — the roster is not configured."}
         try:
@@ -94,8 +166,9 @@ class RosterService:
 
     # --- reads ---------------------------------------------------------------------------
     async def _menu(self, inputs: dict) -> ActionResult:
-        return {"ok": True, "data": {"items": list(ITEMS)},
-                "summary": "Setup items: " + ", ".join(i["title"] for i in ITEMS)}
+        items = items_for(self.s) if self.presets is not None else list(ITEMS)
+        return {"ok": True, "data": {"items": items},
+                "summary": "Setup items: " + ", ".join(i["title"] for i in items)}
 
     async def _help(self, inputs: dict) -> ActionResult:
         return {"ok": True, "data": {"help": True},
@@ -103,7 +176,23 @@ class RosterService:
                            "or all contacts / all groups."}
 
     async def _list(self, inputs: dict) -> ActionResult:
-        """Everything configured, numbered continuously across all three sections — blanket
+        """What is configured. With no `item`, everything: the transcription list, then — when
+        presets are on — the meeting presets beneath it. `item: "meetings"` is the presets alone,
+        and publishes no ordinals, so the chat numbering from the last list still stands."""
+        item = normalize_item(inputs.get("item"))
+        if item == "meetings" and self.presets is not None:
+            snap = await self._presets_snapshot()
+            return {"ok": True, "data": {"presets": snap, "item": "meetings"},
+                    "summary": presets_summary(snap)}
+        res = await self._list_transcription()
+        if item is None and self.presets is not None:
+            snap = await self._presets_snapshot()
+            res["data"]["presets"] = snap
+            res["summary"] = f"{res['summary']} | {presets_summary(snap)}"
+        return res
+
+    async def _list_transcription(self) -> ActionResult:
+        """Everything enrolled, numbered continuously across all three sections — blanket
         rules first, then contacts, then groups. The ordinals are published in `data` so the
         execute node can remember them; that is what makes "edit 5" resolvable."""
         await self._sync()
@@ -251,6 +340,73 @@ class RosterService:
         return {"ok": True,
                 "data": {**gone, "remaining": remaining, "removed": True},
                 "summary": f"{label} removed. {len(remaining)} chat(s) still enrolled."}
+
+    # --- meeting presets -----------------------------------------------------------------
+    async def _set_presets(self, inputs: dict) -> ActionResult:
+        values: dict = {}
+        if inputs.get("meeting_minutes") is not None:
+            minutes = inputs["meeting_minutes"]
+            if (isinstance(minutes, bool) or not isinstance(minutes, int)
+                    or not MIN_MINUTES <= minutes <= MAX_MINUTES):
+                return {"ok": False, "error": "invalid_value",
+                        "summary": f"The standard length must be a whole number of minutes, "
+                                   f"{MIN_MINUTES} to {MAX_MINUTES}."}
+            values[MEETING_MINUTES] = minutes
+        for key in (VIDEO_CALL, NOTIFY_GUESTS):
+            if inputs.get(key) is not None:
+                if not isinstance(inputs[key], bool):
+                    return {"ok": False, "error": "invalid_value",
+                            "summary": f"{key} must be true or false."}
+                values[key] = inputs[key]
+        if not values:
+            return {"ok": False, "error": "validation",
+                    "summary": "Nothing to change — give a length in minutes, video call on/off, "
+                               "or guest emails on/off."}
+        before = await self._presets_snapshot()
+        after = await self.presets.set_many(values)
+        changed = {k: {"from": before[k], "to": after[k]} for k in values}
+        return {"ok": True, "data": {"presets": after, "changed": changed},
+                "summary": "Meeting presets saved: " + "; ".join(
+                    f"{k} {c['from']} -> {c['to']}" for k, c in changed.items())}
+
+    async def _save_place(self, inputs: dict) -> ActionResult:
+        name = " ".join((inputs.get("name") or "").split())
+        address = " ".join((inputs.get("address") or "").split())
+        if not name or not address:
+            return {"ok": False, "error": "validation",
+                    "summary": "A place needs a name and an address."}
+        if len(name) > MAX_NAME or len(address) > MAX_ADDRESS:
+            return {"ok": False, "error": "invalid_value",
+                    "summary": f"Keep the name under {MAX_NAME} characters and the address "
+                               f"under {MAX_ADDRESS}."}
+        await self._presets_snapshot()  # current before deciding whether this is a replacement
+        place, before = await self.presets.save_place(name, address)
+        return {"ok": True,
+                "data": {"place": place, "before": before, "existed": before is not None,
+                         "presets": self.presets.snapshot()},
+                "summary": (f"Place {place['name']} changed: {before['address']} -> "
+                            f"{place['address']}." if before else
+                            f"Place {place['name']} saved: {place['address']}.")}
+
+    async def _remove_place(self, inputs: dict) -> ActionResult:
+        name = (inputs.get("name") or "").strip()
+        await self._presets_snapshot()
+        gone = await self.presets.remove_place(name) if name else None
+        if gone is None:
+            names = ", ".join(p["name"] for p in self.presets.places()) or "none"
+            return {"ok": False, "error": "not_found",
+                    "summary": f"There is no saved place called {name!r}. Saved places: {names}."}
+        return {"ok": True,
+                "data": {"place": gone, "removed": True, "presets": self.presets.snapshot()},
+                "summary": f"Place {gone['name']} removed."}
+
+    async def _presets_snapshot(self) -> dict:
+        """The presets as they stand, re-read first so a write never decides on a stale view."""
+        try:
+            await self.presets.refresh(force=True)
+        except Exception as exc:  # a stale snapshot beats a failed turn
+            log.warning("presets refresh before setup op failed: %s", exc)
+        return self.presets.snapshot()
 
     # --- helpers -------------------------------------------------------------------------
     async def _sync(self) -> None:

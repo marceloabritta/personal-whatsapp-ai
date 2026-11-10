@@ -9,8 +9,10 @@ from __future__ import annotations
 import difflib
 import unicodedata
 
+from ..presets import MEETING_MINUTES
 from ..tools.calendar import (
-    CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DESCRIBE, GUIDANCE, GoogleCalendarService,
+    CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DEFAULTS_GUIDANCE, DESCRIBE, GUIDANCE,
+    GoogleCalendarService, apply_presets,
 )
 from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
@@ -99,13 +101,62 @@ def calendar_matcher(text: str, *, threshold: float = 0.86) -> str:
     return "no"
 
 
+def presets_block(presets, owner: str) -> str | None:
+    """The owner's presets, as the model reads them — only what differs from the calendar
+    instructions' own defaults, plus the saved places. None when nothing does, so with nothing
+    set the prompt is byte-for-byte the pre-presets one.
+
+    The system applies the length, the video call and the guest emails itself (apply_presets);
+    the model is told them so that what it says and the explicit flags it sends agree with them.
+    The places are the part it must USE: "at my house" has to become an address, and only the
+    model can tell that "minha casa" means the place he saved as "casa"."""
+    if presets is None:
+        return None
+    lines: list[str] = []
+    if presets.is_set(MEETING_MINUTES):
+        lines.append(f"- Standard meeting length: {presets.meeting_minutes()} minutes — this "
+                     f"replaces the default length above. Leave \"end\" out unless he gives one.")
+    if not presets.video_call():
+        lines.append("- Video call: OFF by default. A timed event with no place gets NO Meet "
+                     "link. Send \"virtual\": true only when he asks for a call, a Meet or a "
+                     "video meeting.")
+    if not presets.notify_guests():
+        lines.append("- Guest emails: OFF by default. Guests are added to the event without "
+                     "being emailed. Send \"send_invites\": true only when he asks for the guests "
+                     "to be invited by email or notified.")
+    places = presets.places()
+    if places:
+        lines.append("- Saved places. When he says one of these is where the meeting happens — "
+                     "by its name or in his own words for it (\"minha casa\" for casa) — set "
+                     "\"location\" to its address, copied exactly. A place not listed here is "
+                     "written the way he said it, as before:")
+        lines.extend(f"  - {p['name']}: {p['address']}" for p in places)
+    if not lines:
+        return None
+    head = (f"\n\n{owner}'s presets — he set these himself in setup, and they replace the "
+            f"matching defaults in the calendar instructions above. The system applies them to "
+            f"every booking; never ask him about them.")
+    return head + "\n" + "\n".join(lines)
+
+
 def calendar_context(state: dict, ctx: dict):
-    """The address-book block for this turn, plus what it surfaced.
+    """The prompt blocks for this turn — the owner's presets and the address book — plus what the
+    address book surfaced.
 
     Pure and synchronous — it runs inside the reply path. All of the work is exact dictionary
-    lookups against the in-process snapshot (measured at 0.3 ms over 2,000 contacts); the fuzzy
+    lookups against the in-process snapshots (measured at 0.3 ms over 2,000 contacts); the fuzzy
     matching this codebase uses elsewhere was measured at 5 s over the same book, as blocking CPU
     inside an async node, which stalls every chat rather than just this one."""
+    settings = ctx.get("settings")
+    pblock = presets_block(ctx.get("presets"), getattr(settings, "owner_name", "the owner"))
+    book = _address_book_context(state, ctx)
+    if book is None:
+        return pblock
+    return {"block": (pblock or "") + book["block"], "state": book["state"]}
+
+
+def _address_book_context(state: dict, ctx: dict):
+    """The address-book block and the contacts it surfaced, or None."""
     d = ctx.get("directory")
     settings = ctx.get("settings")
     if d is None or not getattr(d, "ready", False):
@@ -158,6 +209,9 @@ CALENDAR = Skill(
     confirm=FlagConfirm(
         {"create", "update", "delete"},
         compose_map={"create": compose_create, "update": compose_update, "delete": compose_delete},
+        # His presets (length, video call, guest emails, places) are written into the held write
+        # before its card is composed — one value for the card and the event both.
+        prepare=apply_presets,
     ),
     # Render is PER VERB: writes + list render programmatically from the result; find keeps the
     # model (judgment / "which one?"). respond falls back to the model on failure or an
@@ -181,7 +235,8 @@ CALENDAR = Skill(
     # so the build is the pre-feature one rather than one that merely never injects the block.
     gated_verbs={"remember": "contacts_enabled"},
     gated_guidance=[("contacts_enabled", CONTACTS_GUIDANCE),
-                    ("contacts_crud_on", CONTACTS_CALL_GUIDANCE)],
+                    ("contacts_crud_on", CONTACTS_CALL_GUIDANCE),
+                    ("presets_enabled", DEFAULTS_GUIDANCE)],
     calls={"contacts"},
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",

@@ -6,9 +6,9 @@ brain wakes, works, and replies. Self-hosted on a single DigitalOcean droplet.
 Lisa is built on [LangGraph](https://github.com/langchain-ai/langgraph) (the open-source,
 MIT library) + FastAPI, calling the WhatsApp gateway
 ([Evolution API](https://github.com/EvolutionAPI/evolution-api)) directly through one
-internal client. Core capabilities today: **Google Calendar** actions, **audio
-transcription** — on request, or automatically for chats you enrol — and reading **PDFs and
-images**.
+internal client. Core capabilities today: **Google Calendar** actions (with your own meeting
+presets), **audio transcription** — on request, or automatically for chats you enrol — and
+reading **PDFs and images**.
 
 ## Layout
 
@@ -53,6 +53,26 @@ is confirmed before it is written.
 Off by default. Turn it on with `AUTO_TRANSCRIBE_ENABLED=true` on the flow, plus
 `AUTO_TRANSCRIBE_URL` on the dispatcher so untagged voice notes reach it at all
 (see `Lisa flow/.env.example`).
+
+## Meeting presets
+
+`@lisa setup` also holds the defaults Lisa books with when you don't say otherwise — the
+**Meetings** item on the menu:
+
+- **Standard length** — how long a meeting lasts when you give no end ("meetings of 30 min").
+- **Video call** — whether a meeting with no place gets a Google Meet ("video off").
+- **Guest emails** — whether guests are emailed the invite, its changes and its cancellation
+  ("guest emails off"). Say "send the invite" on a booking to override it once.
+- **Places** — named addresses ("save place casa: Rua Harmonia 123"). Book "at casa" and the
+  event gets that address.
+
+Every change is confirmed before it is saved, like the transcription list. The presets are
+written into a booking when its confirmation is composed, so the card you approve is exactly
+what is created — changing a preset afterwards does not change a booking already on the card.
+An unset preset behaves exactly as Lisa did before presets existed.
+
+Off by default. Turn it on with `PRESETS_ENABLED=true` on the flow; they are stored in
+`<LOG_SCHEMA>.owner_presets` when `DATABASE_URL` is set.
 
 ## Adding a new flow without risking the core
 

@@ -91,6 +91,7 @@ def action_fingerprint(action: dict) -> str:
 async def confirm_node(
     state: MessageState, *, confirm_policies: dict, settings, reasoner, trace: Trace,
     side_effects: dict | None = None, tools: dict | None = None, directory=None,
+    presets=None,
 ) -> dict:
     tid = state["trace_id"]
     domain = state.get("domain") or ""
@@ -125,13 +126,21 @@ async def confirm_node(
         if decision.get("ok"):
             approved.append(action)
             continue
+        # A write awaiting go-ahead gets the owner's presets filled in FIRST, so the action that
+        # is shown, held, fingerprinted and finally run is one object. Only here, never on an
+        # approved action: that one already carries what its card showed, and re-filling it
+        # under presets changed since would run something he did not approve.
+        if hasattr(policy, "prepare"):
+            action = policy.prepare(action, presets)
         # A write awaiting go-ahead: compose the confirmation in code and hold it as pending.
         # The node's RETURN value is invisible to code running inside the node, so the composer is
         # handed the stripped pairs directly rather than being expected to read what we return.
-        # The owner's date goes in the same way, so the card can say "(amanhã)" next to the day.
+        # The owner's date goes in the same way, so the card can say "(amanhã)" next to the day,
+        # and so do the presets, so a setup card can say what a setting is changing FROM.
         # A policy that already said why this cannot be proposed gets no card for it.
         composed = (policy.compose(action, {**state, "side_effects": stripped,
-                                            "owner_today": today_in(settings.calendar_timezone)})
+                                            "owner_today": today_in(settings.calendar_timezone),
+                                            "presets": presets.snapshot() if presets else None})
                     if pending is None and not decision.get("message") else None)
         if composed:
             pending, ask_message = action, composed

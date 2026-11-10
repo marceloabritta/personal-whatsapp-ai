@@ -8,7 +8,8 @@ A confirm policy owns the whole confirmation step for a skill, all of it program
   confirm(action)     the structural gate — may this action run this turn?
 
 `FlagConfirm` is the calendar policy: a write runs only when `confirmed` is set (by the owner's
-yes, resolved in code); it composes the confirmation from per-verb formatters the skill supplies.
+yes, resolved in code); it composes the confirmation from per-verb formatters the skill supplies,
+after `prepare` has filled the owner's presets into the write.
 `LLMConfirm` is a v2 seam (a skill judging the yes with its own model call), not wired in v1."""
 from __future__ import annotations
 
@@ -40,10 +41,25 @@ class FlagConfirm:
     """Programmatic: a gated verb runs only when the model set inputs.confirmed=true — the yes is
     resolved in code (detect) and the confirmation prompt is composed in code (compose)."""
 
-    def __init__(self, needs, compose_map: Optional[dict[str, Callable]] = None) -> None:
+    def __init__(self, needs, compose_map: Optional[dict[str, Callable]] = None,
+                 prepare: Optional[Callable] = None) -> None:
         self.needs = set(needs)
         # {verb: fn(action, state) -> str} — the skill's per-verb confirmation formatters.
         self._compose = dict(compose_map or {})
+        # fn(action, presets) -> action — fills the owner's presets into a write before it is
+        # held, so the card and the write read the same values (tools.calendar.apply_presets).
+        self._prepare = prepare
+
+    def prepare(self, action: dict, presets: Any) -> dict:
+        """The action as it will be held and shown. Unchanged when the skill has no presets to
+        apply, when presets are off, or when filling them fails — a preset is never a reason
+        to lose the booking."""
+        if self._prepare is None or presets is None:
+            return action
+        try:
+            return self._prepare(action, presets)
+        except Exception:
+            return action
 
     def compose(self, action: dict, state: dict) -> Optional[str]:
         """The confirmation prompt for this action, or None if the skill can't build it (→ model)."""

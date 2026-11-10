@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import unicodedata
 
+from ..presets import MEETING_MINUTES, NOTIFY_GUESTS, VIDEO_CALL
+from ..presets import fold as fold_name
 from ..roster import (
     ALL_CONTACTS, ALL_GROUPS, BOTH, DIRECTION_CHOICES, INBOUND, OUTBOUND, SCOPE_KIND,
 )
@@ -196,14 +198,26 @@ def _ordinal_lookup(state: dict, key: str) -> str:
 # --- result rendering -----------------------------------------------------------------------
 
 def fmt_list(results: list, state: dict) -> str:
-    """What is configured.
+    """What is configured: the transcription list, then the meeting presets when the result
+    carries them — or the presets alone, when that is what was asked for."""
+    data = (results[0].get("data") or {}) if results else {}
+    pt = _lang(state) == "pt"
+    if data.get("item") == "meetings":
+        return fmt_presets(data.get("presets") or {}, pt)
+    text = _fmt_transcription(data, state)
+    if data.get("presets"):
+        text = f"{text}\n\n{fmt_presets(data['presets'], pt)}"
+    return text
+
+
+def _fmt_transcription(data: dict, state: dict) -> str:
+    """The transcription list.
 
     The blanket rules sit ABOVE the list as two plain lines, each shown only when it is set,
     because they are not chats and numbering them would push the chats off 1. The chats are then
     numbered in one sequence across Contacts and Groups, so any row can be edited or removed by
     its number; a blanket rule is edited by name ("all contacts inbound"), which is already the
     shortest way to say it."""
-    data = (results[0].get("data") or {}) if results else {}
     scopes = data.get("scopes") or []
     contacts = data.get("contacts") or []
     groups = data.get("groups") or []
@@ -293,8 +307,13 @@ def fmt_menu(results: list, state: dict) -> str:
     data = (results[0].get("data") or {}) if results else {}
     items = data.get("items") or []
     pt = _lang(state) == "pt"
-    lines = ["Configuração. Um item disponível hoje:" if pt
-             else "Setup. One thing is configurable today:", ""]
+    if len(items) > 1:
+        head = ("Configuração. O que dá para ajustar — diga o número:" if pt
+                else "Setup. What you can configure — say the number:")
+    else:
+        head = ("Configuração. Um item disponível hoje:" if pt
+                else "Setup. One thing is configurable today:")
+    lines = [head, ""]
     for i, item in enumerate(items, 1):
         lines.append(f"{i}. *{item['title']}* — {item['summary']}")
     return "\n".join(lines)
@@ -346,6 +365,150 @@ def fmt_remove(results: list, state: dict) -> str:
     relist = fmt_list([{"data": {"scopes": scopes, "contacts": contacts,
                                  "groups": groups}}], state)
     return f"{head}\n\n{relist}"
+
+
+# --- meeting presets ------------------------------------------------------------------------
+#
+# Places are listed by name and never numbered: the numbers on the list belong to the chats, so
+# a numbered place would make "remove 2" mean two different things on one screen.
+
+_PRESET_LABEL = {
+    "en": {MEETING_MINUTES: "Standard length", VIDEO_CALL: "Video call",
+           NOTIFY_GUESTS: "Guest emails"},
+    "pt": {MEETING_MINUTES: "Duração padrão", VIDEO_CALL: "Chamada de vídeo",
+           NOTIFY_GUESTS: "E-mail aos convidados"},
+}
+# On/off in each language. Portuguese agrees with the noun: a chamada is "ligada", an e-mail
+# "ligado".
+_ON_OFF = {
+    "en": {VIDEO_CALL: ("on", "off"), NOTIFY_GUESTS: ("on", "off")},
+    "pt": {VIDEO_CALL: ("ligada", "desligada"), NOTIFY_GUESTS: ("ligado", "desligado")},
+}
+_GLOSS = {
+    "en": {(VIDEO_CALL, True): "a meeting with no place gets a Google Meet",
+           (VIDEO_CALL, False): "a Meet only when you ask for one",
+           (NOTIFY_GUESTS, True): "guests get the invite by email",
+           (NOTIFY_GUESTS, False): "guests are added without an email"},
+    "pt": {(VIDEO_CALL, True): "reunião sem local ganha um Google Meet",
+           (VIDEO_CALL, False): "Meet só quando você pedir",
+           (NOTIFY_GUESTS, True): "os convidados recebem o convite por e-mail",
+           (NOTIFY_GUESTS, False): "os convidados entram sem e-mail"},
+}
+
+
+def preset_value(key: str, value, pt: bool) -> str:
+    """One preset's value in words: "30 min", "on", "desligada"."""
+    lang = "pt" if pt else "en"
+    if key == MEETING_MINUTES:
+        return f"{value} min"
+    on, off = _ON_OFF[lang][key]
+    return on if value else off
+
+
+def _place_named(snap: dict, name: str) -> dict | None:
+    wanted = fold_name(name)  # the store's own folding, so the card finds what the write will
+    for p in (snap or {}).get("places") or []:
+        if fold_name(p.get("name")) == wanted:
+            return p
+    return None
+
+
+def _clean(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def fmt_presets(snap: dict, pt: bool) -> str:
+    """The Meetings section: the three settings, then the saved places, then how to change them."""
+    lang = "pt" if pt else "en"
+    labels = _PRESET_LABEL[lang]
+    lines = ["*Reuniões*" if pt else "*Meetings*", ""]
+    lines.append(f"{labels[MEETING_MINUTES]} - "
+                 f"{preset_value(MEETING_MINUTES, snap.get(MEETING_MINUTES), pt)}")
+    for key in (VIDEO_CALL, NOTIFY_GUESTS):
+        value = bool(snap.get(key, True))
+        lines.append(f"{labels[key]} - {preset_value(key, value, pt)} "
+                     f"({_GLOSS[lang][(key, value)]})")
+    lines += ["", "*Locais*" if pt else "*Places*"]
+    places = snap.get("places") or []
+    if places:
+        lines.extend(f"{p['name']} - {p['address']}" for p in places)
+    else:
+        lines.append("Nenhum local salvo ainda." if pt else "No places saved yet.")
+    lines.append("")
+    lines.append('Diga "reuniões de 30 min", "vídeo desligado", "sem e-mail aos convidados", ou '
+                 '"salva o local escritório: Av. Paulista 1000".' if pt else
+                 'Say "meetings of 30 min", "video off", "guest emails off", or '
+                 '"save place office: Av. Paulista 1000".')
+    return "\n".join(lines)
+
+
+def compose_set_presets(action: dict, state: dict) -> str | None:
+    """Each setting being changed, old → new. A setting already at the asked value is still
+    named, so the card always says everything the action carries."""
+    snap = state.get("presets") or {}
+    pt = _lang(state) == "pt"
+    labels = _PRESET_LABEL["pt" if pt else "en"]
+    lines = ["Confirmar — reuniões:" if pt else "Confirm — meetings:"]
+    for key in (MEETING_MINUTES, VIDEO_CALL, NOTIFY_GUESTS):
+        if action.get(key) is None:
+            continue
+        new = preset_value(key, action[key], pt)
+        old = snap.get(key)
+        if old is None or old == action[key]:
+            lines.append(f"{labels[key]}: *{new}*")
+        else:
+            lines.append(f"{labels[key]}: {preset_value(key, old, pt)} → *{new}*")
+    if len(lines) == 1:
+        return None  # nothing to change — the model explains rather than asking about a blank
+    lines.append("Salvo?" if pt else "Save it?")
+    return "\n".join(lines)
+
+
+def compose_save_place(action: dict, state: dict) -> str:
+    name, address = _clean(action.get("name")), _clean(action.get("address"))
+    before = _place_named(state.get("presets") or {}, name)
+    pt = _lang(state) == "pt"
+    if before and before.get("address") != address:
+        return (f"Confirmar — *{name}*: mudar {before['address']} → *{address}*?" if pt else
+                f"Confirm — *{name}*: change {before['address']} → *{address}*?")
+    return (f"Confirmar — salvar o local *{name}*: {address}?" if pt else
+            f"Confirm — save the place *{name}*: {address}?")
+
+
+def compose_remove_place(action: dict, state: dict) -> str:
+    name = _clean(action.get("name"))
+    place = _place_named(state.get("presets") or {}, name)
+    pt = _lang(state) == "pt"
+    if place:
+        return (f"Remover o local *{place['name']}* ({place['address']})?" if pt else
+                f"Remove the place *{place['name']}* ({place['address']})?")
+    return f"Remover o local *{name}*?" if pt else f"Remove the place *{name}*?"
+
+
+def fmt_set_presets(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    pt = _lang(state) == "pt"
+    labels = _PRESET_LABEL["pt" if pt else "en"]
+    parts = [f"{labels[k]} → {preset_value(k, c['to'], pt)}"
+             for k, c in (data.get("changed") or {}).items() if k in labels]
+    head = "Pronto." if pt else "Done."
+    return f"{head} {'; '.join(parts)}." if parts else head
+
+
+def fmt_save_place(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    place = data.get("place") or {}
+    pt = _lang(state) == "pt"
+    head = "Pronto." if pt else "Done."
+    return f"{head} {place.get('name', '?')} → {place.get('address', '?')}."
+
+
+def fmt_remove_place(results: list, state: dict) -> str:
+    data = (results[0].get("data") or {}) if results else {}
+    name = (data.get("place") or {}).get("name") or "?"
+    pt = _lang(state) == "pt"
+    return (f"Removido. {name} saiu dos seus locais." if pt else
+            f"Removed. {name} is off your places.")
 
 
 def fmt_failure(results: list, state: dict) -> str:

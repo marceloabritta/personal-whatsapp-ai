@@ -353,12 +353,17 @@ async def p4_window():
 
 async def p5_setup_structure():
     print("P5 — the setup skill's shape")
-    sc = output_schema_for("setup")
-    tasks = {b["properties"]["task"]["const"] for b in sc["properties"]["actions"]["items"]["anyOf"]}
+    # With presets off (the default) the schema is the pre-presets one: exactly seven verbs.
+    # The bare schema below (no settings) carries every verb, presets included — the largest it
+    # can ever be — so the cap checks run against that.
+    off = output_schema_for("setup", settings=Settings(evolution_apikey="x"))
+    tasks = {b["properties"]["task"]["const"]
+             for b in off["properties"]["actions"]["items"]["anyOf"]}
     check("setup exposes exactly its seven verbs",
           tasks == {f"setup.{v}" for v in
                     ("menu", "help", "list", "resolve", "enroll", "update", "remove")},
           detail=str(sorted(tasks)))
+    sc = output_schema_for("setup")
     check("schema is under the 16-union cap", count_unions(sc) <= 16, detail=str(count_unions(sc)))
     check("schema is under the 24-optional cap", count_optionals(sc) <= 24,
           detail=str(count_optionals(sc)))
