@@ -101,8 +101,7 @@ async def _transcribe_audio(records: list[dict], transcription, settings, trace:
             r["text"] = "[voice message]"
         return
 
-    cap = settings.max_context_transcriptions
-    todo, overflow = audio[:cap], audio[cap:]
+    todo, overflow = _newest(audio, settings.max_context_transcriptions)
     for r in overflow:
         r["text"] = "[voice message — not transcribed]"
     if overflow and loop_id:
@@ -177,6 +176,18 @@ def _collect_cards(records: list[dict], current: list[dict]) -> tuple[list[str],
     return keys, views
 
 
+def _newest(rows: list[dict], cap: int) -> tuple[list[dict], list[dict]]:
+    """Split a chronological list into (the newest `cap`, the older rest), both in order.
+
+    The cap used to keep the OLDEST rows. On 2026-11-10 he sent three screenshots and asked
+    "@lisa what are the times on the image above?": six older PDFs and two stale images filled
+    the 8 slots, the three screenshots were cut as "— omitted", and she told him she can't
+    read images at all. What he is pointing at is almost always the latest thing he sent."""
+    if cap <= 0:
+        return [], list(rows)
+    return rows[-cap:], rows[:-cap]
+
+
 def _media_marker(r: dict, status: str = "ok") -> str:
     """Transcript marker for an image/PDF row: "[image]" / "[PDF: report.pdf]", or a status
     variant ("— unavailable" / "— too large" / "— omitted") when no block was attached."""
@@ -229,8 +240,7 @@ async def _attach_media(records: list[dict], evolution, settings, trace: Trace,
     if not media:
         return []
 
-    cap = settings.max_context_media
-    todo, overflow = media[:cap], media[cap:]
+    todo, overflow = _newest(media, settings.max_context_media)
     for r in overflow:
         _mark(r, "omitted")
     if overflow and loop_id:
@@ -244,12 +254,13 @@ async def _attach_media(records: list[dict], evolution, settings, trace: Trace,
 
     fetched = await asyncio.gather(*(download(r) for r in todo))
 
-    # Build blocks sequentially so the per-turn byte budget is honoured deterministically
-    # (drop the rows that would overflow to markers), preserving chronological order.
-    blocks: list[dict] = []
+    # The byte budget is spent newest first, for the same reason as the cap: the file he is
+    # asking about is the one he just sent. Blocks still go out in chronological order.
+    kept: dict[int, dict] = {}
     used = 0
     budget = settings.media_request_budget_bytes
-    for r, res in fetched:
+    for i in range(len(fetched) - 1, -1, -1):
+        r, res = fetched[i]
         b64 = (res or {}).get("base64")
         if not b64:
             _mark(r, "unavailable")
@@ -259,9 +270,9 @@ async def _attach_media(records: list[dict], evolution, settings, trace: Trace,
             _mark(r, "too large")
             continue
         used += approx
-        blocks.append(_media_block(r, res, b64))
+        kept[i] = _media_block(r, res, b64)
         _mark(r, "ok")
-    return blocks
+    return [kept[i] for i in sorted(kept)]
 
 
 def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[dict]:
