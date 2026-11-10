@@ -87,9 +87,9 @@ def build_deps(settings: Settings | None = None) -> Deps:
         from .tools.people import GooglePeople
 
         directory = Directory(settings, people=GooglePeople(settings))
-        cal = tools.get("calendar")
-        if cal is not None:
-            cal.directory = directory
+        for name in ("calendar", "contacts"):
+            if tools.get(name) is not None:
+                tools[name].directory = directory
     # The setup handler needs the roster it edits and the client it searches chats with. The
     # skills fan-out builds handlers from settings alone, so they are attached here — the same
     # way the transcript store is attached to the transcription service.

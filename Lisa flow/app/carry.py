@@ -140,6 +140,9 @@ def kept_on_carry(state: dict) -> dict:
         "pending_card": state.get("pending_card"),
         "last_confirm_sig": state.get("last_confirm_sig"),
         "session_lang": state.get("session_lang"),
+        # The yes also approved what was to happen next, and whoever is waiting on this write.
+        "pending_call": state.get("pending_call"),
+        "skill_stack": list(state.get("skill_stack") or []),
     }
     eid = pending.get("event_id")
     if eid and eid in (state.get("seen_event_ids") or []):

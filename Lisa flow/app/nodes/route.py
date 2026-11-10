@@ -19,6 +19,10 @@ async def route_node(state: MessageState, *, settings, reasoner, trace: Trace) -
         domain=domain, how=how, text_preview=(state.get("text") or "")[:80],
     )
     update = {"domain": domain, "loop_domain": domain}
+    if state.get("skill_stack") and domain != state.get("loop_domain"):
+        # He moved the conversation himself, so whoever was waiting on the skill he left has lost
+        # the thread. Handing back into it later would resume something he walked away from.
+        update["skill_stack"] = []
 
     # Setup's language follows the OWNER's own words, decided in code, not the model's reading of
     # the surrounding history. In the self-chat that history is mostly Portuguese, so a

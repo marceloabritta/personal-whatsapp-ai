@@ -76,6 +76,10 @@ BUDGETS: dict[str, Budget] = {
     "ack":             Budget(good_s=15, slow_s=30),
     "calendar_read":   Budget(good_s=12, slow_s=25),
     "calendar_write":  Budget(good_s=20, slow_s=40),
+    # No traffic yet to calibrate against, so these borrow calendar's: same model, same one Google
+    # call. Revisit once there are real turns, by the rule above.
+    "contacts_read":   Budget(good_s=12, slow_s=25),
+    "contacts_write":  Budget(good_s=20, slow_s=40),
     # Transcription genuinely scales with the clip. v1 never actually scaled: the audio length was
     # looked up by the ACTIVATION message id, but the clip is the message that one REPLIES to, so
     # the lookup missed every time and the budget collapsed to a flat 15s — which is why all five

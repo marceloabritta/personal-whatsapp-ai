@@ -165,7 +165,7 @@ class ReviewStore:
                 # activation's trace_id, so dropping the assistant line written by THIS
                 # activation is exact. Human lines from the same activation stay: they are what
                 # she was answering.
-                "lines": _context_for(lines, e["trace_id"]),
+                "lines": _context_for(lines, e["trace_id"], wrote=p.get("response") is not None),
             })
 
         return turns
@@ -316,13 +316,18 @@ class ReviewStore:
         """
 
 
-def _context_for(lines: list[dict], trace_id: Optional[str]) -> list[dict]:
-    """The chat as it stood before this activation spoke — a COPY, so later lines cannot leak
-    backwards, minus the assistant line this same activation just wrote."""
-    return [
-        dict(ln) for ln in lines
-        if not (ln.get("trace_id") == trace_id and not _is_human(ln.get("who")))
-    ]
+def _context_for(lines: list[dict], trace_id: Optional[str], *, wrote: bool = True) -> list[dict]:
+    """The chat as it stood before this reply — a COPY, so later lines cannot leak backwards, minus
+    the assistant line this reply just wrote. Only that one: an activation can speak twice when a
+    write's result is followed by the next skill's card (nodes/handoff.py), and the first is part of
+    the chat the second is judged against."""
+    own = None
+    if wrote:
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].get("trace_id") == trace_id and not _is_human(lines[i].get("who")):
+                own = i
+                break
+    return [dict(ln) for i, ln in enumerate(lines) if i != own]
 
 
 def _int_or_none(v: Any) -> Optional[int]:

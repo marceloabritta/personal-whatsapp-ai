@@ -116,9 +116,10 @@ async def lifespan(app: FastAPI):
         if not ok:
             log.warning("contacts disabled: %s", detail)
             deps.directory = None
-            cal = (deps.tools or {}).get("calendar")
-            if cal is not None:
-                cal.directory = None
+            for name in ("calendar", "contacts"):
+                tool = (deps.tools or {}).get(name)
+                if tool is not None:
+                    tool.directory = None
         else:
             if s.database_url:
                 from .contactstore import ContactStore

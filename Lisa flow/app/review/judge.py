@@ -26,7 +26,8 @@ class Judge:
         self._client = None  # lazy — importing this module never needs a key
         self._schema = judge_schema()
         self._system = build_judge_prompt(
-            owner_name=settings.owner_name, tag=settings.primary_tag
+            owner_name=settings.owner_name, tag=settings.primary_tag,
+            contacts_skill=bool(getattr(settings, "contacts_crud_on", False)),
         )
 
     def _client_or_make(self):

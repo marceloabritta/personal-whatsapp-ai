@@ -84,6 +84,11 @@ async def resolve_pending_node(
         # dropped the assistant's own messages — so a from_me trigger is Marcelo, and nobody else.
         verdict, is_owner, read = detect(state.get("text") or ""), bool(state.get("from_me")), "trigger"
 
+    # A card that takes one answer is only still the question while it is the last thing she said.
+    one_answer = bool(getattr(policy, "one_answer", False))
+    if verdict == "yes" and is_owner and one_answer and state.get("spoke_after_card"):
+        verdict = "other"
+
     if verdict == "yes" and is_owner:
         action = {**pending, APPROVED_BY: OWNER_YES}
         # The side effects that rode with this proposal fire NOW — on the same yes that approves
@@ -100,7 +105,8 @@ async def resolve_pending_node(
                    pending=task, verdict="yes", owner=True, route="execute",
                    riders=len(riders) or None, read=read, carried=carried or None)
         return {"actions": [action], "domain": domain, "pending_action": None,
-                "pending_side_effects": [], "pending_card": None, "resolve_route": "execute"}
+                "pending_side_effects": [], "pending_card": None, "resolve_route": "execute",
+                "next_call": state.get("pending_call"), "pending_call": None}
 
     if verdict == "no" and is_owner:
         # He declined. "other" is the FIXING loop — it keeps the proposal so a correction can
@@ -114,7 +120,7 @@ async def resolve_pending_node(
                    read=read)
         return {"domain": domain, "resolve_route": "reason",
                 "pending_action": None, "pending_side_effects": [], "pending_card": None,
-                "workflow": None, "last_confirm_sig": None}
+                "pending_call": None, "workflow": None, "last_confirm_sig": None}
 
     if verdict in ("yes", "no"):
         # Someone else agreed or declined. Only the owner's calendar is written on the owner's
@@ -130,11 +136,27 @@ async def resolve_pending_node(
 
     trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
                pending=task, verdict=verdict, route="reason", domain=domain, read=read)
+    if is_owner and one_answer:
+        # "não apaga", "cancela por favor", "pode cancelar": no short list of words will ever catch
+        # every way of saying no, and the model has no way to withdraw a held write. So it would
+        # answer "ok, não vou apagar" with the card still standing, and his next "ok" deleted it.
+        return {"domain": domain, "resolve_route": "reason", "pending_action": None,
+                "pending_side_effects": [], "pending_call": None, "pending_card": None,
+                "last_confirm_sig": None,
+                "messages": [{"role": "user", "content":
+                              f"[{task} not run] That card is withdrawn: he did not answer it with "
+                              f"a clean yes. If what he said corrects it, propose it again with the "
+                              f"correction. If he refused or moved on, just answer him."}]}
     # The pending SURVIVES a non-yes turn (that is the fixing loop), but its riders do not. This
     # turn is a correction — "no, her other address" — and the model will re-propose. Carrying the
     # old riders forward would write the address he just rejected the moment he says yes to the
     # corrected proposal. confirm re-attaches riders to whatever it proposes next.
-    return {"domain": domain, "resolve_route": "reason", "pending_side_effects": []}
+    update = {"domain": domain, "resolve_route": "reason", "pending_side_effects": []}
+    if is_owner:
+        # Only his correction changes what he is being asked. Someone else's "show, valeu" must not
+        # take away the step he is about to approve.
+        update["pending_call"] = None
+    return update
 
 
 def route_after_resolve(state: MessageState) -> str:

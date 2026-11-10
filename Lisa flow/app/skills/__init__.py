@@ -12,11 +12,15 @@ from typing import Any
 from .base import Skill, count_optionals, count_unions
 from .calendar import CALENDAR
 from .confirm import ConfirmPolicy
+from .contacts import CONTACTS
 from .render import LLMReadback, Programmatic
 from .setup import SETUP
 from .web import WEB
 
+# Order matters: the router asks each matcher in turn. Contacts goes before calendar because calendar
+# claims the bare word "agenda", which in Brazil is the address book as often as the calendar.
 SKILLS: dict[str, Skill] = {
+    "contacts": CONTACTS,
     "calendar": CALENDAR,
     "setup": SETUP,
     "web": WEB,
@@ -52,6 +56,21 @@ _WORKFLOW_SCHEMA = {
 }
 
 
+# --- which skills exist right now, and which can reach which -----------------------------
+
+def skill_enabled(skill: Skill, settings=None) -> bool:
+    """Fails closed: a gated skill is off when there are no settings to say otherwise."""
+    if not skill.enabled_by:
+        return True
+    return settings is not None and bool(getattr(settings, skill.enabled_by, False))
+
+
+def callable_skills(domain: str, settings=None, skills: dict = SKILLS) -> list[str]:
+    """The skills `domain` may call right now, sorted so the schema is stable across calls."""
+    return sorted(t for t in skills[domain].calls
+                  if t in skills and skill_enabled(skills[t], settings))
+
+
 # --- enforced-JSON output schema, per domain --------------------------------------------
 
 def output_schema_for(domain: str, skills: dict = SKILLS, settings=None) -> dict:
@@ -84,6 +103,19 @@ def output_schema_for(domain: str, skills: dict = SKILLS, settings=None) -> dict
         props["workflow"] = {"anyOf": [_WORKFLOW_SCHEMA, {"type": "null"}]}
         required += ["actions", "workflow"]
 
+    # Required and nullable, so it spends one union and no optional. Absent when there is nobody to
+    # call, which keeps a skill's contract exactly the pre-feature one while the feature is off.
+    targets = callable_skills(domain, settings, skills)
+    if targets:
+        props["call"] = {"anyOf": [{"type": "null"}, {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["skill", "request"],
+            "properties": {"skill": {"type": "string", "enum": targets},
+                           "request": {"type": "string"}},
+        }]}
+        required.append("call")
+
     return {
         "type": "object",
         "additionalProperties": False,
@@ -99,10 +131,12 @@ def has_actions(domain: str, skills: dict = SKILLS, settings=None) -> bool:
 # --- per-domain system prompt -----------------------------------------------------------
 
 def system_prompt_for(domain: str, settings, session_lang: str | None = None,
-                      skills: dict = SKILLS, context_block: str | None = None) -> str:
+                      skills: dict = SKILLS, context_block: str | None = None,
+                      called_by: dict | None = None) -> str:
     """Render the domain-scoped system prompt: the shared base + this skill's block. The
-    actions/workflow JSON-contract section is included only for local skills."""
-    from ..prompt import build_system_prompt
+    actions/workflow JSON-contract section is included only for local skills. `called_by` is the
+    frame of the skill that brought this one in, when one did."""
+    from ..prompt import build_system_prompt, called_by_block
 
     skill = skills[domain]
     owner = settings.owner_name
@@ -110,6 +144,8 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
     for attr, extra in skill.gated_guidance:
         if getattr(settings, attr, False):
             guidance = guidance + "\n" + extra
+    if called_by:
+        context_block = (context_block or "") + called_by_block(owner, called_by)
     return build_system_prompt(
         owner, settings.primary_tag,
         guidance=guidance.format(owner_name=owner),
@@ -118,6 +154,8 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         session_lang=session_lang,
         context_block=context_block,
         tz_name=getattr(settings, "calendar_timezone", "UTC"),
+        call_targets=[(t, skills[t].describe.format(owner_name=owner))
+                      for t in callable_skills(domain, settings, skills)],
     )
 
 
@@ -180,12 +218,13 @@ def resolve_gates(skills: dict = SKILLS) -> dict[str, Any]:
             if skill.resolve_gate is not None}
 
 
-def routable(state: dict, skills: dict = SKILLS) -> list[str]:
+def routable(state: dict, skills: dict = SKILLS, settings=None) -> list[str]:
     """The domains this turn may be routed to. A `only_self_chat` skill is invisible everywhere
     but the owner's chat with himself — so a classifier miss can never land a configuration turn
-    in a contact's conversation."""
+    in a contact's conversation. A skill that is switched off is invisible everywhere."""
     self_chat = bool(state.get("is_self_chat"))
-    return [n for n, sk in skills.items() if self_chat or not sk.only_self_chat]
+    return [n for n, sk in skills.items()
+            if (self_chat or not sk.only_self_chat) and skill_enabled(sk, settings)]
 
 
 def server_tools_for(domain: str, settings, skills: dict = SKILLS):
@@ -213,7 +252,7 @@ __all__ = [
     "count_unions", "count_optionals",
     "output_schema_for", "has_actions", "system_prompt_for",
     "handlers", "confirm_policies", "render_policies", "resolve_gates", "routable",
-    "side_effect_verbs", "context_block_for",
+    "side_effect_verbs", "context_block_for", "skill_enabled", "callable_skills",
     "server_tools_for",
     "reason_runtime_for",
 ]

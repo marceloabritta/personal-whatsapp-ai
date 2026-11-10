@@ -122,6 +122,7 @@ class AnthropicReasoner:
             reasoning = data.get("reasoning")  # the model's stated rationale, for the log
             actions = data.get("actions") or []
             workflow = data.get("workflow")
+            call = data.get("call")
             if state not in ("keep_listening", "awaiting_answer", "close"):
                 state = "keep_listening"
         except (ValueError, TypeError):
@@ -134,7 +135,7 @@ class AnthropicReasoner:
 
         return ReasonResult(
             state=state, message=message, lang=lang, reasoning=reasoning,
-            actions=actions, workflow=workflow, usage=usage,
+            actions=actions, workflow=workflow, call=call, usage=usage,
             provider_request_id=request_id, stop_reason=stop_reason,
             tool_calls=tool_names, error_category="none",
         )

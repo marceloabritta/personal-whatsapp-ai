@@ -81,6 +81,8 @@ TASK_CLASSES: dict[str, str] = {
            "or a decision that nothing needed saying.",
     "calendar_read": "Looking something up in the calendar — agenda, availability, finding an event.",
     "calendar_write": "Creating, changing or deleting a calendar event, including confirming it first.",
+    "contacts_read": "Looking someone up in the address book.",
+    "contacts_write": "Creating, changing or deleting a contact, including confirming it first.",
     "transcription": "Turning a voice note into text.",
     "web_lookup": "One fact that needs a web search to answer.",
     "web_research": "A question needing several sources pulled together.",

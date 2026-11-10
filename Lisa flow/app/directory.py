@@ -77,6 +77,7 @@ class Contact(TypedDict, total=False):
     nicknames: list
     emails: list
     phones: list
+    company: str
     source: str
     preferred: Optional[str]
     used_at: Optional[int]
@@ -221,6 +222,7 @@ class Directory:
         # links move, which is the only way an answer here can go stale.
         self._phone_cache: dict = {}
         self._member_cache: dict = {}   # phones tuple -> (exact, prefix); same lifetime as above
+        self._number_cache: dict = {}   # phone string -> [Contact] with it on the card; see by_phone
         self._sync_token: Optional[str] = None
         self._ready = False
         # Did we successfully read the durable mirror at boot? Only then may a full sweep reap
@@ -388,6 +390,47 @@ class Directory:
 
     def by_email(self, email: str) -> Optional[dict]:
         return self._by_email.get((email or "").lower())
+
+    def by_phone(self, phone: str) -> list:
+        """The cards with this number written on them. Empty for one that does not parse.
+
+        Not `_resolve_phone`, which also follows contact_links. A link says "a booking from this chat
+        used that address", and a booking has several guests, so a link can point at someone who has
+        never been in the chat. Good enough to guess who a name means, and not to decide whose details
+        this chat may read. Parsed once per number, like `_phone_cache`, for the same reason.
+        """
+        cached = self._number_cache.get(phone)
+        if cached is not None:
+            return cached
+        seen: dict = {}
+        e164 = to_e164(phone, self.s.contacts_default_region)
+        if e164:
+            for k in match_keys(e164):
+                for c in self._by_phone.get(k, ()):
+                    seen[c["resource_name"]] = c
+        if len(self._number_cache) >= 4096:
+            self._number_cache.clear()
+        found = self._number_cache[phone] = list(seen.values())
+        return found
+
+    def get(self, resource_name: str) -> Optional[dict]:
+        return self._contacts.get(resource_name)
+
+    def member_ids(self, phone: Optional[str], phones: Optional[list]) -> set:
+        """The cards of the people in this chat: whose details may be read out in it. A number on
+        two cards names neither, the same rule `_resolve_phone` applies."""
+        out: set = set()
+        for p in ([phone] if phone else []) + list(phones or []):
+            cards = self.by_phone(p)
+            if len(cards) == 1:
+                out.add(cards[0]["resource_name"])
+        return out
+
+    async def search(self, query: str) -> list:
+        """The deliberate lookup (contactsearch.py), over a copy of the book, off the event loop."""
+        from .contactsearch import search_contacts
+
+        return await asyncio.to_thread(search_contacts, list(self._contacts.values()), query)
 
     def block(self, found: list, owner: str) -> str:
         """The prompt snippet. Pure string building; empty list -> "".
@@ -577,6 +620,30 @@ class Directory:
                     except Exception as exc:
                         log.warning("directory link failed: %s", exc)
 
+    # --- confirmed writes (the contacts skill) --------------------------------------------
+
+    async def apply_person(self, person: dict) -> dict:
+        """Take Google's answer to a write into the snapshot, so the next turn already reads it."""
+        c = self._merge_local(self._view(person))
+        self._contacts[c["resource_name"]] = c
+        self._reindex()
+        if self.store is not None:
+            try:
+                await self.store.upsert(c)
+            except Exception as exc:  # the write itself landed; the next sync repairs the mirror
+                log.warning("directory upsert after write failed: %s", exc)
+        return c
+
+    async def drop(self, resource_name: str) -> None:
+        """A card that no longer exists: out of the snapshot, the mirror and the identity links."""
+        self._forget(resource_name)
+        self._reindex()
+        if self.store is not None:
+            try:
+                await self.store.delete(resource_name)
+            except Exception as exc:
+                log.warning("directory mirror delete failed: %s", exc)
+
     def spawn(self, coro) -> None:
         """Detach work while KEEPING a strong reference.
 
@@ -643,6 +710,7 @@ class Directory:
         self._by_email, self._by_phone = by_email, by_phone
         self._phone_cache = {}
         self._member_cache = {}
+        self._number_cache = {}
 
     def _forget(self, resource_name: str) -> None:
         self._contacts.pop(resource_name, None)
@@ -669,6 +737,7 @@ class Directory:
             return
         token = None if full else self._sync_token
         people, next_token, was_full = await asyncio.to_thread(self.people.list_all, token)
+        gone: list = []
 
         if was_full:
             # Build into a scratch dict across ALL pages and swap atomically, so a crash
@@ -692,6 +761,7 @@ class Directory:
                     continue
                 if v.get("deleted"):
                     self._forget(v["resource_name"])
+                    gone.append(v["resource_name"])
                 else:
                     self._contacts[v["resource_name"]] = self._merge_local(v)
 
@@ -719,6 +789,10 @@ class Directory:
                 rows = list(self._contacts.values()) if changed else []
                 await self.store.replace(rows, next_token,
                                          full=was_full and self._mirror_loaded)
+                # A delta only upserts, so a deletion it reports has to be reaped by name, or a
+                # restart before the next full sweep loads that person back from the mirror.
+                for rn in gone:
+                    await self.store.delete(rn)
             except Exception as exc:
                 log.warning("directory mirror write failed: %s", exc)
 

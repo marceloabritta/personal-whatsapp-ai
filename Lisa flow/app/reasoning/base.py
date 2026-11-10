@@ -18,6 +18,7 @@ class ReasonResult(TypedDict, total=False):
     reasoning: Optional[str]  # the model's stated rationale this turn, for the log
     actions: list  # calendar (etc.) actions the model wants run this turn; [] if none
     workflow: Optional[dict]  # persistent gather memory toward a goal, or None
+    call: Optional[dict]  # {"skill", "request"}: bring in another skill, or None
     usage: Optional[dict]  # {"input": int, "output": int}
     provider_request_id: Optional[str]
     stop_reason: Optional[str]

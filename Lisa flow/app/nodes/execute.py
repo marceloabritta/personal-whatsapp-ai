@@ -6,7 +6,8 @@ owned by the skill. One structural gate remains, because it is tool safety rathe
 confirmation:
 
   resolved-id gate — update/delete only run if their event_id was surfaced by a find/list earlier
-                     in THIS loop (seen_event_ids). No invented ids reach Google.
+                     in THIS loop (seen_event_ids). No invented ids reach Google. Contacts holds
+                     its writes to the same rule, through seen_people.
 
 Whether the result reads back through a second reason call, or is formatted programmatically, is
 the skill's `render` policy — decided next, at the `respond` node."""
@@ -72,6 +73,18 @@ def _collect_views(result: dict) -> dict:
     return out
 
 
+def _for_record(res: dict) -> dict:
+    """A result as the activation record keeps it. A card's notes, birthday and street are read only
+    when he asks, and the contact mirror deliberately holds none of them, so the log must not be
+    where they end up instead. `seen_people` is working state rather than a result anyway."""
+    out = dict(res)
+    if isinstance(out.get("data"), dict) and "seen_people" in out["data"]:
+        out["data"] = {k: v for k, v in out["data"].items() if k != "seen_people"}
+    if out.pop("private", False):
+        out["summary"] = f"{out.get('task')} ran"
+    return out
+
+
 async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict | None = None,
                        settings, trace: Trace) -> dict:
     tid = state["trace_id"]
@@ -81,6 +94,7 @@ async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict 
     seen_chat_keys: list[str] = list(state.get("seen_chat_keys") or [])
     seen_chats: dict = dict(state.get("seen_chats") or {})
     listed_chats: dict = dict(state.get("listed_chats") or {})
+    seen_people: dict = dict(state.get("seen_people") or {})
     gates = resolve_gates or {}
     hops = int(state.get("tool_hops") or 0) + 1
 
@@ -111,7 +125,8 @@ async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict 
             patched, gate_error = gate(verb, inputs, {**state, "seen_event_ids": seen,
                                                      "seen_chat_keys": seen_chat_keys,
                                                      "seen_chats": seen_chats,
-                                                     "listed_chats": listed_chats})
+                                                     "listed_chats": listed_chats,
+                                                     "seen_people": seen_people})
             if patched is not None:
                 inputs = patched
         if gate_error:
@@ -133,6 +148,7 @@ async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict 
                 ordinals = (res.get("data") or {}).get("ordinals")
                 if isinstance(ordinals, dict):
                     listed_chats = dict(ordinals)  # a new list REPLACES the old numbering
+                seen_people.update((res.get("data") or {}).get("seen_people") or {})
 
         res = dict(res or {})
         res.setdefault("task", task)
@@ -153,12 +169,13 @@ async def execute_node(state: MessageState, *, tools: dict, resolve_gates: dict 
 
     return {
         "messages": observations,
-        "action_results": (state.get("action_results") or []) + results,
+        "action_results": (state.get("action_results") or []) + [_for_record(r) for r in results],
         "seen_event_ids": seen,
         "seen_events": seen_events,
         "seen_chat_keys": seen_chat_keys,
         "seen_chats": seen_chats,
         "listed_chats": listed_chats,
+        "seen_people": seen_people,
         "tool_hops": hops,
         "last_ran": len(results),
         "last_results": results,

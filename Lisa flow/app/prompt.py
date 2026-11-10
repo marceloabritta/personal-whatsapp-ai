@@ -38,10 +38,24 @@ def today_in(tz_name: str) -> str:
     return now_in(tz_name)[0].date().isoformat()
 
 
+def called_by_block(owner_name: str, frame: dict) -> str:
+    """What a skill is told while another one is waiting on it (nodes/handoff.py)."""
+    caller = frame.get("domain")
+    return (
+        f"\n\nThe {caller} skill brought you in, and is waiting. It asked: {frame.get('goal')}\n"
+        f'When you have the answer, or cannot get it, set "call" to {{"skill": "{caller}", '
+        f'"request": the answer, with every detail it needs}}, with "actions" empty and "message" '
+        f"null. That hands the conversation back. If you need {owner_name} to tell you something "
+        f'first, ask him in "message" with "call" null, and you stay here until he answers. A '
+        f"write he approves on its card hands back by itself, so do not call after one."
+    )
+
+
 def build_system_prompt(
     owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
     has_actions: bool = False, session_lang: str | None = None,
     context_block: str | None = None, tz_name: str = "UTC",
+    call_targets: list | None = None,
 ) -> str:
     # THE OWNER'S clock, not the server's. This line used to read `datetime.now(timezone.utc)`,
     # and the container runs UTC with no TZ — so for the three hours between 21:00 and midnight
@@ -148,6 +162,19 @@ suggested next steps or follow-up questions; give the answer and stop."""
             f"tell {owner_name} what truly happened. Never say something is done before you have "
             f'seen its result come back. If you only need to talk, leave "actions" empty.'
         )
+    if call_targets:
+        listed = "\n".join(f"- {name}: {desc}" for name, desc in call_targets)
+        action_para += (
+            f"\n\nYour other skills. When part of what {owner_name} asked belongs to one of these, "
+            f"bring it in rather than saying you cannot, or asking him for something it could find:"
+            f"\n{listed}\n"
+            f'To use one, set "call" with "actions" empty and "message" null. The system switches '
+            f"to it right away, in this same conversation, and brings you back here with its "
+            f"answer, so never tell him you are doing this. It has its own rules and asks for its "
+            f"own go-ahead. If the other skill's part comes AFTER a write of yours, send the "
+            f'"call" together with that action: it happens once he has approved the write, on the '
+            f"same yes."
+        )
 
     fields = [
         '- "reasoning": one or two sentences, in English, on why you are deciding what you are '
@@ -172,6 +199,12 @@ suggested next steps or follow-up questions; give the answer and stop."""
             '- "workflow": when you are working toward something across several turns (gathering '
             'details before you act), keep the goal here — {"task": ..., "known_inputs": [...], '
             '"open_questions": [...]} — so you remember it next turn; otherwise null.'
+        )
+    if call_targets:
+        fields.append(
+            '- "call": to bring in another of your skills, {"skill": ..., "request": what you need '
+            "from it, in plain words, with every detail it needs, because the request is all it is "
+            "told}; otherwise null."
         )
 
     contract = "Respond ONLY as JSON, with these fields in this order:\n" + "\n".join(fields)
