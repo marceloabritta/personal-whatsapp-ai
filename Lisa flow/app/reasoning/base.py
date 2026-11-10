@@ -19,7 +19,9 @@ class ReasonResult(TypedDict, total=False):
     actions: list  # calendar (etc.) actions the model wants run this turn; [] if none
     workflow: Optional[dict]  # persistent gather memory toward a goal, or None
     call: Optional[dict]  # {"skill", "request"}: bring in another skill, or None
-    usage: Optional[dict]  # {"input": int, "output": int}
+    # {"input", "output", "cache_read", "cache_write"}. `input` is everything sent, the two cache
+    # counts are the parts of it read back from the provider's prompt cache and stored in it.
+    usage: Optional[dict]
     provider_request_id: Optional[str]
     stop_reason: Optional[str]
     tool_calls: list  # names of server tools used this turn
@@ -33,7 +35,9 @@ class Reasoner(Protocol):
         model: str | None = None, effort: str | None = None, think: bool = False,
     ) -> ReasonResult:
         """Given the system prompt and a neutral [{role, content}] history, return the
-        enforced-JSON decision plus metadata. `output_schema` is the per-call enforced-JSON
+        enforced-JSON decision plus metadata. `system` may be a prompt.SystemPrompt, a str that
+        also says where its reusable prefixes end; a provider that caches prompts uses that, and
+        any other reads it as the string it is. `output_schema` is the per-call enforced-JSON
         contract (the routed skill's) and `server_tools` the native tools to attach this call
         (e.g. the web skill's) — both fall back to the reasoner's defaults when None. `model`,
         `effort`, `think` are the routed skill's per-call runtime (model/effort fall back to

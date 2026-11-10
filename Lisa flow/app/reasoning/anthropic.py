@@ -1,8 +1,20 @@
 """Anthropic behind the seam — official SDK, enforced JSON, native server tools,
-adaptive thinking + effort, and the server-tool pause_turn loop.
+adaptive thinking + effort, the server-tool pause_turn loop, and prompt caching.
 
 Enforced JSON (output_config.format) composes with the server tools and thinking;
-only citations/prefill conflict with forced output, and we use neither."""
+only citations/prefill conflict with forced output, and we use neither.
+
+Prompt caching (settings.prompt_cache_enabled). Anthropic reuses a prompt it has read in the
+last five minutes, at a tenth of the input price, but only as a PREFIX: tools, then system, then
+messages, up to the first byte that differs. Two things are marked here:
+  - the system prompt's stable prefixes, where prompt.SystemPrompt says they end. The first is
+    the same for every call to a skill, in any chat, so it is read back on nearly every call.
+  - the conversation, by the top-level `cache_control` (the API marks the last block and moves
+    the mark as the thread grows). It is read back when nothing before it changed: the later
+    passes of one activation, and every hop of a server-tool turn, which re-sends all of its
+    search results each time.
+What was read and written comes back in `usage`; a prompt that stops being read back raises no
+error, only the bill, so those two numbers are the only way to see it."""
 from __future__ import annotations
 
 import json
@@ -14,6 +26,43 @@ log = logging.getLogger("mary.reasoner.anthropic")
 
 _MAX_TOOL_HOPS = 8  # bound the server-tool / MCP pause_turn loop
 _MCP_BETA = "mcp-client-2025-11-20"
+# The 5-minute entry. Every read renews it for free, and four in five calls to a skill come
+# within five minutes of the last; the 1-hour entry costs twice as much to write as this one
+# does, and would have caught 2 more calls in 128.
+_CACHE = {"type": "ephemeral"}
+
+
+def system_blocks(system):
+    """The system prompt as Anthropic text blocks, cut where its reusable prefixes end, with a
+    cache breakpoint on each block that ends one. Joined, the blocks are the prompt, byte for
+    byte. A prompt that carries no offsets (a plain str) comes back as it is: sent whole, with
+    nothing marked."""
+    text = str(system)
+    blocks: list[dict] = []
+    start = 0
+    for end in getattr(system, "stable_ends", ()):
+        if start < end < len(text):
+            blocks.append({"type": "text", "text": text[start:end], "cache_control": _CACHE})
+            start = end
+    if not blocks:
+        return text
+    blocks.append({"type": "text", "text": text[start:]})
+    return blocks
+
+
+def add_usage(usage: dict, u) -> None:
+    """Fold one response's token counts into the turn's running totals.
+
+    With caching on, the API's `input_tokens` is only what was neither read from the cache nor
+    written to it — on a good turn, a few hundred of eight thousand. `input` here stays what it
+    always meant, everything she was sent, and the two cache counts say how much of that was
+    read back (billed at a tenth) and how much was stored (billed at a quarter more)."""
+    read = getattr(u, "cache_read_input_tokens", 0) or 0
+    write = getattr(u, "cache_creation_input_tokens", 0) or 0
+    usage["input"] += (getattr(u, "input_tokens", 0) or 0) + read + write
+    usage["output"] += getattr(u, "output_tokens", 0) or 0
+    usage["cache_read"] += read
+    usage["cache_write"] += write
 
 
 class AnthropicReasoner:
@@ -47,8 +96,9 @@ class AnthropicReasoner:
         convo = [{"role": m["role"], "content": m["content"]} for m in messages]
         schema = output_schema or self.output_schema
         tool_names: list[str] = []
-        usage = {"input": 0, "output": 0}
+        usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         resp = None
+        cache = bool(getattr(self.s, "prompt_cache_enabled", False))
 
         # Per-skill runtime (resolved by the caller, settings defaults already applied). A skill sets
         # think=True to get a real thinking channel — the web path uses it because its long
@@ -64,7 +114,7 @@ class AnthropicReasoner:
                 kwargs = dict(
                     model=model,
                     max_tokens=self.s.claude_max_tokens,
-                    system=system,
+                    system=system_blocks(system) if cache else str(system),
                     messages=convo,
                     thinking=thinking,
                     output_config={
@@ -72,6 +122,8 @@ class AnthropicReasoner:
                         "format": {"type": "json_schema", "schema": schema},
                     },
                 )
+                if cache:
+                    kwargs["cache_control"] = _CACHE
                 # Native server tools are attached PER CALL by the routed skill (web loads
                 # web_search/web_fetch; calendar loads none — saving the ~6.4k-token overhead).
                 if server_tools:
@@ -84,8 +136,7 @@ class AnthropicReasoner:
                     )
                 else:
                     resp = await client.messages.create(**kwargs)
-                usage["input"] += getattr(resp.usage, "input_tokens", 0) or 0
-                usage["output"] += getattr(resp.usage, "output_tokens", 0) or 0
+                add_usage(usage, resp.usage)
                 for block in resp.content:
                     if getattr(block, "type", None) == "server_tool_use":
                         tool_names.append(getattr(block, "name", "tool"))

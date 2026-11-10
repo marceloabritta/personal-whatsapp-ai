@@ -50,12 +50,20 @@ class Judge:
         when = format_when(turn_ts, tz_name)
         content = build_turn_message(transcript, reply_text, when)
 
+        # The judge's instructions are the same for every turn it grades, and a loop's turns are
+        # graded together, so all but the first read them back from Anthropic's prompt cache
+        # (reasoning/anthropic.py has the rules). The turn itself is new every time: not marked.
+        system: Any = self._system
+        if getattr(self.s, "prompt_cache_enabled", False):
+            system = [{"type": "text", "text": self._system,
+                       "cache_control": {"type": "ephemeral"}}]
+
         try:
             client = self._client_or_make()
             resp = await client.messages.create(
                 model=self.s.review_model,
                 max_tokens=self.s.review_max_tokens,
-                system=self._system,
+                system=system,
                 messages=[{"role": "user", "content": content}],
                 thinking={"type": "disabled"},
                 output_config={
@@ -80,7 +88,11 @@ class Judge:
         usage = getattr(resp, "usage", None)
         out["error"] = None
         out["judge_model"] = self.s.review_model
-        out["input_tokens"] = getattr(usage, "input_tokens", 0) or 0
+        # Everything it was sent: with caching on, the API's own input_tokens leaves out what was
+        # read from the cache or written to it.
+        out["input_tokens"] = sum(
+            getattr(usage, f, 0) or 0
+            for f in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         out["output_tokens"] = getattr(usage, "output_tokens", 0) or 0
         return out
 
