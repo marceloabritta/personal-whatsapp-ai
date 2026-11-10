@@ -589,36 +589,90 @@ class Directory:
             except Exception as exc:
                 log.warning("directory learned-upsert failed: %s", exc)
 
-    async def note_used(self, email: str, *, phone: Optional[str] = None) -> None:
-        """Record the address that actually went on an invite, and bind the identity.
-
-        A booking the owner approved is the strongest identity evidence available and costs no
-        extra turn — so it is what writes a `contact_links` row.
-        """
-        email = (email or "").strip().lower()
-        c = self.by_email(email)
-        if c is None:
-            return
-        c["preferred"] = email
-        c["used_at"] = int(time.time())
+    async def _unlink(self, e164: str) -> None:
+        """Forget who a number is. A link removed in memory but not in Postgres comes back at the
+        next restart, so a failed delete is logged like a failed write."""
+        self._links.pop(e164, None)
+        self._phone_cache = {}
+        self._member_cache = {}
         if self.store is not None:
             try:
-                await self.store.upsert(c)
+                await self.store.unlink(e164)
             except Exception as exc:
-                log.warning("directory note_used upsert failed: %s", exc)
-        if phone:
-            e164 = to_e164(phone, self.s.contacts_default_region)
-            if e164 and self._links.get(e164) != c["resource_name"]:
-                self._links[e164] = c["resource_name"]
-                # `_links` is read by _resolve_phone, and this is the one path that changes it
-                # without rebuilding the index.
-                self._phone_cache = {}
-                self._member_cache = {}
-                if self.store is not None:
-                    try:
-                        await self.store.link(e164, c["resource_name"], "booked")
-                    except Exception as exc:
-                        log.warning("directory link failed: %s", exc)
+                log.warning("directory unlink failed: %s", exc)
+
+    async def note_used(self, emails, *, phone: Optional[str] = None) -> None:
+        """Record the addresses that went on one invite, and bind the chat's identity when the
+        booking proves it. `emails` is the booking's WHOLE guest list (a bare string is a booking
+        with that one address): who else is on the invite is the evidence.
+
+        Every address the book knows gets `preferred` / `used_at`. A `contact_links` row is a
+        different claim, "the person in this 1:1 chat IS this card", and a booking proves that
+        only sometimes. It used to be written per guest, last one winning, so a booking with
+        Felipe and Ana made from Felipe's chat linked his number to Ana's card, and Lisa then took
+        Ana for the person she was talking to. A link is written only when:
+          * the chat's number is on exactly one guest's card: the book names him, and the booking
+            settles which card (a number on two cards, or a stale link pointing elsewhere);
+          * or no card has the number and exactly ONE person is on the invite.
+        Never in a group (no `phone`), and never in the owner's chat with himself: he is not his
+        own guest. A number another card holds belongs to that card, whoever the booking was with.
+        A one-person booking that contradicts an existing link DROPS it instead of replacing it:
+        the two bookings disagree about who this chat is, so neither proves it. A missing link
+        costs a question; a wrong one puts somebody else's address on an invite.
+        """
+        if isinstance(emails, str):
+            emails = [emails]
+        guests: dict = {}     # resource_name -> Contact, for the addresses the book knows
+        people: set = set()   # one entry per PERSON on the invite: two of Ana's addresses are Ana
+        for raw in emails or []:
+            email = (raw or "").strip().lower()
+            if not email:
+                continue
+            c = self.by_email(email)
+            if c is None:
+                people.add(email)  # not in the book, but still somebody on the invite
+                continue
+            people.add(c["resource_name"])
+            guests[c["resource_name"]] = c
+            c["preferred"] = email
+            c["used_at"] = int(time.time())
+            if self.store is not None:
+                try:
+                    await self.store.upsert(c)
+                except Exception as exc:
+                    log.warning("directory note_used upsert failed: %s", exc)
+
+        if not phone:
+            return
+        region = self.s.contacts_default_region
+        e164 = to_e164(phone, region)
+        if not e164 or e164 == to_e164(self.s.owner_key, region):
+            return
+        on_card = {c["resource_name"] for k in match_keys(e164) for c in self._by_phone.get(k, ())}
+        named = [rn for rn in guests if rn in on_card]
+        current = self._links.get(e164)
+        if len(named) == 1:
+            target, source = named[0], "booked+card"
+        elif not on_card and len(people) == 1 and guests:
+            target, source = next(iter(guests)), "booked"
+            if current is not None and current != target and current in self._contacts:
+                await self._unlink(e164)
+                return
+        else:
+            return  # several people on the invite, or the book says this number is someone else
+        if current == target or (current is None and on_card == {target}):
+            return  # the number already answers him; a row would only repeat the card
+
+        self._links[e164] = target
+        # `_links` is read by _resolve_phone, and this is the one path that changes it without
+        # rebuilding the index.
+        self._phone_cache = {}
+        self._member_cache = {}
+        if self.store is not None:
+            try:
+                await self.store.link(e164, target, source)
+            except Exception as exc:
+                log.warning("directory link failed: %s", exc)
 
     # --- confirmed writes (the contacts skill) --------------------------------------------
 
