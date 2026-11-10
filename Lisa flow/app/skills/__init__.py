@@ -156,6 +156,7 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         tz_name=getattr(settings, "calendar_timezone", "UTC"),
         call_targets=[(t, skills[t].describe.format(owner_name=owner))
                       for t in callable_skills(domain, settings, skills)],
+        sees_media=bool(getattr(settings, "media_enabled", False)),
     )
 
 

@@ -258,6 +258,84 @@ async def main() -> None:
     check("owner's own lines are not labeled AI Assistant",
           "AI Assistant: @mary now add" not in text0)
 
+    # ---- 7. over the cap, the NEWEST files are the ones attached ----
+    # Regression (2026-11-10): older PDFs filled the 8 slots, the three screenshots he had just
+    # sent were cut as "— omitted", and asked about "the image above" she said she can't see
+    # images. Cap 2 here: three old PDFs, then the screenshot he is asking about.
+    print("7. over the cap: newest kept, oldest omitted")
+    history = [
+        media_rec("old1", media_type="document", mimetype="application/pdf",
+                  filename="old1.pdf", ts=1, from_me=True),
+        media_rec("old2", media_type="document", mimetype="application/pdf",
+                  filename="old2.pdf", ts=2, from_me=True),
+        media_rec("old3", media_type="document", mimetype="application/pdf",
+                  filename="old3.pdf", ts=3, from_me=True),
+        media_rec("shot", media_type="image", mimetype="image/png", ts=4, from_me=True),
+        media_rec("ask7", media_type="text", from_me=True, ts=5,
+                  text="@mary what are the times on the image above?"),
+    ]
+    media = {m: ("application/pdf", PDF) for m in ("old1", "old2", "old3")}
+    media["shot"] = ("image/png", JPEG)
+    graph, evo, reasoner = make_graph(history, media, cap=2)
+    await invoke(graph, tag_upsert("@mary what are the times on the image above?", mid="ask7"))
+    content = last_user_content(reasoner)
+    text0 = content[0]["text"]
+    imgs, docs = blocks_of(content, "image"), blocks_of(content, "document")
+    check("the screenshot he just sent is attached", len(imgs) == 1)
+    check("the newest PDF fills the other slot",
+          [d.get("title") for d in docs] == ["old3.pdf"])
+    check("the two oldest PDFs are the ones omitted",
+          "[PDF: old1.pdf — omitted]" in text0 and "[PDF: old2.pdf — omitted]" in text0)
+    check("the screenshot is not marked omitted", "[image — omitted]" not in text0)
+    check("blocks stay in chronological order",
+          [b["type"] for b in content[1:]] == ["document", "image"])
+
+    # ---- 8. the byte budget is spent newest first too ----
+    print("8. byte budget: newest kept")
+    history = [
+        media_rec("b_old", media_type="document", mimetype="application/pdf",
+                  filename="b_old.pdf", ts=1),
+        media_rec("b_new", media_type="document", mimetype="application/pdf",
+                  filename="b_new.pdf", ts=2),
+    ]
+    media = {"b_old": ("application/pdf", PDF), "b_new": ("application/pdf", PDF)}
+    graph, evo, reasoner = make_graph(history, media, budget=len(PDF) + 1)  # room for one
+    await invoke(graph, tag_upsert())
+    content = last_user_content(reasoner)
+    text0 = content[0]["text"]
+    check("the newer PDF gets the budget",
+          [d.get("title") for d in blocks_of(content, "document")] == ["b_new.pdf"])
+    check("the older PDF is the one marked too large", "[PDF: b_old.pdf — too large]" in text0)
+
+    # ---- 9. her prompt says she sees images, only when media is on ----
+    print("9. prompt tells her she sees images")
+    history = [media_rec("img9", media_type="image", mimetype="image/jpeg", ts=1)]
+    graph, evo, reasoner = make_graph(history, {"img9": ("image/jpeg", JPEG)})
+    await invoke(graph, tag_upsert())
+    check("media on → the prompt says she can see them",
+          "You can see them" in reasoner.calls[-1]["system"])
+    graph, evo, reasoner = make_graph(history, {"img9": ("image/jpeg", JPEG)},
+                                      media_enabled=False)
+    await invoke(graph, tag_upsert())
+    check("media off → no such claim", "You can see them" not in reasoner.calls[-1]["system"])
+
+    # ---- 10. voice notes over their cap: the newest are transcribed ----
+    print("10. voice-note cap: newest transcribed")
+    from app.nodes.context import _transcribe_audio, _newest  # noqa: E402
+
+    class Spoken:
+        async def get(self, wa_id):
+            return {"text": f"said {wa_id}"}
+
+    rows = [{"id": f"v{i}", "is_audio": True, "text": ""} for i in range(1, 4)]
+    s = Settings(evolution_apikey="x", assemblyai_api_key="k", transcription_enabled=True,
+                 max_context_transcriptions=2)
+    await _transcribe_audio(rows, Spoken(), s, build_trace(), "t", None)
+    check("the oldest voice note is the one left out",
+          [r["text"] for r in rows] ==
+          ["[voice message — not transcribed]", "said v2", "said v3"])
+    check("cap 0 keeps nothing", _newest([{"id": 1}], 0) == ([], [{"id": 1}]))
+
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     sys.exit(1 if _checks["fail"] else 0)
 

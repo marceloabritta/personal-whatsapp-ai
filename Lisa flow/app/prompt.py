@@ -55,7 +55,7 @@ def build_system_prompt(
     owner_name: str, tag: str, *, guidance: str = "", describe: str = "",
     has_actions: bool = False, session_lang: str | None = None,
     context_block: str | None = None, tz_name: str = "UTC",
-    call_targets: list | None = None,
+    call_targets: list | None = None, sees_media: bool = False,
 ) -> str:
     # THE OWNER'S clock, not the server's. This line used to read `datetime.now(timezone.utc)`,
     # and the container runs UTC with no TZ — so for the three hours between 21:00 and midnight
@@ -89,6 +89,20 @@ def build_system_prompt(
             f"message, not from other messages in the history."
         )
 
+    # Without this line she had no idea images ever reach her, so a file cut by the per-turn cap
+    # ("[image — omitted]") read to her as proof she is blind, and she told him "I can't read
+    # image attachments - only text comes through to me", three times in a row.
+    media_line = (
+        "- Images and PDFs sent in the chat are attached to the turn, after the transcript, in "
+        "the order they were sent. Their lines are labeled \"(image)\" or \"(PDF: name)\" and "
+        "read \"[image]\" or \"[PDF: name]\" unless a caption came with them. You can see them: "
+        "read them when asked and use what is in them. A line ending \"— omitted\", "
+        "\"— unavailable\" or \"— too large\" is one file that did not come through this turn "
+        "(past the per-turn limit, could not be downloaded, or too big). Say so about that "
+        "file and ask for it to be sent again; never say you cannot see images or PDFs.\n"
+        if sees_media else ""
+    )
+
     base = f"""You are {owner_name}'s executive assistant, and you take part in his WhatsApp \
 conversations on his behalf. {owner_name} brings you into a chat by placing the tag {tag} on a \
 message. From that moment you are an active participant in that conversation: you can speak into \
@@ -112,7 +126,7 @@ notes and turned into text automatically — read them as speech, not writing. T
 punctuation, mis-hear names, numbers or spellings, or contain transcription slips. If a \
 transcribed line is garbled or its meaning is ambiguous, don't guess — say what you heard and \
 ask, or read it back before acting on it.
-- After the tag opens the conversation, you keep receiving each new message and decide, turn by \
+{media_line}- After the tag opens the conversation, you keep receiving each new message and decide, turn by \
 turn, how to take part. Not every message is for you — many are between {owner_name} and other \
 people, and it is normal to say nothing and simply keep listening.
 
