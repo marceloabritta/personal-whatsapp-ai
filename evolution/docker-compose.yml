@@ -1,11 +1,11 @@
 # ============================================================================
 #  Full stack: Evolution API (WhatsApp gateway) + Postgres + Redis +
-#  dispatcher + Lisa (@lisa) + Mary (@mary). Runs on a single droplet.
+#  dispatcher + Lisa (@lisa). Runs on a single droplet.
 #  Everything talks over the internal "evolution-net".
 #
 #  NB: this file is the canonical record of what runs in production. The droplet
 #  deploys it as a base compose (api/redis/postgres) + a docker-compose.override.yml
-#  (dispatcher/lisa/mary) whose only intentional difference is ABSOLUTE build
+#  (dispatcher/lisa) whose only intentional difference is ABSOLUTE build
 #  contexts under /opt/personal-whatsapp-ai (this file uses repo-relative paths).
 #  Env, models, ports and versions here mirror the live override — keep them in sync.
 # ============================================================================
@@ -54,11 +54,12 @@ services:
   # One Evolution instance posts every message to ONE webhook. The `dispatcher`
   # is that single target; it reads the summon @tag (and per-chat window
   # ownership) and forwards the raw payload to the flow that owns the turn:
-  #   @lisa → lisa  (LangGraph brain — the core flow)
-  #   @mary → mary  (experimental programmatic orchestrator)
-  # To add a new experimental flow, add its service below, then wire a new
-  # @tag → its URL in the dispatcher env — the core @lisa flow stays untouched.
-  # The retired Node "secretary"/"Mary" flow is preserved on archive/secretary-v1.
+  #   @lisa → lisa  (LangGraph brain — the only flow today)
+  # To add an experimental flow, add its service below, a (tags, url) route in
+  # dispatcher/app.py, and its @tag → URL in the dispatcher env — the core @lisa
+  # flow stays untouched.
+  # Retired: the Node "secretary"/"Mary" flow (branch archive/secretary-v1) and the
+  # experimental @mary orchestrator (in history: git log -- "Mary flow").
 
   dispatcher:
     container_name: flow_dispatcher
@@ -69,7 +70,6 @@ services:
       - api
       - redis
       - lisa
-      - mary
     ports:
       - "127.0.0.1:8090:8090" # the ONE webhook Evolution posts to (localhost-bound; reached in-net via DNS)
     environment:
@@ -86,9 +86,6 @@ services:
       # A new flow adds NEW_TAGS + NEW_URL here; @lisa stays untouched.
       LISA_TAGS: "@lisa"
       LISA_URL: http://lisa:8000/webhook
-      # @mary — the experimental orchestrator flow (calendar + web skills).
-      MARY_TAGS: "@mary"
-      MARY_URL: http://mary:8000/webhook
     networks:
       - evolution-net
 
@@ -105,7 +102,7 @@ services:
       - postgres
     ports:
       # Debug only (dispatcher reaches lisa via service DNS on :8000 internally).
-      # 8001 on the host to avoid clashing with the old mary_brain on 8000.
+      # 8001 on the host, kept from when the retired mary_brain held 8000.
       - "127.0.0.1:8001:8000"
     environment:
       EVOLUTION_URL: http://api:8080
@@ -166,9 +163,9 @@ services:
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
       CALENDAR_TIMEZONE: America/Sao_Paulo
       # Contact memory — Lisa reads the address book on calendar turns and writes back the
-      # addresses she learns. It has its OWN refresh token: the calendar one is shared by
-      # both lisa and mary, and google-auth only warns on a missing scope, so reissuing it to add
-      # contacts would risk two live calendars at once.
+      # addresses she learns. It has its OWN refresh token: google-auth only warns on a
+      # missing scope, so reissuing the calendar one to add contacts would risk the live
+      # calendar.
       CONTACTS_ENABLED: "true"
       GOOGLE_CONTACTS_REFRESH_TOKEN: ${GOOGLE_CONTACTS_REFRESH_TOKEN}
       CONTACTS_DEFAULT_REGION: "BR"
@@ -181,67 +178,6 @@ services:
       # calendar's ability to call it mid-booking. Separate from the silent learning above. On
       # since 2026-11-10, after tests/live_contacts.py wrote to and deleted a throwaway contact.
       CONTACTS_CRUD_ENABLED: "true"
-    networks:
-      - evolution-net
-
-  # @mary — the experimental programmatic-orchestrator brain (calendar + web skills).
-  # ISOLATED from @lisa so a test flow can never corrupt the core one:
-  #   - own Redis DB (2) for its listening window + echo store (Lisa uses DB 1);
-  #   - own POSTGRES DATABASE (`mary`), not merely its own schema. The checkpointer keys
-  #     threads on sha256(instance:chat_jid), which is IDENTICAL across flows for the same
-  #     chat, so a shared database would put Mary and Lisa on ONE thread row per chat
-  #     (messages, pending_action, loop_domain, session_lang) and a fresh-tag reset would
-  #     wipe the other's history. A separate database isolates the checkpoint tables, the
-  #     durable loop log (mary_log) and the transcript cache in one move, with no code
-  #     change — identity between the two flows stays env-only.
-  #     Created once with: CREATE DATABASE mary OWNER evolution;
-  # Same WhatsApp number/account; the dispatcher routes @mary here, @lisa stays on lisa.
-  mary:
-    container_name: mary_brain
-    build:
-      context: ../Mary flow
-    restart: always
-    depends_on:
-      - api
-      - redis
-      - postgres
-    environment:
-      EVOLUTION_URL: http://api:8080
-      EVOLUTION_APIKEY: ${AUTHENTICATION_API_KEY}
-      EVOLUTION_INSTANCE: secretaria
-      OWNER_NAME: "Marcelo"
-      # @mary wakes this brain.
-      MARY_TRIGGER_TAG: "@mary"
-      # Own Redis DB, clear of Lisa's (1), Evolution's cache, and the dispatcher's (4).
-      REDIS_URL: redis://redis:6379/2
-      LOOP_TTL_SECONDS: "60"
-      # Memory: seed size + the LangGraph checkpointer + the durable loop log. Own DB
-      # (`mary`), never Lisa's `evolution` — see the isolation note above.
-      CONTEXT_WINDOW_MESSAGES: "30"
-      DATABASE_URL: postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/mary
-      LOG_SCHEMA: mary_log
-      MEDIA_ENABLED: "true"
-      # Reasoning (provider-neutral; Anthropic today).
-      LLM_PROVIDER: anthropic
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      CLAUDE_MODEL: claude-sonnet-5
-      CLAUDE_EFFORT: high
-      CLAUDE_MAX_TOKENS: "10000"
-      WEB_SEARCH_MAX_USES: "5"
-      PROMPT_VERSION: "2026-09-28-meet-by-default"
-      # Programmatic domain orchestrator.
-      DEFAULT_DOMAIN: web
-      ROUTER_EFFORT: low
-      MAX_TOOL_ACTIONS: "4"
-      # Transcription (AssemblyAI).
-      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
-      ASSEMBLYAI_LANGUAGE: auto
-      # Google calendar tool (owner's account — same as Lisa; confirmation-gated).
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
-      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
-      CALENDAR_TIMEZONE: America/Sao_Paulo
     networks:
       - evolution-net
 

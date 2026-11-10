@@ -135,8 +135,7 @@ class Settings(BaseSettings):
     # Ships OFF, the way MEDIA_ENABLED and AUTO_TRANSCRIBE_ENABLED did.
     contacts_enabled: bool = False
     # A SEPARATE refresh token from the calendar one. Re-minting a single shared token is how
-    # the ops step would take the live calendar down — and the same GOOGLE_REFRESH_TOKEN is
-    # consumed by both the lisa and mary services, so the blast radius is two brains, not one.
+    # the ops step would take the live calendar down.
     # Empty = the feature stays off no matter what contacts_enabled says.
     google_contacts_refresh_token: str = ""
     contacts_sync_seconds: float = 900.0      # incremental People sync cadence
