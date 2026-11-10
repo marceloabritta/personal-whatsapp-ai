@@ -25,9 +25,11 @@ dispatcher parses payloads and detects tags/own-messages exactly as the flows do
 stays a standalone service with no cross-folder imports."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
@@ -123,36 +125,92 @@ class Config:
         return None
 
 
-# ── ownership store: which flow owns a chat's open window (Redis, mem fallback) ─
+# ── ownership store: which flow owns a chat's open window (memory, plus Redis) ─
 class OwnerStore:
-    """chat jid → forward URL, with a TTL window. Redis when reachable (survives
-    restarts, shared if the dispatcher is ever scaled), in-memory otherwise."""
+    """chat jid → forward URL, with a TTL window.
+
+    Memory always holds the window. With REDIS_URL set, Redis holds it too, so a window
+    survives a dispatcher restart. Redis is asked first; when it fails, or has nothing for the
+    chat, memory answers. A Redis failure is logged and never raised: the webhook has to queue
+    its forward whatever state Redis is in. After a failure Redis is left alone for
+    REDIS_RETRY_AFTER seconds, so the messages of an outage do not each wait on a timeout.
+
+    Memory is this process's own copy, so falling back to it assumes ONE dispatcher process,
+    which is what the compose file runs."""
+
+    REDIS_TIMEOUT = 1.0  # seconds to connect, and to wait for each reply
+    REDIS_RETRY_AFTER = 5.0  # seconds Redis is left alone after it fails
+    MEM_SWEEP_AT = 2048  # windows held in memory before the lapsed ones are swept out
 
     def __init__(self, redis_url: str | None, ttl: int) -> None:
         self.ttl = ttl
         self._redis = None
         self._mem: dict[str, tuple[str, float]] = {}
+        self._redis_down = False  # the last Redis call failed
+        self._skip_until = 0.0  # time.monotonic() before which Redis is not tried
         if redis_url:
             try:
                 import redis.asyncio as aioredis
 
-                self._redis = aioredis.from_url(redis_url, decode_responses=True)
-            except Exception:  # no redis pkg / bad url → memory fallback
+                # from_url opens no connection: a Redis that is down shows up at the first call.
+                self._redis = aioredis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=self.REDIS_TIMEOUT,
+                    socket_timeout=self.REDIS_TIMEOUT,
+                )
+            except Exception:  # no redis pkg / bad url → memory only
                 self._redis = None
 
     @staticmethod
     def _key(jid: str) -> str:
         return f"disp:owner:{jid}"
 
+    def state(self) -> str:
+        """Where windows are being kept: "redis", "memory" (none configured) or
+        "memory_redis_down"."""
+        if self._redis is None:
+            return "memory"
+        return "memory_redis_down" if self._redis_down else "redis"
+
+    async def _redis_call(self, command: str, *args: Any, **kw: Any) -> tuple[bool, Any]:
+        """One Redis command. (True, reply) when Redis answered; (False, None) when there is
+        no Redis, it is being left alone after a failure, or it failed just now."""
+        if self._redis is None or time.monotonic() < self._skip_until:
+            return False, None
+        try:
+            reply = await getattr(self._redis, command)(*args, **kw)
+        except Exception as exc:  # down, restarting, loading, timing out: memory answers
+            self._skip_until = time.monotonic() + self.REDIS_RETRY_AFTER
+            if not self._redis_down:  # one line per outage, not one per message
+                self._redis_down = True
+                error = f"{type(exc).__name__}: {exc}"[:200]
+                log.warning(json.dumps({"owners": "redis_down", "error": error}))
+            return False, None
+        if self._redis_down:
+            self._redis_down = False
+            log.info('{"owners":"redis_back"}')
+        return True, reply
+
+    async def ping(self) -> str:
+        """Try Redis once, then say where windows are being kept (see `state`)."""
+        await self._redis_call("ping")
+        return self.state()
+
     async def set(self, jid: str, url: str) -> None:
-        if self._redis is not None:
-            await self._redis.set(self._key(jid), url, ex=self.ttl)
-        else:
-            self._mem[jid] = (url, time.time() + self.ttl)
+        if len(self._mem) >= self.MEM_SWEEP_AT:
+            now = time.time()
+            self._mem = {j: item for j, item in self._mem.items() if item[1] > now}
+        # Memory first, so its copy lapses no later than Redis's: when Redis says a window is
+        # over, memory must not bring it back.
+        self._mem[jid] = (url, time.time() + self.ttl)
+        await self._redis_call("set", self._key(jid), url, ex=self.ttl)
 
     async def get(self, jid: str) -> str | None:
-        if self._redis is not None:
-            return await self._redis.get(self._key(jid))
+        answered, url = await self._redis_call("get", self._key(jid))
+        if answered and url:
+            return url
+        # Redis failed, or has nothing: a window opened while it was down exists only here.
         item = self._mem.get(jid)
         if not item:
             return None
@@ -172,8 +230,9 @@ async def _startup() -> None:
     app.state.owners = OwnerStore(cfg.redis_url, cfg.window_ttl)
     app.state.http = httpx.AsyncClient(timeout=10.0)
     log.info(
-        '{"boot":"dispatcher","redis":%s,"ttl":%d,"routes":%d}',
+        '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d}',
         "true" if cfg.redis_url else "false",
+        await app.state.owners.ping(),
         cfg.window_ttl,
         len(cfg.routes),
     )
@@ -192,6 +251,7 @@ async def health() -> dict:
         "routes": [{"tags": t, "url": u} for t, u in cfg.routes],
         "auto_transcribe_url": cfg.auto_transcribe_url,
         "window_ttl": cfg.window_ttl,
+        "owner_store": app.state.owners.state(),
     }
 
 
