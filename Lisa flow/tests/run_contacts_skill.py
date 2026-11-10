@@ -47,6 +47,7 @@ from app.skills.contacts import (  # noqa: E402
 from app.skills.contacts_format import (  # noqa: E402
     compose_create, compose_delete, compose_update, fmt_update,
 )
+from app.skills.calendar import calendar_revise  # noqa: E402
 from app.skills.router import route_domain  # noqa: E402
 from app.state import HANDOFF_MARK  # noqa: E402
 from app.threads import make_thread_id  # noqa: E402
@@ -434,6 +435,14 @@ def search_checks() -> None:
     check("a name nobody has finds nobody", search_contacts(all_, "zebedeu") == [])
     check("an empty query finds nobody", search_contacts(all_, "  ") == [])
 
+    # Seen live: every "reunião COM o X" surfaced these two as a which-one question.
+    d, _svc, _st = book([person("people/c1", "Alain - Crypto.com"), person("people/c2", "Erika Hoteis. com"),
+                         TESTOLINO])
+    found = [c["name"] for c, _why in d.mentions("marca uma reunião com o Testolini dia 20/11")]
+    check("'com' is a word, not the end of a web address", found == [], str(found))
+    found = [c["name"] for c, _why in d.mentions("reunião com o Zeferino")]
+    check("and a real name in the same sentence still resolves", found == ["Zeferino Testolino"], str(found))
+
 
 # --- 4. the router ----------------------------------------------------------------------------
 
@@ -787,10 +796,12 @@ async def mirror_checks() -> None:
 class ChatEvolution:
     instance = "secretaria"
 
-    def __init__(self) -> None:
+    def __init__(self, start_ts: int = 1793630000) -> None:
         self.sent: list = []
         self.history: list = []
-        self._ts = itertools.count(1793630000)
+        # Fixed by default, so the offline suite reads the same any day. A live run passes now:
+        # stamped in the past, "sexta" is a day already gone and the real model asks about it.
+        self._ts = itertools.count(start_ts)
 
     def store(self, mid, text, *, from_me, name="Marcelo"):
         self.history.append({"id": mid, "from_me": from_me, "text": text, "push_name": name,
@@ -1028,6 +1039,70 @@ async def call_read_checks() -> None:
     check("his yes books it", c.cal.n("create") == 1)
     check("with the guest the contacts skill found",
           c.cal.calls[-1][1]["attendees"] == [NEW_ADDRESS])
+
+
+TESTOLINO = person("people/z", "Zeferino Testolino", emails=["zeferino@example.com"])
+GUESTLESS = {"task": "calendar.create", "title": "Marcelo & Testolini", "start": "2027-03-05T15:00:00-03:00"}
+
+
+async def revise_checks() -> None:
+    print("\na booking for someone with no address asks contacts first, even when the model skips it")
+    c = Chat([TESTOLINO, *fifteen_felipes()])
+    c.cal.responses["create"] = CREATED
+    st = await c.say("@lisa marca reuniao com o Testolini sexta 15h", script=[
+        {"lang": "pt", "actions": [dict(GUESTLESS)]},               # the skip seen live
+        {"lang": "pt", "actions": [{"task": "contacts.find", "query": "testolini"}]},
+        {"lang": "pt", "call": {"skill": "calendar", "request": "Zeferino Testolino: zeferino@example.com"}},
+        {"lang": "pt", "actions": [{**GUESTLESS, "title": "Marcelo & Zeferino Testolino",
+                                    "attendees": ["zeferino@example.com"]}]},
+    ])
+    check("the guestless booking went to contacts, and came back",
+          domains_called(c) == ["calendar", "contacts", "contacts", "calendar"], str(domains_called(c)))
+    asked = c.stub.calls[1]["messages"][-1]["content"]
+    check("contacts was asked for that person's address", "Find Testolini's email, for an invite" in asked, asked)
+    check("the search found him", "zeferino@example.com" in c.stub.calls[2]["messages"][-1]["content"])
+    back = c.stub.calls[3]["messages"][-1]["content"]
+    check("calendar heard the answer", back.startswith(HANDOFF_MARK) and "zeferino@example.com" in back, back)
+    check("with his request still in front of it",
+          any("Testolini sexta 15h" in m["content"] for m in c.stub.calls[3]["messages"]))
+    check("only one card went out, the one with the guest",
+          len(c.evo.sent) == 1 and "zeferino@example.com" in c.last(), str(c.evo.sent))
+    check("nothing booked before his yes", c.cal.n("create") == 0)
+    await c.say("sim", script=[])
+    check("his yes books it with the guest", c.cal.calls[-1][1].get("attendees") == ["zeferino@example.com"])
+
+    print("\n...but only once, and only when nothing explains the empty guest list")
+    c = Chat([TESTOLINO])
+    await c.say("@lisa marca reuniao com o Testolini sexta 15h", script=[
+        {"lang": "pt", "call": {"skill": "contacts", "request": "Find Testolini's email, for an invite"}},
+        {"lang": "pt", "actions": [{"task": "contacts.find", "query": "testolini zzz"}]},
+        {"lang": "pt", "call": {"skill": "calendar", "request": "Nobody called Testolini is on file."}},
+        {"lang": "pt", "actions": [dict(GUESTLESS)]},
+    ])
+    check("contacts found nobody: the guestless card goes out, no second search",
+          domains_called(c) == ["calendar", "contacts", "contacts", "calendar"]
+          and "Testolini" in c.last(), f"{domains_called(c)} {c.last()!r}")
+
+    s = on_settings()
+    owner = {"from_me": True, "messages": [], "skill_calls": 0}
+    def revised(action, state=owner, settings=s):
+        result = {"actions": [action], "message": None, "call": None}
+        return calendar_revise(result, state, settings) is not result
+    check("the guestless 'Marcelo & Testolini' is revised", revised(dict(GUESTLESS)))
+    check("not when he asked for a quiet event", not revised({**GUESTLESS, "send_invites": False}))
+    check("not when it has a guest", not revised({**GUESTLESS, "attendees": ["a@b.com"]}))
+    check("not a topic title", not revised({**GUESTLESS, "title": "Dentista"}))
+    check("not someone else's 'Ana & Pedro'", not revised({**GUESTLESS, "title": "Ana & Pedro"}))
+    check("not with the flag off", not revised(dict(GUESTLESS), settings=on_settings(contacts_crud_enabled=False)))
+    check("not for a message that is not his", not revised(dict(GUESTLESS), state={**owner, "from_me": False}))
+    check("not after a call this activation", not revised(dict(GUESTLESS), state={**owner, "skill_calls": 1}))
+    check("not while calendar is itself the one called",
+          not revised(dict(GUESTLESS), state={**owner, "skill_stack": [{"domain": "contacts"}]}))
+    listed = {**owner, "seen_contacts": {"z@x.com": {"name": "Zeferino Testolini"}}}
+    check("not when the block listed him", not revised(dict(GUESTLESS), state=listed))
+    heard = {**owner, "messages": [{"role": "user",
+                                    "content": f"{HANDOFF_MARK}The contacts skill answered: none"}]}
+    check("not once contacts has answered in this loop", not revised(dict(GUESTLESS), state=heard))
 
 
 async def call_write_checks() -> None:
@@ -1540,6 +1615,7 @@ async def main() -> int:
     await contact_cannot_ask_checks()
     await decline_and_delete_checks()
     await call_read_checks()
+    await revise_checks()
     await call_write_checks()
     await next_step_checks()
     await bound_checks()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 
 from ..skills import (
-    context_block_for, output_schema_for, reason_runtime_for, server_tools_for,
+    SKILLS, context_block_for, output_schema_for, reason_runtime_for, server_tools_for,
     system_prompt_for,
 )
 from ..state import MessageState
@@ -68,6 +68,17 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
         model=runtime["model"], effort=runtime["effort"], think=runtime["think"],
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
+
+    skill = SKILLS.get(domain)
+    if skill is not None and skill.revise is not None:
+        # This pass's address block counts as seen: it is what the model just read.
+        seen_now = {**(state.get("seen_contacts") or {}), **seen_contacts}
+        revised = skill.revise(result, {**state, "seen_contacts": seen_now}, settings)
+        if revised is not result:
+            trace.code(tid, node="reason", loop_id=state.get("loop_id"), domain=domain,
+                       revised=True, was_actions=result.get("actions") or [],
+                       call=revised.get("call"))
+            result = revised
 
     llm_state = result.get("state") or "keep_listening"
     message = result.get("message")

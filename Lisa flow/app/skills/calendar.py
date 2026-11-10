@@ -10,6 +10,7 @@ import difflib
 import unicodedata
 
 from ..presets import MEETING_MINUTES
+from ..state import HANDOFF_MARK
 from ..tools.calendar import (
     CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DEFAULTS_GUIDANCE, DESCRIBE, GUIDANCE,
     GoogleCalendarService, apply_presets,
@@ -185,6 +186,69 @@ def _address_book_context(state: dict, ctx: dict):
     return {"block": block, "state": {"seen_contacts": seen}}
 
 
+def _contacts_heard(state: dict) -> bool:
+    """The contacts skill already answered somewhere in this loop."""
+    for m in state.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if isinstance(content, str) and content.startswith(HANDOFF_MARK) \
+                and content[len(HANDOFF_MARK):].startswith("The contacts skill"):
+            return True
+    return False
+
+
+def _guest_in_title(title: str, owner_name: str) -> str | None:
+    """The other side of a "Marcelo & Felipe" title, the form the calendar prompt gives a meeting
+    whose topic it could not tell. None for any other title."""
+    left, sep, right = (title or "").partition("&")
+    owner = _normalize(owner_name).split()[:1]
+    if not sep or not right.strip() or _normalize(left).split() != owner:
+        return None
+    return right.strip()
+
+
+def calendar_revise(result: dict, state: dict, settings) -> dict:
+    """A booking for someone with no address, made before asking the contacts skill → ask it first.
+
+    The prompt already says to (CONTACTS_CALL_GUIDANCE), and most passes do. Live, some still put up
+    "Marcelo & Testolini" with no guests, reasoning that he had not asked for an invite, so the card
+    went out naming a person who would never hear of the meeting while his address sat in the book.
+    The sign is in the output itself: a create titled with him and a guest, and no guest on it.
+
+    Only once per loop, and only when nothing else explains the empty guest list: the person is not
+    in the address block (that line is the model's to weigh), he did not ask for a quiet event, and
+    contacts has not answered yet. Contacts that finds nobody hands back, and the booking then goes
+    out as the model wrote it."""
+    if not getattr(settings, "contacts_crud_on", False):
+        return result
+    if result.get("call") or state.get("skill_stack") or int(state.get("skill_calls") or 0):
+        return result
+    if not (state.get("from_me") or state.get("owner_replies")):
+        return result                      # contacts is his alone; the call would only be refused
+    actions = result.get("actions") or []
+    if len(actions) != 1 or actions[0].get("task") != "calendar.create":
+        return result
+    create = actions[0]
+    if create.get("attendees") or create.get("send_invites") is False:
+        return result
+    guest = _guest_in_title(create.get("title") or "", getattr(settings, "owner_name", ""))
+    if not guest:
+        return result
+    guest_toks = set(_normalize(guest).split())
+    for seen in (state.get("seen_contacts") or {}).values():
+        if guest_toks & set(_normalize(seen.get("name") or "").split()):
+            return result                  # listed above: the model saw what is on file
+    if _contacts_heard(state):
+        return result
+
+    known = [{"field": k, "value": str(v).lower() if isinstance(v, bool) else str(v)}
+             for k, v in create.items() if k != "task" and v not in (None, "", [])]
+    request = f"Find {guest}'s email, for an invite"
+    return {**result, "actions": [], "message": None, "call": {"skill": "contacts", "request": request},
+            "workflow": {"task": "calendar.create", "known_inputs": known,
+                         "open_questions": [{"field": "attendees",
+                                             "reason": f"need {guest}'s email"}]}}
+
+
 def calendar_resolve_gate(verb: str, inputs: dict, state: dict):
     """(patched_inputs, error) — update/delete must target an event surfaced by a prior search
     in THIS loop. Moved verbatim out of the execute node, which used to hardcode it; behaviour
@@ -238,6 +302,7 @@ CALENDAR = Skill(
                     ("contacts_crud_on", CONTACTS_CALL_GUIDANCE),
                     ("presets_enabled", DEFAULTS_GUIDANCE)],
     calls={"contacts"},
+    revise=calendar_revise,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",
     effort="medium",

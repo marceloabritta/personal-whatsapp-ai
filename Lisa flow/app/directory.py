@@ -61,6 +61,9 @@ _MIN_TOKEN = 3
 _STOP = {
     "de", "da", "do", "dos", "das", "e", "jr", "dr", "dra", "sr", "sra", "the", "and",
     "neto", "filho", "junior",
+    # Web addresses saved as names ("Alain - Crypto.com", "Erika Hoteis. com"). Indexed, "com"
+    # made every "reunião COM o Felipe" surface them as a which-one question.
+    "com", "www", "net", "org",
 }
 # A stored phone shorter than country+area is not comparable to a JID; indexing it invites a
 # confident wrong bind (that is what an "ends with" tail match used to do).
