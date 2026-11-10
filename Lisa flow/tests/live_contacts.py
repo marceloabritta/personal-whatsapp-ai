@@ -137,7 +137,8 @@ def google_checks(gp: GooglePeople) -> None:
 
 class Chat:
     def __init__(self, s: Settings, gp: GooglePeople, directory: Directory) -> None:
-        self.evo = ChatEvolution()
+        # Stamped now: the fixed past stamp the offline suite uses turns "sexta" into a day gone.
+        self.evo = ChatEvolution(start_ts=int(time.time()))
         self.cal = StubCalendar()
         contacts = ContactsService(s)
         contacts.directory = directory
@@ -196,15 +197,29 @@ async def model_checks(s: Settings, gp: GooglePeople) -> None:
         check("his yes writes it to Google", fresh(gp, rn)["emails"] == [NEW], str(fresh(gp, rn)))
         check("and she reports it", NEW in c.last(), c.last())
 
-        # 2. A booking that needs an address only the book has, and that the block does not list.
+        # 2. A booking for a name the calendar's block cannot place, only the contacts search can
+        #    ("Testolini"). Calendar has to ask contacts and come back with his address.
+        for attempt in (1, 2):
+            c = Chat(s, gp, directory)
+            st = await c.say("@lisa marca uma reunião com o Testolini sexta às 15h")
+            pending = st.get("pending_action") or {}
+            check(f"[{attempt}] calendar asked contacts", int(st.get("skill_calls") or 0) >= 1,
+                  str(st.get("skill_calls")))
+            check(f"[{attempt}] the booking reaches a card", pending.get("task") == "calendar.create", c.last())
+            check(f"[{attempt}] with the address from the book", NEW in (pending.get("attendees") or []),
+                  str(pending))
+            check(f"[{attempt}] back in calendar, with nobody left waiting",
+                  st.get("domain") == "calendar" and not st.get("skill_stack"), str(st.get("skill_stack")))
+            check(f"[{attempt}] nothing is booked before his yes", c.cal.n("create") == 0)
+
+        # 2b. His full name IS in the calendar's block, matched by name alone. The calendar rule is
+        #     to confirm who he is first; a card is fine too, as long as the address is his.
         c = Chat(s, gp, directory)
         st = await c.say("@lisa marca uma reunião com o Zeferino Testolino sexta às 15h")
         pending = st.get("pending_action") or {}
-        check("the booking reaches a card", pending.get("task") == "calendar.create", c.last())
-        check("with the address from the book", NEW in (pending.get("attendees") or []), str(pending))
-        check("back in calendar, with nobody left waiting",
-              st.get("domain") == "calendar" and not st.get("skill_stack"), str(st.get("skill_stack")))
-        check("nothing is booked before his yes", c.cal.n("create") == 0)
+        check("a name on file: she confirms him or carries his address, and books nothing",
+              c.cal.n("create") == 0 and (NEW in c.last()) and
+              (not pending or NEW in (pending.get("attendees") or [])), c.last())
 
         # 3. Someone else asking for a number.
         c = Chat(s, gp, directory)

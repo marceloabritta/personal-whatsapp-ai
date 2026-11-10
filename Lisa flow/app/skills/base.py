@@ -65,6 +65,13 @@ class Skill:
     # write, not a calendar write.
     side_effects: set = field(default_factory=set)
 
+    # (result, state, settings) -> result. Code's second look at the model's decision, before
+    # anything acts on it: the reason node passes the parsed output through it on every pass in
+    # this skill. For a step the prompt asks for and the model still skips now and then, when the
+    # skip is plain to see in the output itself. Pure and synchronous; return the result unchanged
+    # (the same object) when there is nothing to do. None = the model's word stands.
+    revise: Optional[Callable] = None
+
     # (state, ctx) -> str | None. A block appended to this skill's system prompt, built in code from
     # in-memory state on the turn it is used. MUST be pure and synchronous: it runs inside the reply
     # path, so anything that awaits or burns CPU here stalls every chat, not just this one.

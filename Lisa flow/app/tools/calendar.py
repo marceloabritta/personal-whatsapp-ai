@@ -315,6 +315,7 @@ CONTACTS_GUIDANCE = """ADDRESS BOOK — you keep {owner_name}'s contacts. The pe
 # Appended only when the contacts skill is on, for the same reason as the block above.
 CONTACTS_CALL_GUIDANCE = """THE CONTACTS SKILL — the list above only holds people this conversation clearly points at, so a name missing from it may still be in {owner_name}'s contacts.
 - He names someone for an event, no address is listed, and none is written in this chat -> before you ask him, call the contacts skill: {{"skill": "contacts", "request": "Find Felipe's email, for an invite"}}. You come back here with what it found, and the rules above apply to it: one address, use it; several, ask which; none, ask him.
+- Naming who a meeting is with ("reunião com o Testolini") IS naming a guest, even when he says nothing about invites. Do not book it with only their name in the title and no guest: call first. Book without a guest only once the contacts skill has found no address, or when he says not to invite them.
 - He asks to change, save or delete a contact as part of this ("her email changed to x, update it and invite her") -> call the contacts skill for that part first, with the new value in the request. It asks him on its own card, and you come back here after his yes to do the calendar part.
 - A card of yours still standing is withdrawn when you call. When you come back, propose it again if it still applies.
 - A plain correction to an address on an invite is not a contact change: his address wins for the invite, as above, and nothing is called."""
