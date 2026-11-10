@@ -135,7 +135,10 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
                       called_by: dict | None = None) -> str:
     """Render the domain-scoped system prompt: the shared base + this skill's block. The
     actions/workflow JSON-contract section is included only for local skills. `called_by` is the
-    frame of the skill that brought this one in, when one did."""
+    frame of the skill that brought this one in, when one did.
+
+    Returned as it was built (a prompt.SystemPrompt): a str that also says where its reusable
+    prefixes end. Hand it to the reasoner as is, or that is lost and nothing is cached."""
     from ..prompt import build_system_prompt, called_by_block
 
     skill = skills[domain]

@@ -64,6 +64,24 @@ def date_legend(now: datetime) -> str:
             f"ahead, not past.")
 
 
+class SystemPrompt(str):
+    """The system prompt, plus where its reusable prefixes end.
+
+    It IS the prompt text, so everything that reads a prompt as a string keeps working. What it
+    adds is `stable_ends`: character offsets, in order. The text before each one is the same on
+    every call that shares what came before it, so a provider that can cache a prompt prefix
+    (Anthropic's prompt caching) may reuse it up to there. Anything that copies the string
+    (`.lower()`, slicing, `+`) gets a plain str back, with no offsets — a prompt that is sent
+    whole and cached nowhere, which is always correct."""
+
+    stable_ends: tuple = ()
+
+    def __new__(cls, text: str, stable_ends: tuple = ()):
+        self = super().__new__(cls, text)
+        self.stable_ends = tuple(e for e in stable_ends if 0 < e < len(text))
+        return self
+
+
 def called_by_block(owner_name: str, frame: dict) -> str:
     """What a skill is told while another one is waiting on it (nodes/handoff.py)."""
     caller = frame.get("domain")
@@ -82,7 +100,7 @@ def build_system_prompt(
     has_actions: bool = False, session_lang: str | None = None,
     context_block: str | None = None, tz_name: str = "UTC",
     call_targets: list | None = None, sees_media: bool = False,
-) -> str:
+) -> SystemPrompt:
     # THE OWNER'S clock, not the server's. This line used to read `datetime.now(timezone.utc)`,
     # and the container runs UTC with no TZ — so for the three hours between 21:00 and midnight
     # in São Paulo the prompt asserted TOMORROW's date as today, and every "amanhã" she resolved
@@ -95,21 +113,27 @@ def build_system_prompt(
     en_header = header_for(owner_name, "en")
     pt_header = header_for(owner_name, "pt")
 
-    # Language is LOCKED to the tag that opened the conversation (see reason node). Once locked,
-    # tell the model exactly which language to use; on the first pass it judges from the order.
-    if session_lang:
-        lang_rule = (
-            f'This conversation is in "{session_lang}" (ISO 639-1) — the language {owner_name} '
-            f'used in the message that opened it. Write EVERY message in {session_lang}, even '
-            f'when other messages in the recent history are in another language, and set "lang" '
-            f'to "{session_lang}".'
-        )
-    else:
-        lang_rule = (
-            f"{owner_name} speaks several languages. Write in the language of {owner_name}'s "
-            f"message that opened this conversation (the tagged order) — judge it from THAT "
-            f"message, not from other messages in the history."
-        )
+    # Language is LOCKED to the tag that opened the conversation (see reason node). On the first
+    # pass she judges it from the order; once locked, she is told exactly which language it is.
+    #
+    # The rule stays where it always was and never changes. The lock is a separate sentence,
+    # right after the JSON contract, whose "lang" field it settles. It used to REPLACE the rule,
+    # right here, a quarter of the way in — so the first pass after a tag and every pass after it
+    # were different texts from this point on, and nothing after it could be reused between them
+    # (see the note on caching at the return). It goes BEFORE the date lines, not after them: the
+    # date rules stay the last thing she reads on every pass, locked or not.
+    lang_rule = (
+        f"{owner_name} speaks several languages. Write in the language of {owner_name}'s "
+        f"message that opened this conversation (the tagged order) — judge it from THAT "
+        f"message, not from other messages in the history."
+    )
+    lang_lock = (
+        f'\n\nThis conversation is in "{session_lang}" (ISO 639-1) — the language {owner_name} '
+        f'used in the message that opened it. Write EVERY message in {session_lang}, even '
+        f'when other messages in the recent history are in another language, and set "lang" '
+        f'to "{session_lang}".'
+        if session_lang else ""
+    )
 
     # Without this line she had no idea images ever reach her, so a file cut by the per-turn cap
     # ("[image — omitted]") read to her as proof she is blind, and she told him "I can't read
@@ -254,14 +278,29 @@ suggested next steps or follow-up questions; give the answer and stop."""
     # every "tomorrow" to the current clock "and against nothing else", so a lunch agreed for
     # "amanhã" on Tuesday and confirmed with "@lisa agendar" on Wednesday was booked for
     # Thursday. Both such bookings in the log were a day late.
-    return (f"{base}{skill_block}{context_block or ''}{action_para}"
-            f"\n\n{contract}\n\nCurrent date and time: {today}. "
-            f"That is {owner_name}'s own clock.\n\n{legend}\n\n"
-            f"Every line of the conversation shows when it was sent. A relative date means what "
-            f"it meant to the person who wrote it, on the day they wrote it: \"tomorrow\" in a "
-            f"message from yesterday is today, and a \"Friday\" said last week may already be "
-            f"over. Resolve each relative date against the date of the message it appears in, "
-            f"never against the current date. When {owner_name}'s request only points back "
-            f"(\"book it\", \"marca isso\"), take the date from the message he is pointing at. If "
-            f"the date you arrive at has already passed, or a message sent just after midnight "
-            f"leaves it unclear which day was meant, ask before you act.")
+    #
+    # CACHING. A provider can reuse a prompt it has already read, but only as a prefix: the first
+    # byte that differs from the last call ends what is reusable. So the order below is also a
+    # stability order, and the two offsets say where a reusable prefix ends:
+    #   1. base + the skill's block   the same on every call to this skill, in any chat
+    #   2. + this turn's context block, the action rules and the JSON contract
+    #                                 the same for as long as the block is (a loop's passes, mostly)
+    #   then the language lock and the clock, which change between passes and every minute.
+    # Whatever goes into 1 must not depend on the turn — no date, no name from the chat, no state.
+    # One such line there and every call pays full price again, with nothing to show for it but
+    # the bill (tests/run_prompt_cache.py holds this).
+    stable = f"{base}{skill_block}"
+    with_contract = f"{stable}{context_block or ''}{action_para}\n\n{contract}"
+    return SystemPrompt(
+        f"{with_contract}{lang_lock}\n\nCurrent date and time: {today}. "
+        f"That is {owner_name}'s own clock.\n\n{legend}\n\n"
+        f"Every line of the conversation shows when it was sent. A relative date means what "
+        f"it meant to the person who wrote it, on the day they wrote it: \"tomorrow\" in a "
+        f"message from yesterday is today, and a \"Friday\" said last week may already be "
+        f"over. Resolve each relative date against the date of the message it appears in, "
+        f"never against the current date. When {owner_name}'s request only points back "
+        f"(\"book it\", \"marca isso\"), take the date from the message he is pointing at. If "
+        f"the date you arrive at has already passed, or a message sent just after midnight "
+        f"leaves it unclear which day was meant, ask before you act.",
+        stable_ends=(len(stable), len(with_contract)),
+    )

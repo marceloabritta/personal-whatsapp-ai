@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     claude_effort: str = "high"
     claude_max_tokens: int = 8192
     web_search_max_uses: int = 5
+    # Anthropic prompt caching, for her calls and the review judge's. On, the part of a prompt
+    # that repeats from one call to the next is read back at a tenth of the input price. Off, the
+    # requests are the ones sent before it existed. It changes what a call costs and how fast it
+    # starts, never what she is told: the prompt is the same text either way.
+    prompt_cache_enabled: bool = True
 
     # Tools. The read-back loop (list/find/failure -> reason) is bounded so it can't spin.
     max_tool_actions: int = 4
@@ -168,7 +173,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-11-10-date-table"
+    prompt_version: str = "2026-11-10-prompt-cache"
 
     @property
     def contacts_crud_on(self) -> bool:
