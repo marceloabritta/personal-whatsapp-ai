@@ -49,6 +49,7 @@ class MessageState(TypedDict, total=False):
     # action it asked about (confirm.action_fingerprint). It is how a fresh tag finds the card in
     # the chat above and checks the owner's answer to it (carry.py).
     pending_card: Optional[dict]
+    spoke_after_card: bool  # she has said something since the last card went out
     # The owner's messages the resolver has already read this loop. An activation can ingest
     # messages that arrived after its own trigger; when their own activations run later, the
     # messages are not new and must not be answered (or approve something) a second time.

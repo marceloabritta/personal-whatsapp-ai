@@ -21,7 +21,7 @@ skill's own confirm policy, decides what the incoming message means:
                      corrections to the proposal, and the model answers them by proposing a
                      corrected action, which replaces the pending at the `confirm` node.
 
-Two rails worth spelling out:
+Three rails worth spelling out:
 
   * The pending SURVIVES a non-yes turn. It used to be cleared, so any intervening remark —
     even chit-chat from a third party — dropped the proposal on the floor, and the owner's later
@@ -29,6 +29,9 @@ Two rails worth spelling out:
     went out a second time.
   * The reply stays in the pending write's DOMAIN. A keyword-less follow-up ("at 5pm instead")
     would be misrouted to web by the stateless router.
+  * His yes counts only while her card is the last thing she said (`spoke_after_card`). After
+    she has answered something else, it goes to the model like any other reply, and a write he
+    turned down in words the classifier does not know ("não cancela") cannot run on his next "ok".
 
 "His reply" is every message of his this activation ingested (`owner_replies`), not only the one
 that woke it, and a message an earlier activation already read is not read again. A fresh tag
@@ -84,6 +87,16 @@ async def resolve_pending_node(
         # dropped the assistant's own messages — so a from_me trigger is Marcelo, and nobody else.
         verdict, is_owner, read = detect(state.get("text") or ""), bool(state.get("from_me")), "trigger"
 
+    # A yes answers the last thing she said, and once she has spoken since her card, that is not
+    # the card. "não cancela" is no word the classifier knows, so it is "other" and the fixing loop
+    # keeps the write; she can only answer him ("ok, não vou cancelar"), and his "ok" to that ran
+    # the cancellation he had just refused. A fresh tag's carry has the same rule (carry.py,
+    # `lisa_spoke_after`). Narrower than a card that takes one answer: the write is kept, so a
+    # correction still re-proposes, and only a card she sends again can take his yes.
+    after_card = verdict == "yes" and is_owner and bool(state.get("spoke_after_card"))
+    if after_card:
+        verdict = "other"
+
     if verdict == "yes" and is_owner:
         action = {**pending, APPROVED_BY: OWNER_YES}
         # The side effects that rode with this proposal fire NOW — on the same yes that approves
@@ -129,12 +142,18 @@ async def resolve_pending_node(
                 "reply_body": None, "llm_state": "keep_listening"}
 
     trace.code(tid, node="resolve_pending", loop_id=state.get("loop_id"),
-               pending=task, verdict=verdict, route="reason", domain=domain, read=read)
+               pending=task, verdict=verdict, route="reason", domain=domain, read=read,
+               after_card=after_card or None)
     # The pending SURVIVES a non-yes turn (that is the fixing loop), but its riders do not. This
     # turn is a correction — "no, her other address" — and the model will re-propose. Carrying the
     # old riders forward would write the address he just rejected the moment he says yes to the
     # corrected proposal. confirm re-attaches riders to whatever it proposes next.
-    return {"domain": domain, "resolve_route": "reason", "pending_side_effects": []}
+    update = {"domain": domain, "resolve_route": "reason", "pending_side_effects": []}
+    if after_card:
+        # If his yes was meant for the card, the model proposes it again, and that card must go out.
+        # The repeat suppressor would swallow it, and with no new card every yes would end up here.
+        update["last_confirm_sig"] = None
+    return update
 
 
 def route_after_resolve(state: MessageState) -> str:
