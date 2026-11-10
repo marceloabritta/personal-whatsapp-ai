@@ -29,7 +29,7 @@ def _to_neutral(messages: list) -> list[dict]:
 
 
 async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
-                      directory=None) -> dict:
+                      directory=None, presets=None) -> dict:
     tid = state["trace_id"]
     domain = state.get("domain") or settings.default_domain
     locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
@@ -42,12 +42,14 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     # in reason ②, with hops already ≥ 1. Dropping the block there left the model told to never
     # invent an address while holding no addresses, so it either asked for one the book already had
     # or silently dropped a guest from the roster it was rebuilding.
+    # The owner's meeting presets ride in the same block, on the same every-pass rule: an update
+    # composed in reason ② that moves a meeting "to my house" needs the saved address there too.
     context_block = None
     seen_contacts: dict = {}
     seen_people: dict = {}
-    if directory is not None:
+    if directory is not None or presets is not None:
         context_block, patch = context_block_for(
-            domain, state, {"directory": directory, "settings": settings})
+            domain, state, {"directory": directory, "settings": settings, "presets": presets})
         seen_contacts = dict(patch.get("seen_contacts") or {})
         seen_people = dict(patch.get("seen_people") or {})
 

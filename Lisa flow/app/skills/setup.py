@@ -19,23 +19,28 @@ import difflib
 import unicodedata
 
 from ..roster import normalize_scope
-from ..tools.setup import DESCRIBE, GUIDANCE, RosterService
+from ..tools.setup import DESCRIBE, GUIDANCE, PRESETS_GUIDANCE, RosterService
 from ..tools.setup_schemas import SETUP_TASK_SCHEMAS
 from .base import Skill
 from .confirm import FlagConfirm
 from .render import LLMReadback, Programmatic
 from .setup_format import (
-    compose_enroll, compose_remove, compose_update, resolve_target,
-    fmt_enroll, fmt_failure, fmt_help, fmt_list, fmt_menu, fmt_remove, fmt_update,
+    compose_enroll, compose_remove, compose_remove_place, compose_save_place,
+    compose_set_presets, compose_update, resolve_target,
+    fmt_enroll, fmt_failure, fmt_help, fmt_list, fmt_menu, fmt_remove, fmt_remove_place,
+    fmt_save_place, fmt_set_presets, fmt_update,
 )
 
 # Explicit configuration words only. Deliberately narrow: "transcreve esse áudio" is a
 # transcription REQUEST, not a request to configure transcription, and must not land here.
+# Equally, "reunião de 30 minutos" is a booking, not a preset: the presets are reached through
+# setup (or by the word "presets"), never by meeting vocabulary, which belongs to the calendar.
 _SETUP_WORDS = {
     "setup", "settings", "configure", "configuration", "preferences",
     "configurar", "configuracao", "configuracoes", "config", "ajustes", "ajuste",
     "preferencias", "configura",
     "configuracion", "ajustar",
+    "presets", "preset", "defaults",
 }
 
 
@@ -65,6 +70,9 @@ def setup_matcher(text: str, *, threshold: float = 0.86) -> str:
 
 
 _WRITE_VERBS = {"enroll", "update", "remove"}
+# The presets' writes name no chat, so the chat-resolution half of the gate does not apply to
+# them — only the self-chat half does, and that one runs for every verb.
+_PRESET_WRITES = {"set_presets", "save_place", "remove_place"}
 
 
 def setup_resolve_gate(verb: str, inputs: dict, state: dict):
@@ -123,15 +131,17 @@ SETUP = Skill(
     kind="local",
     describe=DESCRIBE,
     guidance=GUIDANCE,
-    verbs=["menu", "help", "list", "resolve", "enroll", "update", "remove"],
+    verbs=["menu", "help", "list", "resolve", "enroll", "update", "remove",
+           "set_presets", "save_place", "remove_place"],
     schemas=SETUP_TASK_SCHEMAS,
     handler_cls=RosterService,
     # Every write waits for the owner's go-ahead, and the question he answers is composed in
     # code — so the sentence approved and the row written are the same thing.
     confirm=FlagConfirm(
-        _WRITE_VERBS,
+        _WRITE_VERBS | _PRESET_WRITES,
         compose_map={"enroll": compose_enroll, "update": compose_update,
-                     "remove": compose_remove},
+                     "remove": compose_remove, "set_presets": compose_set_presets,
+                     "save_place": compose_save_place, "remove_place": compose_remove_place},
     ),
     # Everything renders programmatically except `resolve`: "which of these two groups?" is
     # judgment, so that one keeps the model.
@@ -142,11 +152,23 @@ SETUP = Skill(
         "enroll": Programmatic(fmt_enroll, on_failure=fmt_failure),
         "update": Programmatic(fmt_update, on_failure=fmt_failure),
         "remove": Programmatic(fmt_remove, on_failure=fmt_failure),
+        "set_presets": Programmatic(fmt_set_presets, on_failure=fmt_failure),
+        "save_place": Programmatic(fmt_save_place, on_failure=fmt_failure),
+        "remove_place": Programmatic(fmt_remove_place, on_failure=fmt_failure),
         "resolve": LLMReadback(),
     },
     matcher=setup_matcher,
     only_self_chat=True,
     resolve_gate=setup_resolve_gate,
+    # A setup loop keeps its untagged follow-ups. Its subject now overlaps the calendar's
+    # vocabulary — "meetings of 30 minutes", "don't send the invite" — and the calendar matcher
+    # would otherwise pull every such answer out of setup into a booking. A fresh tag still
+    # re-decides, so "@lisa marca reunião amanhã" from inside setup is a booking.
+    holds_loop=True,
+    # The presets exist only when they are switched on: off, their verbs leave the schema and
+    # their section leaves the prompt, so the build is the pre-feature one.
+    gated_verbs={v: "presets_enabled" for v in _PRESET_WRITES},
+    gated_guidance=[("presets_enabled", PRESETS_GUIDANCE)],
     # Local, short, no live-web hops — the fast lane, same as calendar.
     model="claude-sonnet-5",
     effort="medium",

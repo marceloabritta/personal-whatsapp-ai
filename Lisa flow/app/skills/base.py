@@ -40,6 +40,10 @@ class Skill:
     # an ordinal from a list becomes a resolved id). None = this skill gates nothing.
     only_self_chat: bool = False
     resolve_gate: Optional[Callable] = None
+    # `holds_loop` keeps an open loop of this skill's on this skill: an untagged follow-up stays
+    # here even when another skill's matcher fires on it. For a skill that is a MODE (setup),
+    # whose answers share another skill's vocabulary. A fresh tag still re-decides.
+    holds_loop: bool = False
 
     # The settings attribute that switches this whole skill on. Off, it cannot be routed to or called,
     # and nothing about it reaches any other skill's prompt or schema. None = always on.

@@ -9,6 +9,7 @@ from .cache import TranscriptionService
 from .clients.evolution import Evolution
 from .config import Settings, load_settings
 from .echoes import InMemoryEchoes, RedisEchoes
+from .presets import Presets
 from .reasoning import build_reasoner
 from .roster import DailyCap, Roster
 from .sessions import InMemorySessions, RedisSessions
@@ -44,6 +45,9 @@ class Deps:
     # written by the setup skill; `caps` is the per-chat daily ceiling.
     roster: Any = None
     caps: Any = None
+    # Meeting presets — read by the calendar's prompt block and confirm step, written by setup.
+    # None = presets off, which is the pre-feature build.
+    presets: Any = None
 
 
 def build_deps(settings: Settings | None = None) -> Deps:
@@ -98,6 +102,18 @@ def build_deps(settings: Settings | None = None) -> Deps:
         setup_tool.roster = roster
         setup_tool.evolution = evolution
 
+    # Meeting presets: in-memory here, the durable tier attached in the lifespan (as the roster).
+    # Setup writes them; the calendar handler reads the standard length for its own fallback.
+    presets = None
+    if settings.presets_enabled:
+        presets = Presets(default_minutes=settings.default_meeting_minutes,
+                          ttl=settings.presets_cache_ttl)
+        if setup_tool is not None:
+            setup_tool.presets = presets
+        cal = tools.get("calendar")
+        if cal is not None:
+            cal.presets = presets
+
     # The reasoner builds its default (calendar) schema itself; the reason node passes the
     # routed skill's per-call schema each turn. No merged schema, no MCP tools in v1.
     return Deps(
@@ -117,4 +133,5 @@ def build_deps(settings: Settings | None = None) -> Deps:
         directory=directory,
         roster=roster,
         caps=caps,
+        presets=presets,
     )

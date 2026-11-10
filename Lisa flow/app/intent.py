@@ -99,6 +99,11 @@ _PROCEED_WORDS = {
                        "update", "change", "save"},
     "contact_delete": {"apagar", "apaga", "apague", "excluir", "exclui", "exclua", "deletar", "deleta",
                        "remover", "remove", "remova", "borrar", "borra", "delete"},
+    # Setup's meeting presets — the cards ask "Save it?" / "Salvo?" and "Remove …?".
+    "set_presets": {"salvar", "salva", "salve", "save"},
+    "save_place": {"salvar", "salva", "salve", "save"},
+    "remove_place": {"remover", "remove", "remova", "apagar", "apaga", "apague", "excluir",
+                     "exclui", "exclua", "deletar", "deleta", "delete"},
 }
 # Declining a proposal. Deliberately NARROW: a word only belongs here if it cannot also mean
 # "yes" to the question being asked. "cancela" is the sharpest example and is excluded — on a

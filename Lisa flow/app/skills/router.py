@@ -53,11 +53,24 @@ _CONTACTS_RULE = (
 )
 
 
-def _classify_system(owner: str, domains: list[str] | None = None) -> str:
+# Added to the setup line only when presets are on, so with them off the classifier is not told
+# about a setting the setup skill cannot change.
+_PRESETS_CLAUSE = (
+    "chats. Also {owner}'s meeting presets — the standard meeting length, whether meetings get a "
+    "video call, whether guests are emailed, and his saved places (\"casa\", \"the office\") — "
+    "setting them, not booking with them. "
+)
+
+
+def _classify_system(owner: str, domains: list[str] | None = None,
+                     presets: bool = False) -> str:
     # The rule only exists when the domain does: told about an option its schema then refuses, the
     # classifier has to land a contacts request somewhere it never would otherwise.
     rule = _CONTACTS_RULE if domains and "contacts" in domains else ""
-    return _CLASSIFY_SYSTEM.replace("{contacts_rule}", rule).replace("{owner}", owner or "the owner")
+    text = _CLASSIFY_SYSTEM
+    if presets:
+        text = text.replace("chats. Only ever offered", _PRESETS_CLAUSE + "Only ever offered", 1)
+    return text.replace("{contacts_rule}", rule).replace("{owner}", owner or "the owner")
 
 
 def _neutral(messages: list) -> list[dict]:
@@ -80,7 +93,8 @@ async def classify_domain(state: dict, domains: list[str], reasoner, settings) -
     if not convo:  # no thread yet (e.g. a unit test) → fall back to the bare text
         convo = [{"role": "user", "content": state.get("text") or ""}]
     data = await reasoner.classify(
-        system=_classify_system(settings.owner_name, domains),
+        system=_classify_system(settings.owner_name, domains,
+                                presets=bool(getattr(settings, "presets_enabled", False))),
         messages=convo,
         schema=_classify_schema(domains),
         max_tokens=32,
@@ -112,6 +126,13 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     # for step 2, so a loop already there is not knocked out of it by what someone else says.
     from_owner = bool(state.get("from_me"))
     entry = [n for n in allowed if from_owner or not SKILLS[n].owner_only]
+    loop_domain = state.get("loop_domain")
+
+    # 0. A loop whose skill HOLDS it keeps its untagged follow-ups, before any matcher runs.
+    #    Setup is a mode: "reuniões de 30 min" inside it is a preset, not a booking.
+    if (loop_domain and loop_domain in allowed and not state.get("loop_opened")
+            and SKILLS[loop_domain].holds_loop):
+        return loop_domain, "loop"
 
     # 1. An explicit matcher signal always wins — even to switch domain mid-loop.
     for name in entry:
@@ -123,7 +144,6 @@ async def route_domain(state: dict, settings, *, reasoner=None) -> tuple[str, st
     #    no model call. A reply like "sim, crie" or a keyword-less follow-up edit stays in the
     #    conversation it belongs to instead of being re-decided from scratch. A fresh @mary tag
     #    opens a new loop (loop_domain was cleared on the reset), so it re-decides below.
-    loop_domain = state.get("loop_domain")
     if loop_domain and loop_domain in allowed and not state.get("loop_opened"):
         return loop_domain, "loop"
 

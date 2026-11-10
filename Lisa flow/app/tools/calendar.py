@@ -147,6 +147,52 @@ def resolve_virtual(inp: dict) -> bool:
     return not str(inp.get("location") or "").strip()
 
 
+# --- the owner's presets, written into the write once ---------------------------------------
+
+
+def apply_presets(action: dict, presets) -> dict:
+    """The owner's meeting presets, written INTO a calendar write before its card is composed.
+
+    Called by the confirm node on a write that is about to be held for his yes. Everything the
+    presets decide becomes an explicit field of the action itself, so the card (composed from the
+    action) and the event (built from the same action) read one value and cannot disagree — and
+    a preset changed between the card and the yes cannot change what he approved, because the
+    held action already carries the value the card showed.
+
+    Fills only what the model left out; anything it sent was an instruction ("make it a call",
+    "send the invite") and stands. With every preset at its default this changes nothing a
+    reader could see: the defaults ARE today's behaviour.
+
+      length       a timed create with no end gets `duration_min` = his standard length
+      video call   off → a timed create with no place and no flag gets `virtual: false`
+      guest emails off → a create/update/delete with no flag gets `send_invites: false`
+      places       a `location` that IS a saved place's name becomes that place's address"""
+    if presets is None or not isinstance(action, dict):
+        return action
+    verb = (action.get("task") or "").partition(".")[2]
+    if verb not in ("create", "update", "delete"):
+        return action
+    out = dict(action)
+
+    # A place first: whether a meeting has somewhere to go decides the video call below.
+    if verb in ("create", "update") and provided(out, "location"):
+        place = presets.place(out["location"])
+        if place:
+            out["location"] = place["address"]
+
+    if verb == "create":
+        if not resolve_kind(out) and not provided(out, "end") and not out.get("duration_min"):
+            out["duration_min"] = presets.meeting_minutes()
+        # resolve_virtual is the ONE place "does this get a Meet" is decided; asking it here keeps
+        # the rule there. Only its default is being overridden, never an explicit flag.
+        if not provided(out, "virtual") and not presets.video_call() and resolve_virtual(out):
+            out["virtual"] = False
+
+    if not provided(out, "send_invites") and not presets.notify_guests():
+        out["send_invites"] = False
+    return out
+
+
 def _same_dt(a: str | None, b: str | None) -> bool:
     """Compare two ISO instants by value, not by spelling — Google echoes its own offset format,
     so a string compare reports a time change that isn't one."""
@@ -282,6 +328,9 @@ class GoogleCalendarService:
         self.s = settings
         # Attached in deps, the way the setup handler gets its roster. None = contacts off.
         self.directory = None
+        # The owner's meeting presets, attached in deps. None = presets off. A create carries its
+        # length already (apply_presets); this only covers the handler's own fallback.
+        self.presets = None
         self._svc = None  # test seam ONLY: a fake service injected by the selftests
         self._creds = None
         self._creds_lock = threading.Lock()
@@ -329,6 +378,12 @@ class GoogleCalendarService:
 
     def _cal(self) -> str:
         return self.s.google_calendar_id or "primary"
+
+    def _default_minutes(self) -> int:
+        """His standard meeting length when presets are on, else the configured default."""
+        if self.presets is not None:
+            return self.presets.meeting_minutes()
+        return self.s.default_meeting_minutes
 
     def _now_iso(self) -> str:
         # tz-aware RFC 3339 — never send a naive timeMin (Google 400).
@@ -518,7 +573,7 @@ class GoogleCalendarService:
                 if new_end and not is_date_only(new_end):
                     end = new_end
                 else:
-                    dur = inp.get("duration_min") or self.s.default_meeting_minutes
+                    dur = inp.get("duration_min") or self._default_minutes()
                     end = self._plus_minutes(start, dur)
                 body["start"] = {"dateTime": start, "timeZone": tz, **clear_date}
                 body["end"] = {"dateTime": end, "timeZone": tz, **clear_date}

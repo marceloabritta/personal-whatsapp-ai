@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     # when left empty (see main.py lifespan).
     owner_jid: str = ""
 
+    # Meeting presets (app/presets.py) — his standard meeting length, video call, guest emails
+    # and saved places, set from setup. Ships OFF, the way contacts did: with it off the setup
+    # verbs, the menu item and the calendar's presets block are all absent, so the build is the
+    # pre-feature one. An unset preset reads as today's behaviour either way.
+    presets_enabled: bool = False
+    presets_cache_ttl: float = 30.0           # seconds before the snapshot re-reads the table
+
     # Google Calendar tool — OAuth2 refresh-token client on the owner's own account.
     google_client_id: str = ""
     google_client_secret: str = ""
@@ -162,7 +169,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-11-05-contacts"
+    prompt_version: str = "2026-11-10-meeting-presets"
 
     @property
     def contacts_crud_on(self) -> bool:
