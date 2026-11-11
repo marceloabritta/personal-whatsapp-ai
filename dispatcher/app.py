@@ -123,8 +123,10 @@ class Config:
         # it unset and the dispatcher behaves exactly as it did before.
         self.auto_transcribe_url = os.getenv("AUTO_TRANSCRIBE_URL") or None
         # How long a forward is tried again while its flow cannot be reached (see Forwarder).
-        # "0" tries once and gives up, which is what the dispatcher did before it retried.
-        self.forward_retry = float(os.getenv("FORWARD_RETRY_SECONDS", "45"))
+        # It has to outlast a flow's whole restart: up to 120 s finishing the turns it had in
+        # flight (stop_grace_period on the lisa service) and about 15 s to boot. "0" tries
+        # once and gives up, which is what the dispatcher did before it retried.
+        self.forward_retry = float(os.getenv("FORWARD_RETRY_SECONDS", "150"))
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
@@ -235,13 +237,14 @@ class Forwarder:
     """Delivers each forward to its flow, and keeps trying while the flow cannot be reached.
 
     The webhook used to POST once and drop the message on any failure. A flow that is being
-    redeployed has no listener for about twelve seconds: on 2026-11-11 four forwards were
-    refused in two such gaps (00:33 and 00:41 UTC). All four happened to be messages the flow
+    redeployed has no listener for about twelve seconds, and for up to two minutes more when
+    it first finishes a turn it had in flight: on 2026-11-11 four forwards were refused in two
+    such gaps (00:33 and 00:41 UTC). All four happened to be messages the flow
     would have ignored, but a tagged order or his "sim" to a card would have gone the same way,
     with nothing to tell him.
 
     So a forward that fails because the flow could not be reached, or answers 502/503/504, is
-    tried again with a short pause, for FORWARD_RETRY_SECONDS (45 unless set) counted from
+    tried again with a short pause, for FORWARD_RETRY_SECONDS (150 unless set) counted from
     when the message arrived. Any other answer means the flow has it, and it is never sent
     again. A retry cannot
     double a message that did arrive: the flow drops a message id it has already seen
@@ -256,13 +259,13 @@ class Forwarder:
     dropped and logged rather than queued. Nothing here logs what a message says."""
 
     # Seconds before each new try; the last one repeats. Two at most, so a flow that is back
-    # has its messages within two seconds, at a cost of some twenty tries per message.
+    # has its messages within two seconds, at a cost of one try every two seconds meanwhile.
     BACKOFF = (0.5, 1.0, 2.0)
     RETRY_STATUS = frozenset({502, 503, 504})  # the flow, or something in front of it, is not up
-    MAX_PER_CHAT = 50
+    MAX_PER_CHAT = 200  # a lively chat with an open window sends some twenty a minute
     MAX_PENDING = 1000
 
-    def __init__(self, http: Any, retry_for: float = 45.0) -> None:
+    def __init__(self, http: Any, retry_for: float = 150.0) -> None:
         self._http = http
         self.retry_for = retry_for
         self._lines: dict[tuple[str, str], deque] = {}

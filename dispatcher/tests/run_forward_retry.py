@@ -350,8 +350,8 @@ async def main() -> int:
         await limit_checks(flow, http, logs)
         await webhook_checks(flow, http)
     await flow.stop()
-    check("the defaults production runs with: 45 seconds, pauses up to 2",
-          disp.cfg.forward_retry == 45.0 and Forwarder.BACKOFF[-1] == 2.0
+    check("the defaults production runs with: 150 seconds, pauses up to 2",
+          disp.cfg.forward_retry == 150.0 and Forwarder.BACKOFF[-1] == 2.0
           and Forwarder.RETRY_STATUS == {502, 503, 504})
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     return 1 if _checks["fail"] else 0

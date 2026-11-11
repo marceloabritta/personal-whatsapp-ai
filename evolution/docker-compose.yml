@@ -96,6 +96,11 @@ services:
     build:
       context: ../Lisa flow     # the LangGraph brain (Python) lives in ../Lisa flow
     restart: always
+    # How long Docker waits after SIGTERM before it kills her. She uses up to 100 s of it to
+    # finish the turns in flight (--timeout-graceful-shutdown in her Dockerfile) and the rest
+    # to close her stores. Docker's default is 10 s, shorter than most web answers. With no
+    # turn in flight she exits at once, so a deploy is only slower when it would have cut one.
+    stop_grace_period: 120s
     depends_on:
       - api
       - redis
