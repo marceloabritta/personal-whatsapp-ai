@@ -8,7 +8,11 @@ it. Next turn `resolve_pending` runs the write on a clean "yes".
 
 If the skill can't compose a prompt (returns None) the turn falls back to the model (a readback so
 it asks). Skills with no confirm policy pass straight through. The resolved-id gate stays in
-`execute` (tool safety, not user confirmation)."""
+`execute` (tool safety, not user confirmation).
+
+Before a card is composed the policy may look first (`precheck`): the calendar reads his calendar
+for the time being booked. A write it holds back gets no card and is not kept as pending; the
+model is given the policy's note and answers in its own words."""
 from __future__ import annotations
 
 import hashlib
@@ -114,6 +118,8 @@ async def confirm_node(
     observations: list = []
     pending: dict | None = None
     ask_message: str | None = None
+    held_back: dict | None = None   # what the policy's look before the card held a write back with
+    looked: list = []               # every such look this turn, for the trace
 
     for action in actions:
         task = (action or {}).get("task", "")
@@ -138,10 +144,24 @@ async def confirm_node(
         # The owner's date goes in the same way, so the card can say "(amanhã)" next to the day,
         # and so do the presets, so a setup card can say what a setting is changing FROM.
         # A policy that already said why this cannot be proposed gets no card for it.
+        carded = pending is None and not decision.get("message")
+        # The policy looks before the card is shown, at the write exactly as it would run. For
+        # the calendar that is whether he is free then. Only the write that would get the card
+        # is looked at, and once one is held back nothing else is proposed in its place.
+        if carded and held_back is None and hasattr(policy, "precheck"):
+            found = await policy.precheck(action, state,
+                                          {**ctx, "handler": (tools or {}).get(domain)})
+            if found and found.get("trace"):
+                looked.append({"task": task, **found["trace"]})
+            if found and found.get("hold"):
+                held_back = found
+                observations.append({"role": "user",
+                                     "content": f"[{task} not proposed] {found.get('note', '')}"})
+                continue
         composed = (policy.compose(action, {**state, "side_effects": stripped,
                                             "owner_today": today_in(settings.calendar_timezone),
                                             "presets": presets.snapshot() if presets else None})
-                    if pending is None and not decision.get("message") else None)
+                    if carded and held_back is None else None)
         if composed:
             pending, ask_message = action, composed
         else:
@@ -213,6 +233,21 @@ async def confirm_node(
         update["pending_action"] = pending
         update["pending_card"] = None  # this proposal has no card yet; an older one is not its
 
+    if held_back is not None:
+        # There is nothing for him to say yes to. A card from earlier in the loop asked about a
+        # time this turn has moved on from ("muda pra 14h", and 14h is taken): left standing, his
+        # next "sim" would be read against it, and the same card asked again later would be
+        # swallowed as a repeat.
+        update["pending_action"] = None
+        update["pending_card"] = None
+        update["pending_side_effects"] = []
+        update["pending_call"] = None
+        update["last_confirm_sig"] = None
+        if route == "act":
+            # The read-backs are spent, so the model cannot be asked. He still has to hear it.
+            update["reply_body"] = held_back.get("say")
+            update["llm_state"] = AWAITING
+
     # A side effect batched with a gated write RIDES WITH THE PROPOSAL and fires only on the
     # owner's yes — otherwise a proposal he corrects ("no, her old address") would already have
     # written the rejected address into his real address book, permanently and silently.
@@ -228,7 +263,9 @@ async def confirm_node(
         # A new card is a new question: whatever was to follow the last write waits for no one now.
         update["next_call"] = None
         update["resume_caller"] = False
-    elif stripped and directory is not None:
+    elif stripped and directory is not None and held_back is None:
+        # Not with a write that was held back: its riders would have waited for his yes, and no
+        # yes was asked for. The model sends them again with the booking it proposes next.
         handler = (tools or {}).get(domain)
         if handler is not None:
             directory.spawn(_run_side_effects(handler, stripped, state))
@@ -239,6 +276,7 @@ async def confirm_node(
         route=route, repeated=repeated, close_overridden=close_overridden or None,
         side_effects=[a.get("task") for a in stripped] or None,
         side_effects_dropped=[a.get("task") for a in dropped] or None,
+        looked=looked or None, held_back=held_back is not None or None,
     )
     return update
 

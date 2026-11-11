@@ -133,7 +133,7 @@ services:
       # Anthropic prompt caching: the part of a prompt that repeats from one call to the next is
       # read back at a tenth of the input price. "false" sends the requests as they were before.
       PROMPT_CACHE_ENABLED: "true"
-      PROMPT_VERSION: "2026-11-10-prompt-cache"
+      PROMPT_VERSION: "2026-11-10-busy-check"
       # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
       # a chat is enrolled via "@lisa setup" in the chat with myself.
       AUTO_TRANSCRIBE_ENABLED: "true"
@@ -145,11 +145,15 @@ services:
       # Meeting presets, set from "@lisa setup": standard length, video call, guest emails and
       # saved places. Stored in lisa_log.owner_presets; an unset preset books as before.
       PRESETS_ENABLED: "true"
+      # Before a booking's card, his calendar is read for that time. When he already has something
+      # then, no card goes out: she says he is not free, never what the other thing is, and may
+      # offer one other time. "false" shows the card without looking, as before.
+      BUSY_CHECK_ENABLED: "true"
       # Session review — grades each turn once a session closes (app/review/). Reads the log,
       # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
-      REVIEW_SCOPE_VERSION: "2026-11-10-prompt-cache"
+      REVIEW_SCOPE_VERSION: "2026-11-10-busy-check"
       REVIEW_JUDGE_VERSION: "v5"
       REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).

@@ -19,7 +19,7 @@ import logging
 import socket
 import threading
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from .base import ActionResult
 
@@ -36,6 +36,12 @@ _TRANSIENT_EXC = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
 _TRANSIENT_STATUS = {500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE = 0.25  # 0.25s, then 0.5s
+
+# What the busy check asks Google for: when each event is, and whether it takes up his time.
+# No title, no place, no guest's address. What was never fetched cannot reach a prompt, a log
+# line or the chat, which is the whole promise of "you are busy then" with nothing more said.
+_BUSY_FIELDS = ("items(id,status,transparency,eventType,start,end,"
+                "attendees(self,responseStatus))")
 
 # Fuzzy-fallback relevance floor: how close a windowed candidate must be to the query before
 # `find` will surface it, so "no match" returns empty instead of the whole calendar.
@@ -251,6 +257,66 @@ def changes(action: dict, before: dict | None = None) -> list[dict]:
                     "new": new, "old": old})
     return out
 
+
+# --- one length, decided once ---------------------------------------------------------------
+#
+# When a timed write ends is worked out HERE and nowhere else. The body builder reads it to write
+# the event; the busy check reads it to know which stretch of his calendar to look at. Two
+# answers to "until when?" would have her tell him he is busy for a meeting that does not
+# overlap anything, or stay quiet about one that does.
+
+
+def keep_length(inp: dict, prev: dict | None) -> dict:
+    """A timed event moved with only a new start keeps its length, as `duration_min`.
+
+    An all-day event keeps its span in days instead, which rides on `_default_last_day`."""
+    prev = prev or {}
+    if not provided(inp, "start") or provided(inp, "end") or inp.get("duration_min"):
+        return inp
+    if resolve_kind(inp, prev):
+        return inp
+    try:
+        mins = int((datetime.fromisoformat(prev["end"])
+                    - datetime.fromisoformat(prev["start"])).total_seconds() // 60)
+    except (KeyError, TypeError, ValueError):
+        return inp
+    return {**inp, "duration_min": mins}
+
+
+def timed_span(inp: dict, prev: dict | None, default_minutes: int,
+               default_start_hour: str) -> tuple[str, str]:
+    """(start, end) of a TIMED write, ISO, exactly as it will be stored.
+
+    Raises ValueError when there is no start to anchor on; callers that only want to look
+    (the busy check) treat that as "cannot tell"."""
+    prev = prev or {}
+    start = (inp["start"] if provided(inp, "start") else None) or prev.get("start") or ""
+    if is_date_only(start):   # all-day -> timed, and no hour was given
+        start = f"{start}T{default_start_hour}"
+    new_end = inp["end"] if provided(inp, "end") else None
+    if new_end and not is_date_only(new_end):
+        return start, new_end
+    dur = inp.get("duration_min") or default_minutes
+    return start, (datetime.fromisoformat(start) + timedelta(minutes=dur)).isoformat()
+
+
+def free_windows(busy: list, lo: datetime, hi: datetime, need: timedelta) -> list:
+    """The gaps between `lo` and `hi` that no busy stretch touches and that are at least `need`
+    long. `busy` is [(start, end)] in any order, overlapping or not."""
+    out: list = []
+    cur = lo
+    for s, e in sorted(busy):
+        if e <= cur:
+            continue
+        if s >= hi:
+            break
+        if s > cur and s - cur >= need:
+            out.append((cur, s))
+        cur = max(cur, e)
+    if hi > cur and hi - cur >= need:
+        out.append((cur, hi))
+    return out
+
 # Fixed English labels for the agenda layout, so a listing reads the same regardless of the
 # container's locale (strftime("%A"/"%b") would follow the server locale).
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -327,6 +393,24 @@ DEFAULTS_GUIDANCE = """HIS DEFAULTS — his standard meeting length, whether mee
 - The same thing for one event ("não manda convite nessa") is an ordinary field on that event, as above."""
 
 
+# Appended only when the busy check is on. Off, no "not proposed" note is ever written, and a
+# model told to expect one would be reasoning about a step that does not exist.
+#
+# The note carries the day's free times and this text does not: it is the same on every call,
+# so it sits in the part of the prompt that is read back from the cache.
+BUSY_GUIDANCE = """WHEN HE IS NOT FREE — before a card is shown, the system looks at {owner_name}'s calendar for the time you sent. You never check it yourself: do not run list or find to see whether he is free, and do not ask him. When something is already there, no card goes out. You get a "not proposed" note instead, with the times he is free that day. The note does not say what the other thing is, and neither do you: never name it, guess at it or look it up.
+- Tell him in "message", the way a discreet assistant would, and say nothing else about it: "{owner_name}, você já tem outro compromisso nesse horário." / "{owner_name}, there is another event conflicting with that time slot." Not what it is, not who it is with, not when it starts or ends.
+- Then, in the same message, offer ONE other time, and only when the conversation gives you something to choose by: when the other person said they can or cannot, the part of the day they were aiming for. Take it from the free times in the note, as close as possible to what they had agreed, and put it as a question to the people in the chat ("12:30 funciona para vocês?"). One time. Never two, never a list, never his free or busy hours.
+- Nothing in the conversation to choose by, or no free time that fits -> that one sentence is the whole message. No other time, no "quer que eu agende em outro horário?", no question of any kind: he will say what he wants next.
+- Emit no action with that message. Set "state" to "awaiting_answer", and keep the booking in "workflow" (title, place, guests, length) with the time as the open question.
+- From then on you may talk with anyone in the chat to settle a new time, the other person as much as {owner_name}: an answer to your question is for you, whoever gives it. While they are still working it out between themselves, stay silent and keep listening.
+- A new time is settled (one of them gives you one, or accepts the one you offered) -> emit the booking again with that time and the same details, "message" null. The system checks that time too and shows {owner_name} the card; only his yes books it. A time they settle on is theirs to choose even when it is not among the free times in the note: emit it and let the system check.
+- The time that clashed was one YOU picked inside a looser window they gave ("quinta à tarde", "depois do almoço") -> do not announce it. Emit the booking again at a free time inside that same window.
+- {owner_name} says to book it anyway ("marca assim mesmo", "pode marcar por cima") -> emit the same action again, unchanged, and the card goes out.
+- {owner_name} himself asks what the other thing is -> that is an ordinary find, like any question of his about his calendar.
+- All of this holds for an update that moves an event to a time he is not free."""
+
+
 
 class GoogleCalendarService:
     """Local tool handler for the `calendar` domain. Instantiated once in deps with settings."""
@@ -400,10 +484,6 @@ class GoogleCalendarService:
             return datetime.now(ZoneInfo(self.s.calendar_timezone)).isoformat()
         except Exception:
             return datetime.now().astimezone().isoformat()
-
-    @staticmethod
-    def _plus_minutes(iso: str, minutes: int) -> str:
-        return (datetime.fromisoformat(iso) + timedelta(minutes=minutes)).isoformat()
 
     @staticmethod
     def _fmt(iso: str | None) -> str:
@@ -574,14 +654,8 @@ class GoogleCalendarService:
                     body["start"] = {"date": first, **clear}       # no timeZone — an all-day
                     body["end"] = {"date": to_wire_end(last), **clear}  # has no zone at all
             else:
-                start = new_start or prev.get("start") or ""
-                if is_date_only(start):   # all-day -> timed, and no hour was given
-                    start = f"{start}T{self.s.default_start_hour}"
-                if new_end and not is_date_only(new_end):
-                    end = new_end
-                else:
-                    dur = inp.get("duration_min") or self._default_minutes()
-                    end = self._plus_minutes(start, dur)
+                start, end = timed_span(inp, prev, self._default_minutes(),
+                                        self.s.default_start_hour)
                 body["start"] = {"dateTime": start, "timeZone": tz, **clear_date}
                 body["end"] = {"dateTime": end, "timeZone": tz, **clear_date}
 
@@ -768,15 +842,8 @@ class GoogleCalendarService:
         # is its duration in minutes; for an all-day event it is its span in DAYS — which the
         # old code could not express, so it fell through to the default meeting length and
         # collapsed a week-long trip into a 45-minute block at midnight.
-        if provided(inp, "start") and not provided(inp, "end") and not inp.get("duration_min"):
-            if not resolve_kind(inp, prev):
-                try:
-                    mins = int((datetime.fromisoformat(prev["end"])
-                                - datetime.fromisoformat(prev["start"])).total_seconds() // 60)
-                    inp = {**inp, "duration_min": mins}
-                except (TypeError, ValueError):
-                    pass
-            # all-day spans ride on _default_last_day, off `prev` — no guess needed here.
+        inp = keep_length(inp, prev)
+        # all-day spans ride on _default_last_day, off `prev` — no guess needed here.
         body, conference = self._body_from(inp, existing=prev)
         if not body:
             # An empty patch is a guaranteed lie: Google returns 200 and the unchanged event, and
@@ -853,10 +920,122 @@ class GoogleCalendarService:
                          "days": view.get("days"), "attendees": view.get("attendees"),
                          "had_attendees": bool(view.get("attendees")), "notified": notified}}
 
+    # ---- is he free then? --------------------------------------------------------------
+
+    def _zone(self):
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(self.s.calendar_timezone)
+        except Exception:
+            return timezone.utc
+
+    def _now(self) -> datetime:
+        return datetime.now(self._zone())
+
+    def _aware(self, iso: str) -> datetime:
+        """An instant we can compare. A time with no offset is on his clock."""
+        dt = datetime.fromisoformat(iso)
+        return dt if dt.tzinfo else dt.replace(tzinfo=self._zone())
+
+    @staticmethod
+    def _takes_his_time(e: dict, skip_id: str | None) -> bool:
+        """Is he really somewhere else during this event?
+
+        Not when it is the event being moved, was cancelled, is marked "free", is where he is
+        working from that day, or is an invitation he declined. And not when it is all-day: a
+        birthday, a holiday or a trip sits over the whole day and would make every hour of it
+        "busy", so a meeting could never be booked on one."""
+        if skip_id and e.get("id") == skip_id:
+            return False
+        if e.get("status") == "cancelled" or e.get("transparency") == "transparent":
+            return False
+        if e.get("eventType") == "workingLocation":
+            return False
+        if not (e.get("start") or {}).get("dateTime") or not (e.get("end") or {}).get("dateTime"):
+            return False
+        return not any(a.get("self") and a.get("responseStatus") == "declined"
+                       for a in e.get("attendees") or [])
+
+    def _busy(self, inp: dict) -> ActionResult:
+        """Is he free for this write? Asked before its card is shown (skills/calendar.py).
+
+        `inp` is {"verb", "write", "prev"}: the create or update as it will run, and for an update
+        the event as it stands. The answer is times only, {"conflict", "start", "end", "minutes",
+        "free": [{start, end}]}, where `free` is the rest of that day he could take a meeting of
+        this length. Nothing in it says what the other event is; it was never read (_BUSY_FIELDS).
+
+        Not checked, and so never a conflict: an all-day write, an update that moves nothing, a
+        time that cannot be parsed. The card then goes out as it always did."""
+        verb = inp.get("verb")
+        write = dict(inp.get("write") or {})
+        unchecked: ActionResult = {"ok": True, "summary": "not checked",
+                                   "data": {"checked": False}}
+        prev = None
+        skip_id = None
+        if verb == "update":
+            if not any(provided(write, f) for f in ("start", "end", "all_day")):
+                return unchecked
+            skip_id = write.get("event_id")
+            prev = inp.get("prev") or None
+            if prev is None and skip_id:
+                prev = self._event_view(self._service().events().get(
+                    calendarId=self._cal(), eventId=skip_id).execute())
+            write = keep_length(write, prev)
+        elif verb != "create":
+            return unchecked
+        if resolve_kind(write, prev):
+            return unchecked
+        try:
+            start_iso, end_iso = timed_span(write, prev, self._default_minutes(),
+                                            self.s.default_start_hour)
+            start, end = self._aware(start_iso), self._aware(end_iso)
+        except (TypeError, ValueError):
+            return unchecked
+        if end <= start:
+            return unchecked
+
+        # The part of that day worth offering, widened to hold the meeting itself.
+        zone = self._zone()
+        midnight = start.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        lo = min(midnight + timedelta(hours=getattr(self.s, "free_day_from_hour", 8)), start)
+        hi = max(midnight + timedelta(hours=getattr(self.s, "free_day_until_hour", 20)), end)
+        items = self._service().events().list(
+            calendarId=self._cal(), timeMin=lo.isoformat(), timeMax=hi.isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=250,
+            fields=_BUSY_FIELDS).execute().get("items", [])
+        busy: list = []
+        for e in items:
+            if not self._takes_his_time(e, skip_id):
+                continue
+            try:
+                s, en = self._aware(e["start"]["dateTime"]), self._aware(e["end"]["dateTime"])
+            except (TypeError, ValueError):
+                continue
+            if en > s:
+                busy.append((s, en))
+
+        data = {"checked": True, "start": start.astimezone(zone).isoformat(),
+                "end": end.astimezone(zone).isoformat(),
+                "minutes": int((end - start).total_seconds() // 60)}
+        # Touching is not overlapping: a meeting that ends at 11:00 leaves 11:00 free.
+        if not any(s < end and en > start for s, en in busy):
+            return {"ok": True, "summary": "free", "data": {**data, "conflict": False}}
+
+        # What is left of the day starts now, on the next quarter hour.
+        now = self._now().replace(second=0, microsecond=0)
+        now += timedelta(minutes=(-now.minute) % 15)
+        free = free_windows(busy, max(lo, now), hi, end - start)
+        return {"ok": True, "summary": "busy", "data": {
+            **data, "conflict": True,
+            "free": [{"start": a.astimezone(zone).isoformat(),
+                      "end": b.astimezone(zone).isoformat()} for a, b in free]}}
+
     # ---- dispatch ----------------------------------------------------------------------
 
+    # `busy` is the system's own read, made before a card. It is in no schema the model sees.
     _VERBS = {"create": "_create", "list": "_list", "find": "_find",
-              "update": "_update", "delete": "_delete"}
+              "update": "_update", "delete": "_delete", "busy": "_busy"}
 
     async def _remember(self, inputs: dict) -> ActionResult:
         """The address-book write. Runs OUT OF BAND — stripped at the confirm node, dispatched

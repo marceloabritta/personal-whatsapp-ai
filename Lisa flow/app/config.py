@@ -136,6 +136,16 @@ class Settings(BaseSettings):
     default_start_hour: str = "09:00:00"   # all-day -> timed, when no hour is given
     calendar_timezone: str = "America/Sao_Paulo"
 
+    # The busy check — before a booking's card is shown, his calendar is read for that time
+    # (skills/calendar.py). When something is already there no card goes out: she says he is not
+    # free, never what the other thing is, and may offer one other time. Ships OFF, like the
+    # features before it: with it off no read is made and the prompt says nothing about it.
+    busy_check_enabled: bool = False
+    # The part of a day she may offer another time in, on his clock. A meeting asked for outside
+    # it widens it to hold that meeting.
+    free_day_from_hour: int = 8
+    free_day_until_hour: int = 20
+
     # Contact memory — the address book (app/directory.py + app/tools/people.py).
     # Ships OFF, the way MEDIA_ENABLED and AUTO_TRANSCRIBE_ENABLED did.
     contacts_enabled: bool = False
@@ -173,7 +183,7 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
-    prompt_version: str = "2026-11-10-prompt-cache"
+    prompt_version: str = "2026-11-10-busy-check"
 
     @property
     def contacts_crud_on(self) -> bool:
