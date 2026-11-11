@@ -132,10 +132,11 @@ def has_actions(domain: str, skills: dict = SKILLS, settings=None) -> bool:
 
 def system_prompt_for(domain: str, settings, session_lang: str | None = None,
                       skills: dict = SKILLS, context_block: str | None = None,
-                      called_by: dict | None = None) -> str:
+                      called_by: dict | None = None, called_for: str | None = None) -> str:
     """Render the domain-scoped system prompt: the shared base + this skill's block. The
     actions/workflow JSON-contract section is included only for local skills. `called_by` is the
-    frame of the skill that brought this one in, when one did.
+    frame of the skill that brought this one in, when one did. `called_for` is the tagged message
+    that opened the conversation: what she is there for.
 
     Returned as it was built (a prompt.SystemPrompt): a str that also says where its reusable
     prefixes end. Hand it to the reasoner as is, or that is lost and nothing is cached."""
@@ -160,6 +161,7 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         call_targets=[(t, skills[t].describe.format(owner_name=owner))
                       for t in callable_skills(domain, settings, skills)],
         sees_media=bool(getattr(settings, "media_enabled", False)),
+        called_for=called_for,
     )
 
 

@@ -5,7 +5,10 @@ and re-seeds the last CONTEXT_WINDOW_MESSAGES from Evolution, so one loop never
 leaks into the next on the same chat. A window continuation (untagged follow-up
 while the loop is open) fetches only messages after the cursor and keeps the loop's
 memory. Assistant-origin messages are filtered (they're already AIMessages in the
-checkpoint). The new messages become one labeled user turn; the cursor advances."""
+checkpoint). The new messages become one labeled user turn; the cursor advances.
+
+A loop reads each message once (`read_ids`). An activation whose message an earlier one has
+already read finds nothing new, and ends without a model call (`route_after_context`)."""
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +21,20 @@ from ..skills.setup import setup_matcher
 from ..state import MessageState
 from ..trace import Trace
 from ..whatsapp import build_labeled_transcript, chat_key, label_for, when_label
+
+
+# How many message ids a loop remembers having read. A loop seeds 30 and then reads what arrives,
+# so this is far more than one holds; it only bounds the checkpoint.
+READ_IDS_KEPT = 500
+CALLED_FOR_MAX = 400
+
+
+def called_for_text(text: str | None) -> str | None:
+    """The tagged message as one line, short enough to quote in the prompt on every turn."""
+    line = " ".join((text or "").split())
+    if len(line) > CALLED_FOR_MAX:
+        line = line[:CALLED_FOR_MAX].rstrip() + "…"
+    return line or None
 
 
 def _quoted_line(state: dict, records: list[dict], owner: str,
@@ -299,6 +316,12 @@ def _after_cursor(records: list[dict], cursor: str | None, window: int) -> list[
     return records[-window:]
 
 
+def route_after_context(state: MessageState) -> str:
+    """A turn with nothing new to read ends in `act`, silent, with the window kept. Everything
+    else goes on to the pending-write gate."""
+    return "hold" if state.get("nothing_new") else "resolve"
+
+
 async def context_node(
     state: MessageState, *, evolution, echoes, settings, trace: Trace, transcription=None,
     confirm_policies: dict | None = None,
@@ -324,18 +347,38 @@ async def context_node(
         and setup_matcher(state.get("text") or "") == "yes"
     )
 
+    # A loop reads each message ONCE. An activation reads everything since the cursor, so while a
+    # slow turn holds the chat's lock, the messages that pile up behind it are all read by the
+    # first activation in the queue; the rest then wake with nothing left to read. The race guard
+    # below used to take such a message for one Evolution had not stored yet, and put it back as
+    # the newest line of the turn, which also moved the cursor back onto it. On 2026-11-10, called
+    # in to work out a return, she read "Ta usando o que de LLM? / Modelo? / Opus 5.5?" (his
+    # friend asking HIM about his product) in order and rightly let it pass. A turn later "Modelo?"
+    # came round again, alone, right under her own answer, and she told the chat which model she
+    # runs on. Six more turns then re-read the same lines.
+    already = set() if reset else set(state.get("read_ids") or [])
+
     records = await evolution.fetch_history(jid)  # oldest → newest
     if setup_open:
         new = []  # the race guard below supplies the triggering message itself
     elif reset or not state.get("initialized"):
         new = records[-window:]
     else:
-        new = _after_cursor(records, state.get("last_whatsapp_message_id"), window)
+        new = [r for r in _after_cursor(records, state.get("last_whatsapp_message_id"), window)
+               if r.get("id") not in already]
 
-    # Race guard: the triggering message may not be in Evolution's DB yet.
+    # Race guard: the triggering message may not be in Evolution's DB yet. Not for one this loop
+    # has read already, with one exception: a WhatsApp reply. What it points at is only known on
+    # its own activation, so it is shown again, this time with the line that says so.
     cur_id = state.get("msg_id")
-    if cur_id and not any(r.get("id") == cur_id for r in new):
-        new = new + [{
+    points_back = bool(state.get("quoted_text_id") or state.get("quoted_audio_id"))
+    out_of_order = None  # a message put back that the history holds at or before the cursor
+    if cur_id and not any(r.get("id") == cur_id for r in new) \
+            and (cur_id not in already or points_back):
+        stored = next((r for r in records if r.get("id") == cur_id), None)
+        if stored is not None:
+            out_of_order = cur_id
+        new = new + [stored or {
             "id": cur_id, "from_me": state.get("from_me"),
             "text": state.get("text") or "", "push_name": state.get("push_name"),
             "ts": state.get("ts", 0),
@@ -379,7 +422,10 @@ async def context_node(
     tz_name = settings.calendar_timezone
     transcript = build_labeled_transcript(new, owner, tz_name)
     ids = [r["id"] for r in new if r.get("id")]
-    newest = ids[-1] if ids else state.get("last_whatsapp_message_id")
+    # The cursor only moves forward. A message the race guard put back from further up the
+    # history is read this turn, but the cursor stays where the history's own order has it.
+    ahead = [i for i in ids if i != out_of_order]
+    newest = ahead[-1] if ahead else state.get("last_whatsapp_message_id")
     if setup_open and records:
         # Seeding nothing must not leave the cursor behind the backlog: without this the next
         # turn would read everything after the old cursor and hand back the very history this
@@ -463,15 +509,33 @@ async def context_node(
             state, records, policy=(confirm_policies or {}).get(domain), echoes=echoes,
             settings=settings)
 
+    # The turn is a plain string unless there are media blocks; then it's a content list with
+    # the labeled transcript first, followed by the inline image/document blocks (chronological).
+    content: object | None = None
+    if transcript.strip() and media_blocks:
+        content = [{"type": "text", "text": transcript}, *media_blocks]
+    elif transcript.strip():
+        content = transcript
+    elif media_blocks:
+        content = media_blocks
+    # Nothing to put in front of her: an earlier activation read this message, or it carries
+    # nothing she can read (a reaction, a sticker). The turn ends here, with no model call. Asked
+    # again over the same thread she could only answer something a second time.
+    nothing_new = content is None and not reset
+    read_ids = ([] if reset else list(state.get("read_ids") or []))
+    read_ids = (read_ids + [i for i in ids if i not in already])[-READ_IDS_KEPT:]
+
     trace.code(
         tid, node="context", loop_id=loop_id,
         initialized=bool(state.get("initialized")),
         reset=reset, setup_open=setup_open, ingested=len(new), context_message_ids=ids,
-        carry=carry_why, carried_yes=carried,
+        carry=carry_why, carried_yes=carried, nothing_new=nothing_new or None,
     )
 
     update: dict = {
         "initialized": True,
+        "nothing_new": nothing_new,
+        "read_ids": read_ids,
         # The turn as the model will see it. `text` is only the triggering message and the
         # transcript was a local, so the address-book scan had nothing to read; publishing it here
         # is what lets a name mentioned three messages ago still resolve.
@@ -506,7 +570,17 @@ async def context_node(
         partner_name = _partner_name(records)
         if partner_name:
             update["partner_name"] = partner_name
+    if nothing_new:
+        # No model call this turn, so nothing would refresh what the last one left in the state:
+        # `act` would send its reply again and the record would bill its tokens twice.
+        update.update({"reply_body": None, "usage": None, "latency_ms": None,
+                       "provider_request_id": None, "stop_reason": None, "tool_calls": [],
+                       "error_category": "none"})
     if reset:
+        # What he called her in for: the tagged message itself. Kept for the whole loop, because
+        # it sets what she takes part in (prompt.py, "what you are here for"), and thirty turns
+        # in it is a long way up the thread.
+        update["called_for"] = called_for_text(state.get("text"))
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
         # loop can never bleed into this one (the anti-delirium invariant). A fresh tag is a new
         # request, so a write awaiting confirmation is abandoned (cleared), not silently run —
@@ -545,15 +619,6 @@ async def context_node(
             if mid:
                 msgs.append(RemoveMessage(id=mid))
         update["session_lang"] = None  # re-lock the language on this tag's turn
-    # The turn is a plain string unless there are media blocks; then it's a content list with
-    # the labeled transcript first, followed by the inline image/document blocks (chronological).
-    content: object | None = None
-    if transcript.strip() and media_blocks:
-        content = [{"type": "text", "text": transcript}, *media_blocks]
-    elif transcript.strip():
-        content = transcript
-    elif media_blocks:
-        content = media_blocks
     if content is not None:
         msgs.append({"role": "user", "content": content})
     if msgs:

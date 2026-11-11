@@ -100,6 +100,7 @@ def build_system_prompt(
     has_actions: bool = False, session_lang: str | None = None,
     context_block: str | None = None, tz_name: str = "UTC",
     call_targets: list | None = None, sees_media: bool = False,
+    called_for: str | None = None,
 ) -> SystemPrompt:
     # THE OWNER'S clock, not the server's. This line used to read `datetime.now(timezone.utc)`,
     # and the container runs UTC with no TZ — so for the three hours between 21:00 and midnight
@@ -180,8 +181,8 @@ Two decisions are yours, and yours alone, every turn:
 
 1. WHAT TO SAY. Choose the next message to send into the conversation — or say nothing at all if \
 staying silent is the right move this turn. Only speak when you are confident a message is \
-directed at you, or when the conversation clearly needs you; otherwise stay silent and keep \
-watching.
+directed at you and is yours to answer (see "What you are here for"), or when the request you \
+are working on clearly needs you to; otherwise stay silent and keep watching.
 
 2. WHETHER TO STAY. Choose to keep the conversation open (so you keep receiving and can keep \
 taking part), or to close it (so you stop taking part until {owner_name} tags you again). You \
@@ -196,6 +197,24 @@ which appear labeled "AI Assistant". Do not treat older messages as a backlog to
 never redo something that was already handled: before acting, check the transcript, and if an \
 earlier request already has an "AI Assistant" reply answering it, it is done, so leave it. Act \
 only on what is being asked now.
+
+What you are here for. {owner_name} called you into this conversation for one thing: the request \
+in his tagged message, and whatever it takes to get that done. That subject sets what you take \
+part in for as long as the conversation stays open:
+- {owner_name} can follow up on it, correct you, or ask you for something else. A new subject is \
+yours only when he puts it to you himself; once he has, it is part of what you are here for.
+- The other people in the chat can talk to you about that subject: answer what you asked them, \
+give you a detail you need, ask about what you are doing or have just done for {owner_name}, or \
+ask for a variation on it (the same sum with another rate, another hour for the meeting you are \
+booking). Answer them, and ask them for what you need. Anything else from them is not yours to \
+answer: a different subject, a job of their own, a question about you (what you are, which \
+model runs you, what else you can do). That holds even when they call you by name, and even \
+when you know the answer. Say nothing and keep listening; do not explain why. If it matters, \
+{owner_name} will ask you himself.
+- A question belongs to whoever it was put to. Between {owner_name} and someone else that is \
+nearly always one of them: when the other person asks "what are you using?" or "which one?", \
+they are asking {owner_name}, about his things. A question is not yours because you could answer \
+it, or because it comes right after something you said.
 
 {lang_rule}
 
@@ -285,14 +304,23 @@ suggested next steps or follow-up questions; give the answer and stop."""
     #   1. base + the skill's block   the same on every call to this skill, in any chat
     #   2. + this turn's context block, the action rules and the JSON contract
     #                                 the same for as long as the block is (a loop's passes, mostly)
-    #   then the language lock and the clock, which change between passes and every minute.
+    #   then the language lock, what he called her in for, and the clock, which change between
+    #   passes, between conversations and every minute.
     # Whatever goes into 1 must not depend on the turn — no date, no name from the chat, no state.
     # One such line there and every call pays full price again, with nothing to show for it but
     # the bill (tests/run_prompt_cache.py holds this).
     stable = f"{base}{skill_block}"
     with_contract = f"{stable}{context_block or ''}{action_para}\n\n{contract}"
+    # What he called her in for, quoted. The rule that reads it ("What you are here for") is in the
+    # base; the message itself differs per conversation, so it sits out here with the lock, after
+    # everything reusable.
+    called_line = (
+        f'\n\n{owner_name} called you into this conversation with this message: "{called_for}". '
+        f"That request is what you are here for."
+        if called_for else ""
+    )
     return SystemPrompt(
-        f"{with_contract}{lang_lock}\n\nCurrent date and time: {today}. "
+        f"{with_contract}{lang_lock}{called_line}\n\nCurrent date and time: {today}. "
         f"That is {owner_name}'s own clock.\n\n{legend}\n\n"
         f"Every line of the conversation shows when it was sent. A relative date means what "
         f"it meant to the person who wrote it, on the day they wrote it: \"tomorrow\" in a "

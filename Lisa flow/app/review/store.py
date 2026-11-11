@@ -136,6 +136,8 @@ class ReviewStore:
                 continue
 
             p = e["payload"] or {}
+            if _nothing_decided(p):
+                continue
             activation_id = p.get("activation_message_id")
             turns.append({
                 "loop_id": loop_id,
@@ -314,6 +316,13 @@ class ReviewStore:
             PRIMARY KEY (loop_id, judge_version)
         );
         """
+
+
+def _nothing_decided(record: dict) -> bool:
+    """A record with no turn behind it. The activation found nothing new to read, because an
+    earlier one had already read its message, so no model ran and she decided nothing. Graded, it
+    would be a silence she never chose, timed from a message she had answered long before."""
+    return bool(record.get("nothing_new"))
 
 
 def _context_for(lines: list[dict], trace_id: Optional[str], *, wrote: bool = True) -> list[dict]:
