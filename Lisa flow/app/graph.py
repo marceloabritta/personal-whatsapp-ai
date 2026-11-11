@@ -1,5 +1,8 @@
 """The graph: parse -> gate -> (context -> route -> reason -> ... | transcribe | auto | stop).
 
+`context` goes straight to `act` when the turn has nothing new to read: the message that woke it
+was already read by an earlier activation, so there is no model call and nothing is said.
+
 Two deterministic fast lanes leave the gate with no model call at all: `transcribe` (the owner
 replied to a voice note asking for it) and `auto_transcribe` (a voice note in a chat enrolled
 for automatic transcription). The automatic one rejoins the normal path when a listening window
@@ -29,7 +32,7 @@ from .skills import resolve_gates as default_resolve_gates
 from .nodes.act import act_node, route_after_act
 from .nodes.auto_transcribe import auto_transcribe_node, route_after_auto
 from .nodes.confirm import confirm_node, route_after_confirm
-from .nodes.context import context_node
+from .nodes.context import context_node, route_after_context
 from .nodes.execute import execute_node
 from .nodes.gate import gate_node, route_after_gate
 from .nodes.handoff import handoff_node, route_after_handoff
@@ -128,7 +131,11 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_conditional_edges(
         "auto_transcribe", route_after_auto, {"run": "context", "stop": END},
     )
-    g.add_edge("context", "resolve_pending")
+    # A message an earlier activation already read leaves nothing to decide: straight to `act`,
+    # which says nothing and keeps the window.
+    g.add_conditional_edges(
+        "context", route_after_context, {"resolve": "resolve_pending", "hold": "act"},
+    )
     g.add_conditional_edges(
         "resolve_pending", route_after_resolve,
         # "hold" — a non-owner agreed to a pending write: say nothing, keep the proposal, and

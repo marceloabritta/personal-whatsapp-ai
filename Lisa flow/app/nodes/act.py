@@ -4,6 +4,7 @@ one-row activation record (§10/§12).
   keep_listening · message  → send, refresh the 60s window
   awaiting_answer · message → send, hold the window for AWAIT_WINDOW_SECONDS (5 min)
   any · null                → stay silent, keep the window — never shorter than it was
+  nothing new to read       → the same: silent, window kept (context found no new message)
   close · message           → send (model writes its own sign-off), drop the window
   close · null              → drop the window, nothing sent
 The message goes out verbatim. The reply header is localised to the session language,
@@ -113,6 +114,9 @@ async def act_node(
         actions=state.get("action_results") or [],
         delivery_result=delivery,
         error_category=state.get("error_category") or "none",
+        # No model ran: an earlier activation had read this message. Marked so the review does
+        # not grade it as a silence she chose (review/store.py).
+        nothing_new=state.get("nothing_new") or None,
     )
 
     update = {

@@ -68,6 +68,11 @@ class MessageState(TypedDict, total=False):
     # messages that arrived after its own trigger; when their own activations run later, the
     # messages are not new and must not be answered (or approve something) a second time.
     seen_owner_ids: list
+    # Every message this loop has put in front of the model (bounded). A loop reads a message once:
+    # an activation whose message an earlier one already read finds nothing new and ends silent.
+    read_ids: list
+    # The tagged message that opened this loop, as one line. It sets what she takes part in.
+    called_for: Optional[str]
 
     # --- per-turn scratch ---
     raw: dict
@@ -117,6 +122,7 @@ class MessageState(TypedDict, total=False):
     loop_opened: bool  # this activation opened a NEW loop (tag on a closed window)
 
     context_message_ids: list  # WhatsApp ids ingested this run
+    nothing_new: bool  # this activation had nothing new to read: no model call, nothing said
     turn_text: str  # the labeled transcript this turn — what the address-book scan reads
     owner_replies: list  # texts of the owner's messages first ingested this run, oldest first
     # A fresh tag found the owner's yes to the card in the chat above: {yes_id, card_id, age_s}.

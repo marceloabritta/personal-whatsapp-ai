@@ -54,7 +54,8 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     stack = state.get("skill_stack") or []
     system = system_prompt_for(domain, settings, session_lang=locked_lang,
                                context_block=context_block,
-                               called_by=stack[-1] if stack else None)
+                               called_by=stack[-1] if stack else None,
+                               called_for=state.get("called_for"))
     schema = output_schema_for(domain, settings=settings)
     server_tools = server_tools_for(domain, settings)
     runtime = reason_runtime_for(domain, settings)  # {model, effort, think}, per skill
