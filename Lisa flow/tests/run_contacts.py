@@ -575,6 +575,28 @@ async def outbox_checks():
     first2 = [ln for ln in b2.splitlines() if "Bruno" in ln][0]
     check("a legacy mixed-case preferred still orders",
           first2.index("b.t@gmail.com") < first2.index("bruno@t.co"))
+    # The address his last invite used stands for the card: no "which email?" a second time.
+    check("the address used last time is marked for use, and the question is gone",
+          "bruno@t.co  (USED LAST TIME: use it)" in first and "ask which" not in first, first)
+    check("the other address is still shown, as also on file",
+          "also on file: b.t@gmail.com" in first, first)
+    check("a booking with the other address makes that one the one to use",
+          "b.t@gmail.com  (USED LAST TIME: use it)" in first2 and "also on file: bruno@t.co" in first2,
+          first2)
+    d4._contacts["people/2"]["preferred"] = "gone@old.com"
+    gone = [ln for ln in d4.block(d4.mentions("Bruno Tavares"), "Marcelo").splitlines()
+            if "Bruno" in ln][0]
+    check("an address no longer on the card is no choice: two addresses are a question again",
+          "MORE THAN ONE: ask which" in gone and "USED LAST TIME" not in gone, gone)
+    d4._contacts["people/2"]["preferred"] = None
+    fresh_two = [ln for ln in d4.block(d4.mentions("Bruno Tavares"), "Marcelo").splitlines()
+                 if "Bruno" in ln][0]
+    check("two addresses never used are still a question", "MORE THAN ONE: ask which" in fresh_two,
+          fresh_two)
+    await d3.note_used(["ana.silva@acme.com"])
+    one = [ln for ln in d3.block(d3.mentions("Ana Silva"), "Marcelo").splitlines() if "Ana" in ln][0]
+    check("a card with one address is not marked: there is nothing to choose",
+          "USED LAST TIME" not in one, one)
     # Google's own casing is canonicalised at the boundary.
     from app.tools.people import view as people_view
 

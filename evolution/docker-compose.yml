@@ -133,7 +133,7 @@ services:
       # Anthropic prompt caching: the part of a prompt that repeats from one call to the next is
       # read back at a tenth of the input price. "false" sends the requests as they were before.
       PROMPT_CACHE_ENABLED: "true"
-      PROMPT_VERSION: "2026-11-10-busy-check"
+      PROMPT_VERSION: "2026-11-10-last-used-address"
       # Automatic transcription — the roster-driven ambient path. Nothing is transcribed until
       # a chat is enrolled via "@lisa setup" in the chat with myself.
       AUTO_TRANSCRIBE_ENABLED: "true"
@@ -153,7 +153,7 @@ services:
       # writes only its own tables; nothing in the reply path awaits it. Scoped to the current
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
-      REVIEW_SCOPE_VERSION: "2026-11-10-busy-check"
+      REVIEW_SCOPE_VERSION: "2026-11-10-last-used-address"
       REVIEW_JUDGE_VERSION: "v5"
       REVIEW_MODEL: claude-opus-4-8
       # Transcription (AssemblyAI).

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.nodes.context import _partner_name  # noqa: E402
 from app.skills import context_block_for, system_prompt_for  # noqa: E402
 from app.skills.calendar import calendar_context, chat_line, one_to_one  # noqa: E402
+from app.tools.contacts import describe_person, person_view  # noqa: E402
 from run_contacts_skill import (  # noqa: E402
     FELIPE_JID, OWNER_NUMBER, Chat, book, on_settings, person,
 )
@@ -154,8 +155,12 @@ def the_block() -> None:
 
     d2, _svc, _store = book([laura(ONE, TWO)])
     two = block_of(state(), ctx(d2))
-    check("two addresses on her card: still a question, and still marked",
+    check("two addresses on her card, neither used yet: a question, and still marked",
           "MORE THAN ONE" in two and MARK in two, two)
+    d2._contacts["people/laura"]["preferred"] = TWO
+    used = next((ln for ln in block_of(state(), ctx(d2)).splitlines() if ln.startswith("- Bbzao")), "")
+    check("once one went on an invite, her line says to use it, and is still marked",
+          f"{TWO}  (USED LAST TIME: use it)" in used and "ask which" not in used and MARK in used, used)
 
     g = block_of(state(GROUP_JID, participant_phones=[LAURA_NUMBER]), ctx(d))
     check("a group gets no line and no mark", LINE not in g and MARK not in g, g)
@@ -184,6 +189,31 @@ def the_block() -> None:
     text = "Marcelo: @lisa marca com Alfa Teste, Bravo Teste, Delta Teste, Gama Teste e Omega Teste"
     full = block_of(state(turn_text=text), ctx(d3))
     check("the chat's own card is never the one cut by the limit", MARK in full and ONE in full, full)
+
+
+def the_address_used_last_time() -> None:
+    print("\nwhat the contacts skill is shown, for a card with two addresses")
+    d, _svc, _store = book([laura(ONE, TWO), person("people/ana", "Ana Silva", emails=["ana@x.com"])])
+    card = d._contacts["people/laura"]
+    check("neither used yet: nothing is marked",
+          "used last time" not in describe_person(person_view(card, visible=True)))
+    card["preferred"] = TWO
+    shown = describe_person(person_view(card, visible=True))
+    check("the one his last invite used is marked", f"{TWO} (used last time)" in shown
+          and f"{ONE} (used last time)" not in shown, shown)
+    hidden = describe_person(person_view(card, visible=False))
+    check("in a chat that is not hers the mark stays and the address stays masked",
+          "(used last time)" in hidden and TWO not in hidden and ONE not in hidden, hidden)
+    ana = d._contacts["people/ana"]
+    ana["preferred"] = "ana@x.com"
+    check("a card with one address has nothing to mark",
+          "used last time" not in describe_person(person_view(ana, visible=True)))
+    s = on_settings()
+    cal = system_prompt_for("calendar", s)
+    check("the calendar is told to use the marked address, and to ask only when none is",
+          'one marked "USED LAST TIME" -> use that one' in cal and "none marked -> do NOT choose" in cal)
+    check("the contacts skill is told to pass the mark on",
+          "(used last time)" in system_prompt_for("contacts", s))
 
 
 def the_prompt() -> None:
@@ -251,6 +281,7 @@ async def main() -> int:
     the_line()
     the_partner()
     the_block()
+    the_address_used_last_time()
     the_prompt()
     await through_the_graph()
     print(f"\n{PASS} passed, {FAIL} failed")
