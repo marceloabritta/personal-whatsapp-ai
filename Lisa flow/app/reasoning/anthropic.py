@@ -10,9 +10,12 @@ messages, up to the first byte that differs. Two things are marked here:
   - the system prompt's stable prefixes, where prompt.SystemPrompt says they end. The first is
     the same for every call to a skill, in any chat, so it is read back on nearly every call.
   - the conversation, by the top-level `cache_control` (the API marks the last block and moves
-    the mark as the thread grows). It is read back when nothing before it changed: the later
-    passes of one activation, and every hop of a server-tool turn, which re-sends all of its
-    search results each time.
+    the mark as the thread grows), but ONLY on a turn that carries server tools. Such a turn
+    re-sends its whole conversation, search results and all, on every hop, and each hop reads
+    the last one back. Any other turn is one request, and by the next one what comes before
+    the conversation (the clock, the language lock, the address book) has nearly always
+    changed: storing it was a quarter more to pay on a third of the prompt, for something that
+    could be read back in 8 passes of 130.
 What was read and written comes back in `usage`; a prompt that stops being read back raises no
 error, only the bill, so those two numbers are the only way to see it."""
 from __future__ import annotations
@@ -122,7 +125,9 @@ class AnthropicReasoner:
                         "format": {"type": "json_schema", "schema": schema},
                     },
                 )
-                if cache:
+                # Only a turn that can run more than one hop stores its conversation (see the
+                # module note). The system prompt's own breakpoints are in its blocks.
+                if cache and (server_tools or self.mcp_servers):
                     kwargs["cache_control"] = _CACHE
                 # Native server tools are attached PER CALL by the routed skill (web loads
                 # web_search/web_fetch; calendar loads none — saving the ~6.4k-token overhead).
