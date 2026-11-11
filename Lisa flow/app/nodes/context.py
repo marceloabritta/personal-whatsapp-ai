@@ -70,6 +70,21 @@ def _participant_phones(records: list[dict]) -> list[str]:
     return out
 
 
+def _partner_name(records: list[dict]) -> str | None:
+    """The WhatsApp name of the other person in a one-to-one chat, from the newest message they
+    sent, or None while they have not written.
+
+    It goes into the system prompt (the calendar's "This chat is one-to-one" line), and a push
+    name is whatever its owner typed. So it is kept to one short line with no quotes: enough to
+    name a person, not enough to pass for an instruction."""
+    theirs = [r for r in records if not r.get("from_me") and (r.get("push_name") or "").strip()]
+    if not theirs:
+        return None
+    newest = max(theirs, key=lambda r: r.get("ts") or 0)
+    name = " ".join(str(newest["push_name"]).replace('"', "").split())[:40].strip()
+    return name or None
+
+
 def _log_transcript(trace: Trace, tid: str, loop_id: str | None, records: list[dict],
                     owner: str) -> None:
     """Record each chat message into the loop's transcript stream (deduped by id in the
@@ -484,6 +499,13 @@ async def context_node(
         "owner_replies": owner_replies,
         "seen_owner_ids": seen_owner_ids,
     }
+    # Who a one-to-one chat is with, by the name WhatsApp shows. Written only when the history has
+    # a message of theirs: the chat is always the same person, so a turn that fetched none of
+    # their messages keeps the name an earlier one found.
+    if state.get("chat_kind") != "group":
+        partner_name = _partner_name(records)
+        if partner_name:
+            update["partner_name"] = partner_name
     if reset:
         # New loop → drop tool memory too, so a stale goal or a resolved id from the previous
         # loop can never bleed into this one (the anti-delirium invariant). A fresh tag is a new

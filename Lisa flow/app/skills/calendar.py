@@ -140,24 +140,80 @@ def presets_block(presets, owner: str) -> str | None:
     return head + "\n" + "\n".join(lines)
 
 
+# A one-to-one chat's JID. A group is @g.us; a status or a broadcast list is nobody to meet.
+_ONE_TO_ONE = ("@s.whatsapp.net", "@lid")
+
+
+def one_to_one(state: dict, settings) -> bool:
+    """Is this a chat between the owner and exactly one other person?
+
+    Not a group, and not his chat with himself. The second test reads the number as well as the
+    flag: under LID addressing his own chat can arrive with an opaque id, and only its phone twin
+    says whose it is."""
+    if not str(state.get("remote_jid") or "").endswith(_ONE_TO_ONE):
+        return False
+    if state.get("is_self_chat"):
+        return False
+    owner_key = getattr(settings, "owner_key", "") or ""
+    return not (owner_key and state.get("phone") == owner_key)
+
+
+def chat_line(owner: str, partner: dict | None, name: str | None, *,
+              book_ready: bool, phone) -> str | None:
+    """The line that tells the model it is in a one-to-one chat, and who with. None when nothing
+    says who the other person is.
+
+    The calendar instructions make the person he is talking to a guest of any meeting he asks for
+    there (GUIDANCE, "WHO it is with"). That rule needs two facts the transcript does not state:
+    that this is a one-to-one chat at all, and which card is the other person's. Without them,
+    "@lisa agendar amanha 13hrs" in his wife's chat was booked as an event titled "Marcelo" with
+    nobody on it, her address sitting two lines above in the address book.
+
+    `partner` is their card and `name` what WhatsApp calls them. With neither, there is no line:
+    told only that somebody was there, the model made a name up ("Find Lívia's email") or asked
+    him who he was talking to."""
+    if partner is None and not name:
+        return None
+    who = f'"{name}", the other speaker in the transcript' if name else "one other person"
+    line = f"\n\nThis chat is one-to-one: {owner} and {who}."
+    if partner is not None:
+        card = partner.get("name") or "(unnamed)"
+        return line + (f" In {owner}'s address book that person is \"{card}\", the line marked "
+                       f"THIS CHAT below.")
+    if book_ready and phone:
+        return line + f" No card in {owner}'s contacts has this chat's number."
+    return line
+
+
 def calendar_context(state: dict, ctx: dict):
-    """The prompt blocks for this turn — the owner's presets and the address book — plus what the
-    address book surfaced.
+    """The prompt blocks for this turn — the owner's presets, who a one-to-one chat is with, and
+    the address book — plus what the address book surfaced.
 
     Pure and synchronous — it runs inside the reply path. All of the work is exact dictionary
     lookups against the in-process snapshots (measured at 0.3 ms over 2,000 contacts); the fuzzy
     matching this codebase uses elsewhere was measured at 5 s over the same book, as blocking CPU
     inside an async node, which stalls every chat rather than just this one."""
     settings = ctx.get("settings")
-    pblock = presets_block(ctx.get("presets"), getattr(settings, "owner_name", "the owner"))
-    book = _address_book_context(state, ctx)
+    owner = getattr(settings, "owner_name", "the owner")
+    d = ctx.get("directory")
+    ready = d is not None and getattr(d, "ready", False)
+    pblock = presets_block(ctx.get("presets"), owner) or ""
+
+    partner = None
+    if one_to_one(state, settings):
+        partner = d.chat_partner(state.get("phone")) if ready else None
+        pblock += chat_line(owner, partner, state.get("partner_name"),
+                            book_ready=ready, phone=state.get("phone")) or ""
+
+    book = _address_book_context(state, ctx, partner)
     if book is None:
-        return pblock
-    return {"block": (pblock or "") + book["block"], "state": book["state"]}
+        return pblock or None
+    return {"block": pblock + book["block"], "state": book["state"]}
 
 
-def _address_book_context(state: dict, ctx: dict):
-    """The address-book block and the contacts it surfaced, or None."""
+def _address_book_context(state: dict, ctx: dict, partner: dict | None = None):
+    """The address-book block and the contacts it surfaced, or None. `partner` is the card of the
+    person a one-to-one chat is with: always listed, and marked as such."""
     d = ctx.get("directory")
     settings = ctx.get("settings")
     if d is None or not getattr(d, "ready", False):
@@ -170,6 +226,11 @@ def _address_book_context(state: dict, ctx: dict):
         phones=state.get("participant_phones"),
         limit=getattr(settings, "contacts_max_in_prompt", 5),
     )
+    partner_rn = (partner or {}).get("resource_name")
+    if partner_rn and all(c.get("resource_name") != partner_rn for c, _why in found):
+        # `mentions` lists the chat's own card unless stronger hits filled the limit. The person
+        # the meeting is with by default is the last one to cut.
+        found = [(partner, "phone"), *found]
     if not found:
         return None
     seen = {}
@@ -180,7 +241,7 @@ def _address_book_context(state: dict, ctx: dict):
             seen[e.lower()] = {"name": c.get("name") or "",
                                "resource_name": c.get("resource_name") or "",
                                "n_emails": len(c.get("emails") or [])}
-    block = d.block(found, settings.owner_name)
+    block = d.block(found, settings.owner_name, partner=partner_rn)
     if not block.strip():
         return None
     return {"block": block, "state": {"seen_contacts": seen}}
