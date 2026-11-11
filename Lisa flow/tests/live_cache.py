@@ -114,10 +114,14 @@ async def skill_checks(name: str, s: Settings, reasoner, run_id: str) -> None:
     check(f"[{name}] the prompt is long enough to be stored or already was",
           (u1.get("cache_write") or 0) + (u1.get("cache_read") or 0) > 0, str(u1))
 
-    # A minute on, locked, another block: only the skill's own instructions still match.
+    # A minute on, locked, another block: only the skill's own instructions still match. The
+    # block carries the run id, so it is new to the cache however recently this check last ran.
+    # Without that, a second run inside five minutes found the block already stored, pass 2 read
+    # as much as pass 3, and the check that pass 3 reads more failed on a cache that was working.
+    block = f"{BOOK_2} (ref {run_id})"
     convo = [opened, {"role": "user", "content": "[observation] Nothing ran yet."}]
     with at(now + timedelta(minutes=1)):
-        p2 = system_prompt_for(name, s, session_lang="pt", context_block=BOOK_2)
+        p2 = system_prompt_for(name, s, session_lang="pt", context_block=block)
         r2 = await reasoner.respond(system=p2, messages=convo, **kw)
         u2 = r2.get("usage") or {}
         row(f"{name} 2 later pass", u2)
@@ -126,7 +130,7 @@ async def skill_checks(name: str, s: Settings, reasoner, run_id: str) -> None:
 
         # The same minute, lock and block, one more message: everything before it is read back.
         convo = convo + [{"role": "user", "content": "[observation] Still nothing ran."}]
-        p3 = system_prompt_for(name, s, session_lang="pt", context_block=BOOK_2)
+        p3 = system_prompt_for(name, s, session_lang="pt", context_block=block)
         r3 = await reasoner.respond(system=p3, messages=convo, **kw)
     u3 = r3.get("usage") or {}
     row(f"{name} 3 next pass", u3)
