@@ -25,7 +25,7 @@ import asyncio
 import logging
 from typing import Any
 
-from ..directory import LEARNED
+from ..directory import LEARNED, last_used
 from .base import ActionResult
 from .people import ChangeError, card_view, is_transient
 
@@ -44,10 +44,11 @@ FINDING THE CARD
 - `update` and `delete` need the [id] of a card you were shown. A name is not an id, and you never invent one.
 - One card fits -> use it. Several fit -> ask which, naming them, and emit no write that turn. Too many to read out -> ask for one detail that narrows it (a surname, the company) and search again.
 - None fits -> say so and offer to create the card. The other person in a chat may be saved under another name or number, so search before you conclude he is not on file.
+- An email shown as "(used last time)" is the one {owner_name} last invited that person at. When another skill asks you for someone's email, give every address on the card and say which one is marked.
 
 CHANGES — a list of {{"field", "op", "old", "new"}}. Send "" for whichever of "old" and "new" does not apply.
 - "field" is one of: name, nickname, email, phone, company, title, address, birthday, notes.
-- "update", "change", "new email", "now it is" all mean "op": "replace", with "old" the value being replaced and "new" the value replacing it. Use "add" only when he says "also" or "another": a second email on a card means every future booking has to ask which one to use.
+- "update", "change", "new email", "now it is" all mean "op": "replace", with "old" the value being replaced and "new" the value replacing it. Use "add" only when he says "also" or "another": a second email on a card means the next booking has to ask which one to use.
 - "remove" takes the value to remove in "old".
 - name, company, title, birthday and notes hold one value each: leave "old" as "". "add" on notes appends to what is there, so use it unless he asks to rewrite them.
 - A birthday is "YYYY-MM-DD", or "MM-DD" with no year.
@@ -105,6 +106,9 @@ def person_view(contact: dict, *, visible: bool, card: dict | None = None,
         "name": src.get("name") or contact.get("name") or "",
         "nicknames": list(src.get("nicknames") or []),
         "emails": list(src.get("emails") or []),
+        # The address his last invite to them used (directory.last_used), from the snapshot: the
+        # Google card does not know it.
+        "last_used": last_used({"emails": src.get("emails"), "preferred": contact.get("preferred")}),
         "phones": list(src.get("phones") or []),
         "company": src.get("company") or "",
         "source": contact.get("source") or "google",
@@ -128,8 +132,11 @@ def describe_person(view: dict, *, reveal_emails: bool = False) -> str:
         parts.append(f"company: {view['company']}")
     emails = view.get("emails") or []
     if emails:
+        # Marked only on a card with a choice to make, where it is what settles it.
+        used = view.get("last_used") if len(emails) > 1 else None
         parts.append("email: " + " | ".join(
-            emails if (show or reveal_emails) else [mask_email(e) for e in emails]))
+            (e if (show or reveal_emails) else mask_email(e))
+            + (" (used last time)" if used and e == used else "") for e in emails))
     phones = view.get("phones") or []
     if phones:
         parts.append("phone: " + " | ".join(phones if show else [mask_phone(p) for p in phones]))

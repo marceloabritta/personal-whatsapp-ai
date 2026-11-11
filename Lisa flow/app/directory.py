@@ -73,6 +73,17 @@ LEARNED = "learned"   # Lisa's own memory: serves reads, never pushed to Google
 GOOGLE = "google"     # mirrored from / written to the real address book
 
 
+def last_used(contact: dict) -> Optional[str]:
+    """The address on this card that went on his most recent invite to them, or None.
+
+    `preferred` is written by `note_used` after a booking. It only counts while the card still
+    holds that address: one he has since removed is not a choice any more."""
+    pref = (contact.get("preferred") or "").lower()
+    if not pref:
+        return None
+    return next((e for e in contact.get("emails") or [] if e.lower() == pref), None)
+
+
 class Contact(TypedDict, total=False):
     resource_name: str
     etag: str
@@ -473,14 +484,18 @@ class Directory:
                 ask.append(name)
                 continue
             emails = list(c.get("emails") or [])
-            pref = (c.get("preferred") or "").lower()
-            if pref and pref in [e.lower() for e in emails]:  # order only — never auto-selects
-                emails = ([e for e in emails if e.lower() == pref]
-                          + [e for e in emails if e.lower() != pref])
+            used = last_used(c)
             if not emails:
                 lines.append(f"- {name} — no email on file")
             elif len(emails) == 1:
                 lines.append(f"- {name} — {emails[0]}")
+            elif used:
+                # The address that went on his last invite to this person stands for the card. It
+                # used to only be listed first, and every booking asked "which email?" again: his
+                # wife has two, and he had answered "1" twice. He chose this on 2026-11-10.
+                others = [e for e in emails if e != used]
+                lines.append(f"- {name} — {used}  (USED LAST TIME: use it) · also on file: "
+                             f"{' | '.join(others)}")
             else:
                 lines.append(f"- {name} — {' | '.join(emails)}  (MORE THAN ONE: ask which)")
             if why == "name":
@@ -500,9 +515,9 @@ class Directory:
         The write rules, and the reason each exists:
           * address already known            -> nothing
           * contact has NO address           -> add it (the case the feature exists for)
-          * contact HAS one, this is another -> NOTHING. Appending here is the trap: the owner's
-            rule is "two addresses means always ask", so a single correction would permanently cost
-            a question on every future booking with that person.
+          * contact HAS one, this is another -> NOTHING. Appending here is the trap: two addresses
+            on a card are a question until one of them has gone on an invite (`last_used`), and a
+            single correction should not leave a second address behind to be asked about.
           * nobody matches, identity proven  -> create (Q1), only when a phone confirms who this is
           * nobody matches, identity unproven-> remember it as `learned`, in Lisa's mirror only
         """

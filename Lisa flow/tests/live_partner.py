@@ -170,6 +170,30 @@ async def two_addresses_is_a_question():
             f"asked={asked!r} held={p}")
 
 
+async def the_address_used_last_time_wins():
+    """Two addresses, and his last invite to her used the second: no question, that one goes on."""
+    c = Chat([her_card(ONE, TWO)])
+    c.directory._contacts["people/laura"]["preferred"] = TWO
+    household(c)
+    st = await c.say(ASK)
+    p = held(st)
+    ok = (p.get("task") == "calendar.create" and guests(p) == [TWO] and TWO in c.last()
+          and ONE not in c.last())
+    return ok, f"held={p} said={c.last()!r}"
+
+
+async def he_asks_for_the_other_one():
+    c = Chat([her_card(ONE, TWO)])
+    c.directory._contacts["people/laura"]["preferred"] = TWO
+    household(c)
+    st = await c.say(ASK)
+    first = guests(held(st))
+    st = await c.say("usa o outro email dela")
+    p = held(st)
+    return (first == [TWO] and p.get("task") == "calendar.create" and guests(p) == [ONE],
+            f"first={first} held={p} said={c.last()!r}")
+
+
 async def pointing_back_at_her_proposal():
     c = Chat([her_card(ONE)])
     c.other("Vamos almocar amanha 12h30 no Mani?")
@@ -279,7 +303,7 @@ async def her_card_has_no_address():
 
 SCENARIOS = [
     the_message_that_started_this, nobody_else_has_spoken, two_addresses_is_a_question,
-    pointing_back_at_her_proposal, the_dentist_is_his_alone, he_says_only_him,
+    the_address_used_last_time_wins, he_asks_for_the_other_one, pointing_back_at_her_proposal, the_dentist_is_his_alone, he_says_only_him,
     a_day_off_has_no_guest, he_names_someone_else, a_group_names_nobody, his_own_chat,
     no_card_for_the_number, nobody_to_go_by, her_card_has_no_address,
 ]
