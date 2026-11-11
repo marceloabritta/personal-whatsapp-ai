@@ -12,7 +12,8 @@ them (nothing goes through the graph, WhatsApp or Google, and nothing is sent to
   2. a later pass, a minute on, language locked, another address-book block. Only the skill's
      own instructions repeat, so those must be read back.
   3. the next pass of that same activation: same minute, same block, one more message. Now the
-     whole prompt and the conversation so far must be read back.
+     prompt must be read back through the JSON contract, and nothing stored: the conversation
+     is only marked on a turn with server tools (web), which must read all of it back.
 
 Then the review judge, twice. It needs ANTHROPIC_API_KEY and the model settings, so it runs on the
 droplet, in a throwaway container from the lisa image with this folder mounted and the live
@@ -129,10 +130,16 @@ async def skill_checks(name: str, s: Settings, reasoner, run_id: str) -> None:
         r3 = await reasoner.respond(system=p3, messages=convo, **kw)
     u3 = r3.get("usage") or {}
     row(f"{name} 3 next pass", u3)
-    check(f"[{name}] the next pass reads the whole prompt and the conversation back",
+    check(f"[{name}] the next pass reads this turn's block and the contract back too",
           (u3.get("cache_read") or 0) > (u2.get("cache_read") or 0), f"{u2} then {u3}")
-    check(f"[{name}] and little of it is new",
-          (u3.get("cache_read") or 0) >= 0.8 * (u3.get("input") or 1), str(u3))
+    if kw["server_tools"]:
+        check(f"[{name}] a turn with server tools reads its conversation back as well",
+              (u3.get("cache_read") or 0) >= 0.95 * (u3.get("input") or 1), str(u3))
+    else:
+        check(f"[{name}] most of the prompt is read back",
+              (u3.get("cache_read") or 0) >= 0.8 * (u3.get("input") or 1), str(u3))
+        check(f"[{name}] and nothing is stored: its conversation is not marked",
+              (u3.get("cache_write") or 0) == 0, str(u3))
     check(f"[{name}] she still answers in the contract", r3.get("error_category") == "none"
           and r3.get("state") in ("keep_listening", "awaiting_answer", "close"),
           str(r3.get("stop_reason")))
