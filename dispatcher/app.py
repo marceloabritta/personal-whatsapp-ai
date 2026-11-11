@@ -20,15 +20,21 @@ Routing invariants (mirror each flow's own gate, which stays as the final arbite
   - a flow's own echoed reply (recognised by its header, not a tag) never re-summons and
     never self-extends the window.
 
+A forward that cannot reach its flow is tried again for a short while, in order per chat
+(`Forwarder`): a flow being redeployed is gone for some seconds, and the message sent in
+those seconds is as real as any other.
+
 The helpers below are copied verbatim from `Lisa flow/app/{whatsapp,identity}.py` so the
 dispatcher parses payloads and detects tags/own-messages exactly as the flows do — and
 stays a standalone service with no cross-folder imports."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
+from collections import deque
 from typing import Any
 
 import httpx
@@ -116,6 +122,9 @@ class Config:
         # forwarded to that flow — which decides for itself whether the chat is enrolled. Leave
         # it unset and the dispatcher behaves exactly as it did before.
         self.auto_transcribe_url = os.getenv("AUTO_TRANSCRIBE_URL") or None
+        # How long a forward is tried again while its flow cannot be reached (see Forwarder).
+        # "0" tries once and gives up, which is what the dispatcher did before it retried.
+        self.forward_retry = float(os.getenv("FORWARD_RETRY_SECONDS", "45"))
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
@@ -221,6 +230,140 @@ class OwnerStore:
         return url
 
 
+# ── forwarding: every message reaches its flow, in order, even across a restart ─
+class Forwarder:
+    """Delivers each forward to its flow, and keeps trying while the flow cannot be reached.
+
+    The webhook used to POST once and drop the message on any failure. A flow that is being
+    redeployed has no listener for about twelve seconds: on 2026-11-11 four forwards were
+    refused in two such gaps (00:33 and 00:41 UTC). All four happened to be messages the flow
+    would have ignored, but a tagged order or his "sim" to a card would have gone the same way,
+    with nothing to tell him.
+
+    So a forward that fails because the flow could not be reached, or answers 502/503/504, is
+    tried again with a short pause, for FORWARD_RETRY_SECONDS (45 unless set) counted from
+    when the message arrived. Any other answer means the flow has it, and it is never sent
+    again. A retry cannot
+    double a message that did arrive: the flow drops a message id it has already seen
+    (`_already_seen` in Lisa flow/app/main.py), and a flow that restarted in between never saw it.
+
+    Order is kept per chat and per flow. Each (flow, chat) has its own line and one message of
+    it in flight at a time, so a "sim" never reaches the flow before the order it answers, and
+    one chat waiting on a retry holds no other chat back.
+
+    The lines live in this process's memory. A dispatcher restart forgets them, and they are
+    bounded: past MAX_PER_CHAT waiting for one chat, or MAX_PENDING in all, a new message is
+    dropped and logged rather than queued. Nothing here logs what a message says."""
+
+    # Seconds before each new try; the last one repeats. Two at most, so a flow that is back
+    # has its messages within two seconds, at a cost of some twenty tries per message.
+    BACKOFF = (0.5, 1.0, 2.0)
+    RETRY_STATUS = frozenset({502, 503, 504})  # the flow, or something in front of it, is not up
+    MAX_PER_CHAT = 50
+    MAX_PENDING = 1000
+
+    def __init__(self, http: Any, retry_for: float = 45.0) -> None:
+        self._http = http
+        self.retry_for = retry_for
+        self._lines: dict[tuple[str, str], deque] = {}
+        self._workers: dict[tuple[str, str], asyncio.Task] = {}
+        self._pending = 0  # accepted and not yet delivered or given up
+        self.counts = {"delivered_late": 0, "gave_up": 0, "dropped": 0}
+
+    def state(self) -> dict:
+        """For the health route: what is waiting now, and what the retries have done so far."""
+        return {"pending": self._pending, "retry_seconds": self.retry_for, **self.counts}
+
+    def submit(self, url: str, body: dict) -> bool:
+        """Take one message for `url`. False when there was no room and it was dropped."""
+        jid = ((body.get("data") or body).get("key") or {}).get("remoteJid") or ""
+        key = (url, jid)
+        line = self._lines.get(key)
+        if self._pending >= self.MAX_PENDING or (line is not None and len(line) >= self.MAX_PER_CHAT):
+            self.counts["dropped"] += 1
+            log.error(json.dumps({"forward": "dropped", "reason": "queue_full",
+                                  "url": url, "jid": jid, "pending": self._pending}))
+            return False
+        if line is None:
+            line = self._lines[key] = deque()
+        line.append((body, time.monotonic()))
+        self._pending += 1
+        if key not in self._workers:
+            self._workers[key] = asyncio.get_running_loop().create_task(self._drain(key))
+        return True
+
+    async def _drain(self, key: tuple[str, str]) -> None:
+        """Send one chat's line, oldest first, one message in flight at a time."""
+        url, jid = key
+        line = self._lines[key]
+        held_until = 0.0  # a message that arrived before this stood in line behind a retry
+        try:
+            while line:
+                body, arrived = line[0]
+                tries = await self._deliver(url, jid, body, arrived, behind=arrived < held_until)
+                if tries > 1:
+                    held_until = time.monotonic()
+                line.popleft()
+                self._pending -= 1
+        finally:
+            # Nothing awaits between the loop ending and these two lines, so a message that
+            # arrives next finds no line and no worker, and starts both again.
+            self._pending -= len(line)  # only when cancelled at shutdown: the rest is abandoned
+            self._lines.pop(key, None)
+            self._workers.pop(key, None)
+
+    async def _deliver(self, url: str, jid: str, body: dict, arrived: float,
+                       behind: bool = False) -> int:
+        """Send one message, trying again while the flow is away. Returns how many tries it
+        took. `behind` says it waited in line for an earlier message's retry, so it is late
+        even when its own first try goes through."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                status = (await self._http.post(url, json=body)).status_code
+            except httpx.TransportError as exc:  # refused, reset, timed out: nobody answered
+                error = type(exc).__name__
+            except Exception:  # not something waiting can fix; must never crash the dispatcher
+                log.exception('{"forward":"failed","url":"%s"}', url)
+                return attempt
+            else:
+                if status not in self.RETRY_STATUS:
+                    if attempt > 1 or behind:
+                        self.counts["delivered_late"] += 1
+                        log.info(json.dumps({
+                            "forward": "delivered", "url": url, "jid": jid, "attempts": attempt,
+                            "waited": round(time.monotonic() - arrived, 1)}))
+                    if status >= 400:  # the flow answered, and said no: its call, not retried
+                        log.warning(json.dumps({"forward": "rejected", "url": url, "jid": jid,
+                                                "status": status}))
+                    return attempt
+                error = f"HTTP {status}"
+            waited = time.monotonic() - arrived
+            pause = self.BACKOFF[min(attempt, len(self.BACKOFF)) - 1]
+            if waited + pause > self.retry_for:
+                self.counts["gave_up"] += 1
+                log.error(json.dumps({"forward": "gave_up", "url": url, "jid": jid,
+                                      "attempts": attempt, "waited": round(waited, 1),
+                                      "error": error}))
+                return attempt
+            if attempt == 1:  # one line per message, not one per try
+                log.warning(json.dumps({"forward": "retrying", "url": url, "jid": jid,
+                                        "error": error}))
+            await asyncio.sleep(pause)
+
+    async def aclose(self) -> None:
+        """Stop trying. What is still waiting is abandoned, as it would be by a restart."""
+        workers = list(self._workers.values())
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        # A worker cancelled before it ever ran never reaches its own cleanup.
+        self._lines.clear()
+        self._workers.clear()
+        self._pending = 0
+
+
 cfg = Config()
 app = FastAPI(title="Flow dispatcher", version="1.0.0")
 
@@ -229,6 +372,7 @@ app = FastAPI(title="Flow dispatcher", version="1.0.0")
 async def _startup() -> None:
     app.state.owners = OwnerStore(cfg.redis_url, cfg.window_ttl)
     app.state.http = httpx.AsyncClient(timeout=10.0)
+    app.state.forwards = Forwarder(app.state.http, cfg.forward_retry)
     log.info(
         '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d}',
         "true" if cfg.redis_url else "false",
@@ -240,11 +384,13 @@ async def _startup() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    await app.state.forwards.aclose()
     await app.state.http.aclose()
 
 
 @app.get("/")
 async def health() -> dict:
+    forwards = getattr(app.state, "forwards", None)  # made at startup
     return {
         "ok": True,
         "service": "dispatcher",
@@ -252,14 +398,14 @@ async def health() -> dict:
         "auto_transcribe_url": cfg.auto_transcribe_url,
         "window_ttl": cfg.window_ttl,
         "owner_store": app.state.owners.state(),
+        "forwards": forwards.state() if forwards else None,
     }
 
 
 async def _forward(url: str, body: dict) -> None:
-    try:
-        await app.state.http.post(url, json=body)
-    except Exception:  # a downstream hiccup must never crash the dispatcher
-        log.exception('{"forward":"failed","url":"%s"}', url)
+    """Hand one message to the Forwarder, which sends it and retries if the flow is away.
+    Returns at once: the sending happens on the chat's own line (Forwarder._drain)."""
+    app.state.forwards.submit(url, body)
 
 
 @app.post("/webhook")
