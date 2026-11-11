@@ -44,14 +44,12 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     # or silently dropped a guest from the roster it was rebuilding.
     # The owner's meeting presets ride in the same block, on the same every-pass rule: an update
     # composed in reason ② that moves a meeting "to my house" needs the saved address there too.
-    context_block = None
-    seen_contacts: dict = {}
-    seen_people: dict = {}
-    if directory is not None or presets is not None:
-        context_block, patch = context_block_for(
-            domain, state, {"directory": directory, "settings": settings, "presets": presets})
-        seen_contacts = dict(patch.get("seen_contacts") or {})
-        seen_people = dict(patch.get("seen_people") or {})
+    # Asked for even with no address book and no presets: the calendar's block also says when a
+    # chat is one-to-one, which its "who the meeting is with" rule reads, and that needs neither.
+    context_block, patch = context_block_for(
+        domain, state, {"directory": directory, "settings": settings, "presets": presets})
+    seen_contacts = dict(patch.get("seen_contacts") or {})
+    seen_people = dict(patch.get("seen_people") or {})
 
     stack = state.get("skill_stack") or []
     system = system_prompt_for(domain, settings, session_lang=locked_lang,

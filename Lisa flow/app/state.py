@@ -56,6 +56,7 @@ class MessageState(TypedDict, total=False):
     skill_stack: list  # [{domain, goal, workflow}], newest last; cleared on tag-reset
     pending_call: Optional[dict]  # {skill, request} to carry out once the held write has run
     participant_phones: list  # phones that have spoken in this chat; the room, for the address book
+    partner_name: Optional[str]  # one-to-one chats: the other person's WhatsApp name, once they have written
     side_effects: list  # side-effect actions stripped this turn (feeds the guest-name renderer)
     pending_side_effects: list  # side effects waiting on the same yes as pending_action
     # The card that asked about `pending_action`: {id, ts, text, sig}, where `sig` fingerprints the

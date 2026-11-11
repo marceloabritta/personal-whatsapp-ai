@@ -419,6 +419,17 @@ class Directory:
     def get(self, resource_name: str) -> Optional[dict]:
         return self._contacts.get(resource_name)
 
+    def chat_partner(self, phone: Optional[str]) -> Optional[dict]:
+        """The card of the person a one-to-one chat is with, or None when the book cannot say.
+
+        The same answer `mentions` gives a bare phone hit: the one card holding the number, or the
+        card an earlier booking from this chat linked it to. A number on two cards names nobody.
+        """
+        if not self._ready or not phone:
+            return None
+        found = self._resolve_phone(phone)
+        return found[0] if len(found) == 1 else None
+
     def member_ids(self, phone: Optional[str], phones: Optional[list]) -> set:
         """The cards of the people in this chat: whose details may be read out in it. A number on
         two cards names neither, the same rule `_resolve_phone` applies."""
@@ -435,8 +446,12 @@ class Directory:
 
         return await asyncio.to_thread(search_contacts, list(self._contacts.values()), query)
 
-    def block(self, found: list, owner: str) -> str:
+    def block(self, found: list, owner: str, *, partner: Optional[str] = None) -> str:
         """The prompt snippet. Pure string building; empty list -> "".
+
+        `partner` is the resource name of the person a one-to-one chat is with. Their line is
+        marked, so "the person he is talking to" is a card and an address rather than a guess from
+        a push name: his wife is "Bbzao" in his contacts and "Laura" on WhatsApp.
 
         The same record is served in a group as in a 1:1. It used to be filtered down to the
         addresses the room had already typed, on the theory that a private address must not be
@@ -470,6 +485,8 @@ class Directory:
                 lines.append(f"- {name} — {' | '.join(emails)}  (MORE THAN ONE: ask which)")
             if why == "name":
                 lines[-1] += "  [named in the chat, identity not confirmed — confirm before using]"
+            if partner and c.get("resource_name") == partner:
+                lines[-1] += f"  [THIS CHAT: the person {owner} is talking to]"
         if ask:
             lines.append(f"- A name used here fits more than one person: {', '.join(ask)}. "
                          f"ASK WHICH — and use no address until he answers.")
