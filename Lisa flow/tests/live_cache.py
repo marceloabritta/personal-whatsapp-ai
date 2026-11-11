@@ -12,7 +12,8 @@ them (nothing goes through the graph, WhatsApp or Google, and nothing is sent to
   2. a later pass, a minute on, language locked, another address-book block. Only the skill's
      own instructions repeat, so those must be read back.
   3. the next pass of that same activation: same minute, same block, one more message. Now the
-     whole prompt and the conversation so far must be read back.
+     prompt must be read back through the JSON contract, and nothing stored: the conversation
+     is only marked on a turn with server tools (web), which must read all of it back.
 
 Then the review judge, twice. It needs ANTHROPIC_API_KEY and the model settings, so it runs on the
 droplet, in a throwaway container from the lisa image with this folder mounted and the live
@@ -113,10 +114,14 @@ async def skill_checks(name: str, s: Settings, reasoner, run_id: str) -> None:
     check(f"[{name}] the prompt is long enough to be stored or already was",
           (u1.get("cache_write") or 0) + (u1.get("cache_read") or 0) > 0, str(u1))
 
-    # A minute on, locked, another block: only the skill's own instructions still match.
+    # A minute on, locked, another block: only the skill's own instructions still match. The
+    # block carries the run id, so it is new to the cache however recently this check last ran.
+    # Without that, a second run inside five minutes found the block already stored, pass 2 read
+    # as much as pass 3, and the check that pass 3 reads more failed on a cache that was working.
+    block = f"{BOOK_2} (ref {run_id})"
     convo = [opened, {"role": "user", "content": "[observation] Nothing ran yet."}]
     with at(now + timedelta(minutes=1)):
-        p2 = system_prompt_for(name, s, session_lang="pt", context_block=BOOK_2)
+        p2 = system_prompt_for(name, s, session_lang="pt", context_block=block)
         r2 = await reasoner.respond(system=p2, messages=convo, **kw)
         u2 = r2.get("usage") or {}
         row(f"{name} 2 later pass", u2)
@@ -125,14 +130,20 @@ async def skill_checks(name: str, s: Settings, reasoner, run_id: str) -> None:
 
         # The same minute, lock and block, one more message: everything before it is read back.
         convo = convo + [{"role": "user", "content": "[observation] Still nothing ran."}]
-        p3 = system_prompt_for(name, s, session_lang="pt", context_block=BOOK_2)
+        p3 = system_prompt_for(name, s, session_lang="pt", context_block=block)
         r3 = await reasoner.respond(system=p3, messages=convo, **kw)
     u3 = r3.get("usage") or {}
     row(f"{name} 3 next pass", u3)
-    check(f"[{name}] the next pass reads the whole prompt and the conversation back",
+    check(f"[{name}] the next pass reads this turn's block and the contract back too",
           (u3.get("cache_read") or 0) > (u2.get("cache_read") or 0), f"{u2} then {u3}")
-    check(f"[{name}] and little of it is new",
-          (u3.get("cache_read") or 0) >= 0.8 * (u3.get("input") or 1), str(u3))
+    if kw["server_tools"]:
+        check(f"[{name}] a turn with server tools reads its conversation back as well",
+              (u3.get("cache_read") or 0) >= 0.95 * (u3.get("input") or 1), str(u3))
+    else:
+        check(f"[{name}] most of the prompt is read back",
+              (u3.get("cache_read") or 0) >= 0.8 * (u3.get("input") or 1), str(u3))
+        check(f"[{name}] and nothing is stored: its conversation is not marked",
+              (u3.get("cache_write") or 0) == 0, str(u3))
     check(f"[{name}] she still answers in the contract", r3.get("error_category") == "none"
           and r3.get("state") in ("keep_listening", "awaiting_answer", "close"),
           str(r3.get("stop_reason")))

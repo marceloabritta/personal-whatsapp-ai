@@ -7,8 +7,9 @@ So this holds the three things that keep the prefix reusable:
   - the prompt: nothing that belongs to the turn (the clock, the language lock, the address book,
     a waiting skill) comes before the first stable offset, for any skill;
   - the request: the stable prefixes go out as marked blocks that join back into the same prompt,
-    the conversation is marked by the top-level field, and with the switch off the request is the
-    one sent before caching existed;
+    the conversation is marked by the top-level field only on a turn that carries server tools
+    (the one kind that re-sends it), and with the switch off the request is the one sent before
+    caching existed;
   - the counts: `usage.input` stays everything she was sent, with what was read back and what was
     stored beside it.
 
@@ -215,18 +216,29 @@ async def request_checks() -> None:
               isinstance(system, list)
               and len(system[0]["text"]) == prompt.stable_ends[0]
               and len(system[0]["text"]) + len(system[1]["text"]) == prompt.stable_ends[1])
-        check(f"[{name}] the conversation is marked by the top-level field",
-              sent.get("cache_control") == {"type": "ephemeral"})
-        check(f"[{name}] three breakpoints in all, of the four allowed",
-              sum(1 for m in _marks(system) if m) + (1 if sent.get("cache_control") else 0) == 3)
+        # A turn with server tools re-sends its conversation on every hop; no other turn does,
+        # and marking theirs stored a third of every prompt that nothing ever read back.
+        tools = bool(server_tools_for(name, s))
+        check(f"[{name}] the conversation is {'marked: this turn can search' if tools else 'not marked: one request, nothing re-sent'}",
+              sent.get("cache_control") == ({"type": "ephemeral"} if tools else None))
+        check(f"[{name}] {'three' if tools else 'two'} breakpoints in all, of the four allowed",
+              sum(1 for m in _marks(system) if m) + (1 if sent.get("cache_control") else 0)
+              == (3 if tools else 2))
         check(f"[{name}] nothing in the conversation itself is touched", sent["messages"] == convo)
 
-    # A prompt with no offsets (a plain str, from anywhere) is sent whole, with only the
-    # conversation marked.
+    # A prompt with no offsets (a plain str, from anywhere) is sent whole, with nothing marked.
     r, fake = _reasoner(s, [_resp(_OK, _Usage(input_tokens=1, output_tokens=1))])
     await r.respond(system="You are a test.", messages=convo)
-    check("a plain str prompt is sent as the string it is",
-          fake.calls[0]["system"] == "You are a test.")
+    check("a plain str prompt is sent as the string it is, with no cache field",
+          fake.calls[0]["system"] == "You are a test." and "cache_control" not in fake.calls[0])
+
+    # An MCP connector runs its tools on Anthropic's side too, hop after hop, like web search.
+    r = AnthropicReasoner(s, mcp_servers=[{"type": "url", "url": "https://mcp.example.com", "name": "x"}])
+    fake = FakeMessages([_resp(_OK, _Usage(input_tokens=1, output_tokens=1))])
+    r._client = SimpleNamespace(messages=fake, beta=SimpleNamespace(messages=fake))
+    await r.respond(system=system_prompt_for("calendar", s), messages=convo)
+    check("a turn with an MCP connector marks its conversation too",
+          fake.calls[0].get("cache_control") == {"type": "ephemeral"})
 
     # The switch. Off, the request is the one sent before caching existed.
     off = settings(prompt_cache_enabled=False)
