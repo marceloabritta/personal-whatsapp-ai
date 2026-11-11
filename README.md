@@ -74,6 +74,26 @@ An unset preset behaves exactly as Lisa did before presets existed.
 Off by default. Turn it on with `PRESETS_ENABLED=true` on the flow; they are stored in
 `<LOG_SCHEMA>.owner_presets` when `DATABASE_URL` is set.
 
+## When you are already busy
+
+Before Lisa shows the confirmation for a booking, or for moving an event, she reads your calendar
+for that time. If something is already there, no card goes out. She says so in the chat the way
+a secretary would, and nothing more:
+
+> Marcelo, você já tem outro compromisso nesse horário.
+
+- She never says what the other event is, who it is with, or when it starts and ends. She is not
+  told: the read asks Google only for times.
+- She offers **one** other time when the conversation gives her something to choose by (when the
+  other person said they can, the part of the day you were aiming for). With nothing to go on,
+  she says only that you are not free.
+- She can settle the new time with the other person in the chat. When a time is agreed she checks
+  it too and shows you the card; only your yes books it.
+- Say "marca assim mesmo" and the card for the original time goes out.
+- All-day events, events marked "free", and invitations you declined do not count as busy.
+
+Off by default. Turn it on with `BUSY_CHECK_ENABLED=true` on the flow.
+
 ## Adding a new flow without risking the core
 
 The dispatcher fans out by tag, so a new/experimental feature ships as its **own tag → its

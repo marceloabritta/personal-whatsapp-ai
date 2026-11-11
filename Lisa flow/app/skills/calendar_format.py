@@ -57,6 +57,7 @@ _L = {
         "guests_full": "Participantes (lista final)", "guests_dropped": "Removidos",
         "u_video_off": "Remover chamada de vídeo", "u_where_off": "Remover local",
         "u_guests_off": "Remover todos os convidados", "u_title_off": "Remover título",
+        "busy": "{owner}, você já tem outro compromisso nesse horário.",
     },
     "en": {
         "confirm_create": "Confirming", "confirm_update": "Confirming this change",
@@ -77,6 +78,7 @@ _L = {
         "guests_full": "Guests (final list)", "guests_dropped": "Removed",
         "u_video_off": "Remove video call", "u_where_off": "Remove location",
         "u_guests_off": "Remove all guests", "u_title_off": "Remove title",
+        "busy": "{owner}, there is another event conflicting with that time slot.",
     },
     "es": {
         "confirm_create": "Confirmando", "confirm_update": "Confirmando el cambio",
@@ -96,6 +98,7 @@ _L = {
         "guests_full": "Invitados (lista final)", "guests_dropped": "Quitados",
         "u_video_off": "Quitar videollamada", "u_where_off": "Quitar ubicación",
         "u_guests_off": "Quitar todos los invitados", "u_title_off": "Quitar título",
+        "busy": "{owner}, ya tienes otro compromiso a esa hora.",
     },
 }
 
@@ -374,6 +377,15 @@ def fmt_delete(results: list, state: dict) -> str:
     if d.get("had_attendees"):
         lines.append(L["guests_did"] if d.get("notified", True) else L["guests_silent"])
     return _joined(lines)
+
+
+# --- he is not free then ------------------------------------------------------------------
+
+def busy_line(owner: str, lang: str | None) -> str:
+    """That he is not free at that time, and nothing else. What goes out when the model, asked
+    to say it, says nothing: the least a person who asked for a booking must hear back."""
+    code = (lang or "en")[:2].lower()
+    return _L[code if code in _L else "en"]["busy"].format(owner=owner)
 
 
 # --- the agenda (a read) ------------------------------------------------------------------

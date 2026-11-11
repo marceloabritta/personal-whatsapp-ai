@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import difflib
 import unicodedata
+from datetime import datetime
 
 from ..presets import MEETING_MINUTES
 from ..state import HANDOFF_MARK
 from ..tools.calendar import (
-    CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DEFAULTS_GUIDANCE, DESCRIBE, GUIDANCE,
-    GoogleCalendarService, apply_presets,
+    BUSY_GUIDANCE, CONTACTS_CALL_GUIDANCE, CONTACTS_GUIDANCE, DEFAULTS_GUIDANCE, DESCRIBE,
+    GUIDANCE, GoogleCalendarService, apply_presets,
 )
 from ..tools.schemas import CALENDAR_TASK_SCHEMAS
 from .base import Skill
 from .calendar_format import (
-    compose_create, compose_delete, compose_update,
+    busy_line, compose_create, compose_delete, compose_update,
     fmt_create, fmt_delete, fmt_failure, fmt_list, fmt_update,
 )
 from .confirm import FlagConfirm
@@ -267,7 +268,154 @@ def _guest_in_title(title: str, owner_name: str) -> str | None:
     return right.strip()
 
 
+# --- when he is not free ------------------------------------------------------------------
+#
+# On 2026-11-10 he tagged "@lisa agendar aqui em casa, 11 as 12:30" in a chat with a partner and
+# got a card for a time he already had a meeting in. Nothing had looked. Now the system looks
+# before every card, and what a held-back booking leaves behind is a note for the model, not a
+# message for the chat: she says he is not free, as a secretary would, and settles another time
+# with the people in the conversation.
+#
+# What she can let slip is bounded by what she is given, so she is given times and nothing else.
+# The handler does not even fetch the other event's title (tools/calendar.py, _BUSY_FIELDS).
+
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# How the confirm node opens the note: "[calendar.create not proposed] …".
+NOT_PROPOSED = " not proposed] "
+
+
+def _role_text(m) -> tuple[str, str]:
+    """(role, text) of a checkpointed message, whichever shape it came back in."""
+    if isinstance(m, dict):
+        role, content = m.get("role", "user"), m.get("content")
+    else:
+        role = "assistant" if getattr(m, "type", "") == "ai" else "user"
+        content = getattr(m, "content", "")
+    return role, content if isinstance(content, str) else ""
+
+
+def _is_busy_note(text: str) -> bool:
+    return text.startswith("[calendar.") and NOT_PROPOSED in text[:48]
+
+
+def _hhmm(iso: str) -> str:
+    return datetime.fromisoformat(iso).strftime("%H:%M")
+
+
+def busy_note(owner: str, data: dict) -> str:
+    """What the model is told when a booking is held back: that he is not free then, and when
+    he is. Built from the handler's times-only answer, so there is no title here to repeat."""
+    start, end = data["start"], data["end"]
+    d = datetime.fromisoformat(start)
+    minutes = data.get("minutes")
+    free = data.get("free") or []
+    if free:
+        windows = ", ".join(f"{_hhmm(w['start'])} to {_hhmm(w['end'])}" for w in free)
+        rest = (f"The times he is free that day, each long enough for the {minutes} minutes "
+                f"this takes: {windows}. They are for you to choose from, never to read out.")
+    else:
+        rest = (f"He has no other free time that day long enough for the {minutes} minutes "
+                f"this takes.")
+    return (f"{owner} is not free then: something else is already on his calendar during "
+            f"{_WEEKDAYS[d.weekday()]}, {d:%Y-%m-%d}, {_hhmm(start)} to {_hhmm(end)} "
+            f"[slot {start}/{end}]. No card was shown, and you are not told what the other "
+            f"thing is. {rest} Now follow WHEN HE IS NOT FREE.")
+
+
+def _told_and_answered(state: dict, slot: str) -> bool:
+    """She has already said he is not free at this very time, and he is the one speaking now.
+
+    That is the only way the same time comes back to be proposed for a reason: he heard it and
+    said to book it anyway. Read off the thread: the note for this slot, then a message of hers
+    after it (the note alone means nobody was told yet, and the model is merely insisting).
+    Someone else speaking is not him deciding to double-book himself."""
+    if not (state.get("from_me") or state.get("owner_replies")):
+        return False
+    noted = False
+    for m in state.get("messages") or []:
+        role, text = _role_text(m)
+        if role == "assistant":
+            if noted:
+                return True
+        elif _is_busy_note(text) and f"[slot {slot}]" in text:
+            noted = True
+    return False
+
+
+async def calendar_busy_check(action: dict, state: dict, ctx: dict) -> dict | None:
+    """Before a booking's card: is he free then? (FlagConfirm.precheck)
+
+    None when there is nothing to look at. Otherwise {"hold", "trace"}, and when `hold` is true
+    also "note" (for the model) and "say" (the line the code sends if the model cannot be asked).
+
+    A read that fails holds nothing back. The card going out for a time he is busy is yesterday's
+    behaviour; no card at all because Google hiccuped would be a booking lost."""
+    settings = ctx.get("settings")
+    if not getattr(settings, "busy_check_enabled", False):
+        return None
+    verb = (action.get("task") or "").partition(".")[2]
+    handler = ctx.get("handler")
+    if verb not in ("create", "update") or handler is None:
+        return None
+    write = {k: v for k, v in action.items() if k != "task" and not k.startswith("_")}
+    prev = (state.get("seen_events") or {}).get(action.get("event_id")) if verb == "update" else None
+    res = await handler.run("busy", {"verb": verb, "write": write, "prev": prev}) or {}
+    data = res.get("data") or {}
+    if not res.get("ok"):
+        return {"hold": False, "trace": {"read": "failed", "error": res.get("error")}}
+    if not data.get("checked"):
+        return {"hold": False, "trace": {"read": "skipped"}}
+    trace = {"read": "ok", "start": data.get("start"), "end": data.get("end"),
+             "conflict": bool(data.get("conflict"))}
+    if not data.get("conflict"):
+        return {"hold": False, "trace": trace}
+    slot = f"{data['start']}/{data['end']}"
+    if _told_and_answered(state, slot):
+        return {"hold": False, "trace": {**trace, "anyway": True}}
+    owner = getattr(settings, "owner_name", "the owner")
+    lang = state.get("session_lang") or state.get("lang")
+    return {"hold": True, "note": busy_note(owner, data), "say": busy_line(owner, lang),
+            "trace": {**trace, "free": len(data.get("free") or [])}}
+
+
+def _busy_unanswered(state: dict) -> bool:
+    """A "not proposed" note is the last word in the thread: she has not spoken since."""
+    for m in reversed(state.get("messages") or []):
+        role, text = _role_text(m)
+        if role == "assistant":
+            return False
+        if _is_busy_note(text):
+            return True
+    return False
+
+
+def _say_he_is_busy(result: dict, state: dict, settings) -> dict:
+    """Told he is not free, the model said nothing and did nothing → the line is said for it.
+
+    Whether to offer another time is hers to judge. That he hears his booking did not go ahead is
+    not: silence here leaves him waiting for a card that will never come."""
+    if not getattr(settings, "busy_check_enabled", False):
+        return result
+    if result.get("message") or result.get("actions") or result.get("call"):
+        return result
+    if not _busy_unanswered(state):
+        return result
+    lang = state.get("session_lang") or result.get("lang")
+    return {**result, "state": "awaiting_answer",
+            "message": busy_line(getattr(settings, "owner_name", "the owner"), lang)}
+
+
 def calendar_revise(result: dict, state: dict, settings) -> dict:
+    """Code's second look at a calendar pass (Skill.revise): the two steps the prompt asks for
+    and the model now and then skips."""
+    said = _say_he_is_busy(result, state, settings)
+    if said is not result:
+        return said
+    return _contacts_first(result, state, settings)
+
+
+def _contacts_first(result: dict, state: dict, settings) -> dict:
     """A booking for someone with no address, made before asking the contacts skill → ask it first.
 
     The prompt already says to (CONTACTS_CALL_GUIDANCE), and most passes do. Live, some still put up
@@ -337,6 +485,8 @@ CALENDAR = Skill(
         # His presets (length, video call, guest emails, places) are written into the held write
         # before its card is composed — one value for the card and the event both.
         prepare=apply_presets,
+        # And his calendar is read for that time before the card is shown at all.
+        precheck=calendar_busy_check,
     ),
     # Render is PER VERB: writes + list render programmatically from the result; find keeps the
     # model (judgment / "which one?"). respond falls back to the model on failure or an
@@ -361,7 +511,8 @@ CALENDAR = Skill(
     gated_verbs={"remember": "contacts_enabled"},
     gated_guidance=[("contacts_enabled", CONTACTS_GUIDANCE),
                     ("contacts_crud_on", CONTACTS_CALL_GUIDANCE),
-                    ("presets_enabled", DEFAULTS_GUIDANCE)],
+                    ("presets_enabled", DEFAULTS_GUIDANCE),
+                    ("busy_check_enabled", BUSY_GUIDANCE)],
     calls={"contacts"},
     revise=calendar_revise,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.

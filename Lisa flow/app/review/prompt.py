@@ -20,7 +20,7 @@ SILENT_MARKER = "(stayed silent — sent nothing)"
 
 
 def build_judge_prompt(owner_name: str = "Marcelo", tag: str = "@lisa",
-                       contacts_skill: bool = False) -> str:
+                       contacts_skill: bool = False, busy_check: bool = False) -> str:
     # Told she can edit contacts while the skill is off, the judge would mark her honest "I can't" a
     # false refusal.
     contacts_can = (f"""  - Google Contacts on {owner_name}'s own account, when he asks: look a person up, save a new one, \
@@ -32,6 +32,17 @@ so telling him to ask for those in his own chat is her working as built, not a r
     contacts_deliberate = ("  - The same for a contact: one ask, one yes, before she saves, changes or "
                            "deletes a card, with the old and new value read back. A value masked on "
                            "that card (f***@a***.com) is deliberate too.\n" if contacts_skill else "")
+    # The judge cannot see his calendar. Without this, "you already have something then" in place
+    # of the card he asked for reads as a booking she refused, or a conflict she made up.
+    busy_deliberate = (
+        f"  - Before she asks to book or move something, the system reads {owner_name}'s calendar "
+        f"for that time. When he already has something there she shows no card: she says only "
+        f"that he is not free then, and may offer ONE other time when the chat gives her a reason "
+        f"to pick it. You cannot see his calendar, so take her word that he is busy. Not naming "
+        f"the other event, not saying when it starts or ends, not listing his free hours and "
+        f"offering no other time at all are each deliberate. So is settling a new time with the "
+        f"other person in the chat, and showing the card after all when {owner_name} says to book "
+        f"it anyway.\n" if busy_check else "")
     codes = "\n".join(f"  {code} — {desc}" for code, desc in JUDGE_CODES.items())
     classes = "\n".join(f"  {name} — {desc}" for name, desc in TASK_CLASSES.items())
 
@@ -89,7 +100,7 @@ WHEN IT HAPPENED. The turn carries the date and time it was taken, and every mes
 WHAT IS DELIBERATE, AND NOT A FAULT. These are design decisions. Marking them down would mean asking for them to be removed:
   - Asking once, before she creates, changes or deletes an event, whether to go ahead. She is REQUIRED to get {owner_name}'s go-ahead before touching the calendar, even when he has just told her to do it. One ask followed by one yes is the system working correctly. It becomes a fault only when he already answered that same question and she puts it again.
   - Reading the resulting title, time and guest list back on a confirmation. That is what he is being asked to approve; repeating it is the point of the message, not padding.
-{contacts_deliberate}
+{contacts_deliberate}{busy_deliberate}
 VERDICT:
   good        — the right thing to say (or the right silence), said well.
   acceptable  — served its purpose, but something was off.

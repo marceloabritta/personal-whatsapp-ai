@@ -5,6 +5,7 @@ A confirm policy owns the whole confirmation step for a skill, all of it program
   needs               which verbs need a go-ahead before they run
   compose(action, st) build the confirmation PROMPT the owner sees (per verb) — no LLM writes it
   detect(text, act)   decide if the owner's reply to that action is a clean "yes" (classify_confirmation)
+  precheck(action)    look before the card is shown — may hold the write back with a note for the model
   confirm(action)     the structural gate — may this action run this turn?
 
 `FlagConfirm` is the calendar policy: a write runs only when `confirmed` is set (by the owner's
@@ -42,8 +43,12 @@ class FlagConfirm:
     resolved in code (detect) and the confirmation prompt is composed in code (compose)."""
 
     def __init__(self, needs, compose_map: Optional[dict[str, Callable]] = None,
-                 prepare: Optional[Callable] = None) -> None:
+                 prepare: Optional[Callable] = None,
+                 precheck: Optional[Callable] = None) -> None:
         self.needs = set(needs)
+        # async fn(action, state, deps) -> None | {"hold", "note", "say", "trace"} — the skill's
+        # own look at the world before a card is shown (skills.calendar.calendar_busy_check).
+        self._precheck = precheck
         # {verb: fn(action, state) -> str} — the skill's per-verb confirmation formatters.
         self._compose = dict(compose_map or {})
         # fn(action, presets) -> action — fills the owner's presets into a write before it is
@@ -60,6 +65,18 @@ class FlagConfirm:
             return self._prepare(action, presets)
         except Exception:
             return action
+
+    async def precheck(self, action: dict, state: dict, deps: Any) -> Optional[dict]:
+        """What the skill found when it looked before the card, or None when it has nothing to
+        look at. `hold` true keeps the write from its card: the confirm node gives the model
+        `note` instead, and sends `say` itself if the model can no longer be asked. A check that
+        breaks is no check: the card goes out as it would have without one."""
+        if self._precheck is None:
+            return None
+        try:
+            return await self._precheck(action, state, deps)
+        except Exception:
+            return None
 
     def compose(self, action: dict, state: dict) -> Optional[str]:
         """The confirmation prompt for this action, or None if the skill can't build it (→ model)."""

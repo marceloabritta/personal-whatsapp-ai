@@ -28,6 +28,7 @@ class Judge:
         self._system = build_judge_prompt(
             owner_name=settings.owner_name, tag=settings.primary_tag,
             contacts_skill=bool(getattr(settings, "contacts_crud_on", False)),
+            busy_check=bool(getattr(settings, "busy_check_enabled", False)),
         )
 
     def _client_or_make(self):
