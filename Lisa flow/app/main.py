@@ -2,7 +2,16 @@
 
 Replies 200 immediately, then runs the graph in the background, scoped to the chat's
 checkpoint thread. Correctness rails: message-id idempotency + a per-thread lock so
-two fast messages in one chat can't race the checkpoint or the window."""
+two fast messages in one chat can't race the checkpoint or the window.
+
+STOPPING. A turn accepted here is finished before the process exits. On SIGTERM uvicorn
+closes its listener at once, so a webhook sent from then on is refused and the dispatcher
+sends it again to the container that replaces this one. It then waits for the turns in
+flight, which are the background tasks below, and only after them runs the teardown at the
+bottom of `lifespan`. How long it may wait is set in two places that have to agree:
+`--timeout-graceful-shutdown` in the Dockerfile, and a longer `stop_grace_period` on the
+service in compose. Without the second, Docker kills the container ten seconds after asking
+it to stop: on 2026-11-11 that cut a web answer he had asked for one second into a deploy."""
 from __future__ import annotations
 
 import asyncio
@@ -200,6 +209,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Reached only after uvicorn has waited for the turns in flight (see STOPPING above).
+        # A turn it gave up on logs its own "turn_cut" line, possibly after this one.
+        log.info('{"shutdown":"teardown"}')
         if deps.directory is not None:
             await deps.directory.aclose()
         if cstore is not None:
@@ -273,9 +285,15 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
 
 async def _run(app: FastAPI, body: dict, thread_id: str) -> None:
     lock = _locks.setdefault(thread_id, asyncio.Lock())
-    async with lock:
-        try:
-            config = {"configurable": {"thread_id": thread_id}}
-            await app.state.graph.ainvoke({"raw": body}, config=config)
-        except Exception:  # a bad payload must never crash the worker
-            log.exception("graph run failed")
+    try:
+        async with lock:
+            try:
+                config = {"configurable": {"thread_id": thread_id}}
+                await app.state.graph.ainvoke({"raw": body}, config=config)
+            except Exception:  # a bad payload must never crash the worker
+                log.exception("graph run failed")
+    except asyncio.CancelledError:
+        # Nothing cancels a turn but a shutdown that ran out of time (see STOPPING above). He
+        # gets no reply to this message, so it must not pass unseen.
+        log.error('{"shutdown":"turn_cut","thread":"%s"}', thread_id)
+        raise
