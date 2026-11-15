@@ -20,13 +20,14 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-for _name in ("REDIS_URL", "AUTO_TRANSCRIBE_URL", "LISA_URL", "LISA_TAGS", "MAX_MESSAGE_AGE_SECONDS"):
+for _name in ("REDIS_URL", "AUTO_TRANSCRIBE_URL", "LISA_URL", "LISA_TAGS", "MAX_MESSAGE_AGE_SECONDS",
+              "DRAIN_TRIGGER", "DRAIN_WINDOW_SECONDS", "DRAIN_QUIET_SECONDS"):
     os.environ.pop(_name, None)  # the app reads its config from the environment at import
 
 import httpx  # noqa: E402
 
 import app as disp  # noqa: E402
-from app import OwnerStore, message_age  # noqa: E402
+from app import DrainBreaker, OwnerStore, message_age  # noqa: E402
 
 LISA = disp.cfg.routes[0][1]
 TRANSCRIBE = "http://transcribe.test/webhook"
@@ -82,6 +83,7 @@ async def webhook_checks() -> None:
 
     disp._forward = record_forward
     disp.cfg.auto_transcribe_url = TRANSCRIBE
+    disp.breaker = DrainBreaker(0, 60, 180)  # the age guard alone; the breaker has its own file
     lines = Lines()
     disp.log.addHandler(lines)
     disp.log.propagate = False

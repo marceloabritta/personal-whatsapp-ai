@@ -88,6 +88,11 @@ services:
       # A message that reaches the dispatcher this long after it was sent is not acted on
       # (no forward, no window, no transcription): only a held-back backlog arrives that late.
       MAX_MESSAGE_AGE_SECONDS: "600"
+      # Drain breaker: once 5 stale messages arrive within 60 s, a backlog is being replayed and
+      # nothing is acted on, fresh-looking or not, until 180 s pass with no stale arrival.
+      DRAIN_TRIGGER: "5"
+      DRAIN_WINDOW_SECONDS: "60"
+      DRAIN_QUIET_SECONDS: "180"
       # Own DB index, clear of Evolution's cache and the flows' session stores.
       REDIS_URL: redis://redis:6379/4
       # tag → flow wiring (forwarded by Docker service DNS on evolution-net).
