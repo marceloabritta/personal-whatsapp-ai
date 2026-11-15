@@ -5,14 +5,19 @@
 #
 #  NB: this file is the canonical record of what runs in production. The droplet
 #  deploys it as a base compose (api/redis/postgres) + a docker-compose.override.yml
-#  (dispatcher/lisa) whose only intentional difference is ABSOLUTE build
+#  (dispatcher/lisa, and the api's patched build) whose only intentional difference is ABSOLUTE build
 #  contexts under /opt/personal-whatsapp-ai (this file uses repo-relative paths).
 #  Env, models, ports and versions here mirror the live override — keep them in sync.
 # ============================================================================
 services:
   api:
     container_name: evolution_api
-    image: evoapicloud/evolution-api:latest
+    # Evolution with its Baileys patched so incoming messages are not held back (status
+    # stanzas acked, offline batches asked for until done): see baileys-patch/Dockerfile.
+    # On the droplet this build lives in the override; the base still names the stock image.
+    build:
+      context: ./baileys-patch
+    image: evolution-api:baileys-patch
     restart: always
     depends_on:
       - redis
@@ -80,6 +85,9 @@ services:
       # Lisa's 5-minute AWAIT_WINDOW_SECONDS counts from her reply — so it is that window
       # plus two minutes for her to reason and send.
       WINDOW_TTL: "420"
+      # A message that reaches the dispatcher this long after it was sent is not acted on
+      # (no forward, no window, no transcription): only a held-back backlog arrives that late.
+      MAX_MESSAGE_AGE_SECONDS: "600"
       # Own DB index, clear of Evolution's cache and the flows' session stores.
       REDIS_URL: redis://redis:6379/4
       # tag → flow wiring (forwarded by Docker service DNS on evolution-net).

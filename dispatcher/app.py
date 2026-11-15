@@ -24,6 +24,10 @@ A forward that cannot reach its flow is tried again for a short while, in order 
 (`Forwarder`): a flow being redeployed is gone for some seconds, and the message sent in
 those seconds is as real as any other.
 
+A message that reaches the dispatcher long after it was sent (MAX_MESSAGE_AGE_SECONDS) is not
+acted on at all: no forward, no window, no transcription. Only a backlog arrives that late,
+and by then he has moved on.
+
 The helpers below are copied verbatim from `Lisa flow/app/{whatsapp,identity}.py` so the
 dispatcher parses payloads and detects tags/own-messages exactly as the flows do — and
 stays a standalone service with no cross-folder imports."""
@@ -63,6 +67,22 @@ def is_audio_message(msg: dict | None) -> bool:
     if not msg:
         return False
     return "audioMessage" in msg or "pttMessage" in msg
+
+
+def message_age(data: dict, now: float | None = None) -> float | None:
+    """Seconds since WhatsApp says this message was sent, or None when the payload has no time."""
+    raw = data.get("messageTimestamp")
+    if isinstance(raw, dict):  # a protobuf Long, should Evolution ever pass one through
+        raw = raw.get("low")
+    try:
+        sent = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if sent <= 0:
+        return None
+    if sent > 1e12:  # milliseconds, not seconds
+        sent /= 1000
+    return (time.time() if now is None else now) - sent
 
 
 _LEADING_MARKERS = "*_~ \t\r\n"
@@ -127,6 +147,13 @@ class Config:
         # flight (stop_grace_period on the lisa service) and about 15 s to boot. "0" tries
         # once and gives up, which is what the dispatcher did before it retried.
         self.forward_retry = float(os.getenv("FORWARD_RETRY_SECONDS", "150"))
+        # A message older than this when it reaches the dispatcher is not acted on: no forward,
+        # no window, no transcription. Live messages arrive within seconds; only a backlog
+        # comes later. On 2026-11-13/14 WhatsApp held this number's incoming messages for up
+        # to 25 h (a Baileys bug, evolution-api #2778), each reconnect replayed a slice, and
+        # Lisa answered day-old requests as if he had just asked. Ten minutes leaves room for
+        # a slow phone; "0" turns the guard off.
+        self.max_message_age = int(os.getenv("MAX_MESSAGE_AGE_SECONDS", "600"))
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
@@ -377,11 +404,12 @@ async def _startup() -> None:
     app.state.http = httpx.AsyncClient(timeout=10.0)
     app.state.forwards = Forwarder(app.state.http, cfg.forward_retry)
     log.info(
-        '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d}',
+        '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d,"max_message_age":%d}',
         "true" if cfg.redis_url else "false",
         await app.state.owners.ping(),
         cfg.window_ttl,
         len(cfg.routes),
+        cfg.max_message_age,
     )
 
 
@@ -400,6 +428,7 @@ async def health() -> dict:
         "routes": [{"tags": t, "url": u} for t, u in cfg.routes],
         "auto_transcribe_url": cfg.auto_transcribe_url,
         "window_ttl": cfg.window_ttl,
+        "max_message_age": cfg.max_message_age,
         "owner_store": app.state.owners.state(),
         "forwards": forwards.state() if forwards else None,
     }
@@ -419,6 +448,13 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     jid = key.get("remoteJid") or ""
     from_me = bool(key.get("fromMe"))
     text = extract_text(data.get("message")).strip()
+
+    # Late arrivals are not acted on (Config.max_message_age). A payload with no send time is
+    # treated as live: dropping it would be the worse mistake.
+    age = message_age(data)
+    if cfg.max_message_age and age is not None and age > cfg.max_message_age:
+        log.info('{"route":"stale","jid":"%s","from_me":%s,"age_s":%d}', jid, str(from_me).lower(), int(age))
+        return Response(status_code=200)
 
     owners: OwnerStore = app.state.owners
     # Forwarded already this request, so a message matching two rules is POSTed once.
