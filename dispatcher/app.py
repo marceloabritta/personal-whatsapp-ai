@@ -26,7 +26,8 @@ those seconds is as real as any other.
 
 A message that reaches the dispatcher long after it was sent (MAX_MESSAGE_AGE_SECONDS) is not
 acted on at all: no forward, no window, no transcription. Only a backlog arrives that late,
-and by then he has moved on.
+and by then he has moved on. While such a backlog is pouring in (`DrainBreaker`), nothing is
+acted on, not even messages that look fresh: in a replay some carry their delivery time.
 
 The helpers below are copied verbatim from `Lisa flow/app/{whatsapp,identity}.py` so the
 dispatcher parses payloads and detects tags/own-messages exactly as the flows do — and
@@ -154,6 +155,14 @@ class Config:
         # Lisa answered day-old requests as if he had just asked. Ten minutes leaves room for
         # a slow phone; "0" turns the guard off.
         self.max_message_age = int(os.getenv("MAX_MESSAGE_AGE_SECONDS", "600"))
+        # Drain breaker (see DrainBreaker). One stale message is a late phone; many in a row is
+        # a backlog being replayed, and in a replay his own re-sent messages can carry the time
+        # they were delivered instead of the time he sent them. Once DRAIN_TRIGGER stale
+        # messages arrive within DRAIN_WINDOW_SECONDS, nothing is acted on, fresh-looking or
+        # not, until DRAIN_QUIET_SECONDS pass with no stale arrival. "0" turns it off.
+        self.drain_trigger = int(os.getenv("DRAIN_TRIGGER", "5"))
+        self.drain_window = float(os.getenv("DRAIN_WINDOW_SECONDS", "60"))
+        self.drain_quiet = float(os.getenv("DRAIN_QUIET_SECONDS", "180"))
 
     def route_for_tag(self, text: str) -> str | None:
         """The forward URL whose tag-set this text is summoned with, or None."""
@@ -257,6 +266,71 @@ class OwnerStore:
             self._mem.pop(jid, None)
             return None
         return url
+
+
+# ── drain breaker: a replayed backlog is not acted on, even where it looks fresh ─
+class DrainBreaker:
+    """Notices a backlog being replayed, and holds every message until the replay is over.
+
+    The age guard (Config.max_message_age) reads the time WhatsApp put on each message. In a
+    replay that time can lie. On 2026-11-15 a patched Evolution released 25 h of held messages
+    in about 15 minutes; the guard dropped some 1,000 of them, but 133 of his own phone
+    messages from that day came in stamped with their delivery time, all within two minutes,
+    and Lisa answered or transcribed eight of them into chats with other people. What the
+    replay does show is a flood of messages that are honestly old. So once `trigger` stale
+    messages arrive within `window` seconds, every message is held (no forward, no window, no
+    transcription) until `quiet` seconds pass with no stale one. A message he really sends in
+    those minutes is held too; he tags her again once it is over. Lisa still reads all of
+    them from Evolution's store as context the next time she is called.
+    """
+
+    def __init__(self, trigger: int, window: float, quiet: float, clock: Any = time.monotonic) -> None:
+        self.trigger = trigger
+        self.window = window
+        self.quiet = quiet
+        self.clock = clock
+        self._recent: deque[float] = deque()  # arrival times of the latest stale messages
+        self._last_stale: float | None = None
+        self._since: float | None = None  # when the drain under way began
+        self._held_now = 0
+        self.drains = 0
+        self.held = 0
+
+    def saw_stale(self) -> None:
+        now = self.clock()
+        self._last_stale = now
+        self._recent.append(now)
+        while self._recent and now - self._recent[0] > self.window:
+            self._recent.popleft()
+        if self.trigger and self._since is None and len(self._recent) >= self.trigger:
+            self._since = now
+            self._held_now = 0
+            self.drains += 1
+            log.warning(json.dumps({"drain": "started", "stale_in_window": len(self._recent),
+                                    "window_s": self.window}))
+
+    def draining(self) -> bool:
+        """Is a replay under way? Ends it (and says so) once it has been quiet long enough."""
+        if self._since is None:
+            return False
+        now = self.clock()
+        if self._last_stale is not None and now - self._last_stale >= self.quiet:
+            log.warning(json.dumps({"drain": "ended", "held": self._held_now,
+                                    "lasted_s": int(now - self._since)}))
+            self._since = None
+            self._recent.clear()
+            return False
+        return True
+
+    def hold(self) -> None:
+        self._held_now += 1
+        self.held += 1
+
+    def state(self) -> dict:
+        draining = self.draining()
+        return {"draining": draining, "held_this_drain": self._held_now if draining else 0,
+                "drains": self.drains, "held": self.held, "trigger": self.trigger,
+                "window_s": self.window, "quiet_s": self.quiet}
 
 
 # ── forwarding: every message reaches its flow, in order, even across a restart ─
@@ -395,6 +469,7 @@ class Forwarder:
 
 
 cfg = Config()
+breaker = DrainBreaker(cfg.drain_trigger, cfg.drain_window, cfg.drain_quiet)
 app = FastAPI(title="Flow dispatcher", version="1.0.0")
 
 
@@ -404,12 +479,16 @@ async def _startup() -> None:
     app.state.http = httpx.AsyncClient(timeout=10.0)
     app.state.forwards = Forwarder(app.state.http, cfg.forward_retry)
     log.info(
-        '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d,"max_message_age":%d}',
+        '{"boot":"dispatcher","redis":%s,"store":"%s","ttl":%d,"routes":%d,"max_message_age":%d,'
+        '"drain":{"trigger":%d,"window_s":%d,"quiet_s":%d}}',
         "true" if cfg.redis_url else "false",
         await app.state.owners.ping(),
         cfg.window_ttl,
         len(cfg.routes),
         cfg.max_message_age,
+        cfg.drain_trigger,
+        cfg.drain_window,
+        cfg.drain_quiet,
     )
 
 
@@ -429,6 +508,7 @@ async def health() -> dict:
         "auto_transcribe_url": cfg.auto_transcribe_url,
         "window_ttl": cfg.window_ttl,
         "max_message_age": cfg.max_message_age,
+        "drain": breaker.state(),
         "owner_store": app.state.owners.state(),
         "forwards": forwards.state() if forwards else None,
     }
@@ -453,7 +533,14 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     # treated as live: dropping it would be the worse mistake.
     age = message_age(data)
     if cfg.max_message_age and age is not None and age > cfg.max_message_age:
+        breaker.saw_stale()
         log.info('{"route":"stale","jid":"%s","from_me":%s,"age_s":%d}', jid, str(from_me).lower(), int(age))
+        return Response(status_code=200)
+    # While a backlog is being replayed, a fresh-looking message is not acted on either
+    # (DrainBreaker): in a replay its timestamp may be when it was delivered.
+    if breaker.draining():
+        breaker.hold()
+        log.info('{"route":"draining","jid":"%s","from_me":%s}', jid, str(from_me).lower())
         return Response(status_code=200)
 
     owners: OwnerStore = app.state.owners
