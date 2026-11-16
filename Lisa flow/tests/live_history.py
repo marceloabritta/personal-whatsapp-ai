@@ -68,7 +68,7 @@ sys.path.insert(0, HERE)
 
 JUDGE_MODEL = "claude-sonnet-5-5"
 # USD per million tokens. The agent's prices are Opus 5.5's; a cache write is priced at 1.25x input.
-# `usage.input` is taken as the uncached input, as the Anthropic API reports it.
+# `usage.input` is everything sent (cache reads and writes included); see cost().
 AGENT_PRICES = {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0}
 JUDGE_PRICES = {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.5}
 
@@ -217,9 +217,14 @@ def combine(checks: list[dict], judge: Optional[dict], *, agent_failed: bool = F
 # ============================ cost ===========================================================
 
 def cost(usage: Optional[dict], prices: dict) -> float:
+    """The agent's `input` is everything it sent, cache reads and writes included (the house
+    meaning, reasoning/anthropic.add_usage); the judge's has no cache parts. Either way the
+    uncached part is what is left once the two cache counts are taken out."""
     u = usage or {}
-    return sum((u.get(k) or 0) * prices.get(k, 0.0) for k in ("input", "output", "cache_read",
-                                                              "cache_write")) / 1_000_000
+    cr, cw = (u.get("cache_read") or 0), (u.get("cache_write") or 0)
+    uncached = max(0, (u.get("input") or 0) - cr - cw)
+    return (uncached * prices.get("input", 0.0) + (u.get("output") or 0) * prices.get("output", 0.0)
+            + cr * prices.get("cache_read", 0.0) + cw * prices.get("cache_write", 0.0)) / 1_000_000
 
 
 # ============================ the judge ======================================================

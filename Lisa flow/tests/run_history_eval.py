@@ -245,9 +245,9 @@ class FakeClient:
 
 async def p5_cost_and_judge() -> None:
     print("5. cost and the judge")
-    c = lh.cost({"input": 1_000_000, "output": 100_000, "cache_read": 2_000_000, "cache_write": 0},
+    c = lh.cost({"input": 3_000_000, "output": 100_000, "cache_read": 2_000_000, "cache_write": 0},
                 lh.AGENT_PRICES)
-    check("Opus 5.5 prices: $4/M in, $20/M out, $0.20/M cache read", abs(c - (4 + 2 + 0.4)) < 1e-9, f"{c}")
+    check("Opus 5.5 prices: $4/M in, $20/M out, $0.20/M cache read (input counts the cache read)", abs(c - (4 + 2 + 0.4)) < 1e-9, f"{c}")
     j = lh.cost({"input": 1_000_000, "output": 1_000_000}, lh.JUDGE_PRICES)
     check("Sonnet 5.5 judge prices: $2/M in, $10/M out", abs(j - 12) < 1e-9, f"{j}")
     check("missing usage costs nothing", lh.cost(None, lh.AGENT_PRICES) == 0)
@@ -307,7 +307,7 @@ class FakeAgent:
             if c["id"] == "t02" and nth == 2:
                 raise RuntimeError("tool blew up")
             return {"state": "keep_listening", "lang": c.get("lang"), "files": [], "notes": {},
-                    "usage": {"input": 1000, "output": 200, "cache_read": 5000, "cache_write": 0},
+                    "usage": {"input": 6000, "output": 200, "cache_read": 5000, "cache_write": 0},
                     "tool_calls": [{"tool": "search", "args": {}, "n": 1, "ms": 5}] * 4,
                     "stop_reason": "end_turn", "error_category": "none", **r}
         finally:

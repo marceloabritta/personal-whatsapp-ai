@@ -28,12 +28,19 @@ _SEND_AS_IMAGE = ("image/jpeg", "image/png")
 _SEND_AS_VIDEO = ("video/mp4", "video/3gpp")
 
 
+# The index's message kinds (types.KINDS) as whatsapp.media_info names them.
+_INDEX_KIND_TO_TYPE = {"voice": "audio"}
+
+
 class EvolutionHistoryMedia:
     def __init__(self, evolution, transcription, settings) -> None:
         self.evolution = evolution
         self.transcription = transcription
         self.settings = settings
         self._meta_cache: dict[str, Optional[dict]] = {}
+        # The history index, when runtime attaches it: names a file and dates it without asking
+        # Evolution. None (tests, the CLI's fake) falls back to Evolution's own record.
+        self.store: Any = None
 
     # --- the seam -------------------------------------------------------------------------
 
@@ -107,8 +114,18 @@ class EvolutionHistoryMedia:
         if msg_id in self._meta_cache:
             return self._meta_cache[msg_id]
         meta = None
+        if self.store is not None:
+            try:
+                hit = await self.store.get_message(msg_id)
+            except Exception as exc:
+                log.warning("history media index lookup failed: %s", type(exc).__name__)
+                hit = None
+            if hit:
+                kind = hit.get("kind")
+                meta = {"type": _INDEX_KIND_TO_TYPE.get(kind, kind), "mimetype": hit.get("mimetype"),
+                        "filename": hit.get("file_name"), "ts": int(hit.get("ts") or 0)}
         finder = getattr(self.evolution, "_find_messages", None)
-        if finder is not None:
+        if meta is None and finder is not None:
             try:
                 rows = await finder({"key": {"id": msg_id}})
                 row = next((r for r in rows or []

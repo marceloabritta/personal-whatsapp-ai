@@ -30,11 +30,10 @@ def build_runtime(settings, evolution, transcription) -> HistoryRuntime | None:
     from .store import PgHistoryStore
 
     dsn = settings.history_database_url or settings.database_url
-    return HistoryRuntime(
-        store=PgHistoryStore(dsn, schema=settings.history_schema),
-        media=EvolutionHistoryMedia(evolution, transcription, settings),
-        settings=settings,
-    )
+    store = PgHistoryStore(dsn, schema=settings.history_schema)
+    media = EvolutionHistoryMedia(evolution, transcription, settings)
+    media.store = store  # names and dates a file from the index, not a findMessages round trip
+    return HistoryRuntime(store=store, media=media, settings=settings)
 
 
 async def start(deps) -> list:
