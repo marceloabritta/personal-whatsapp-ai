@@ -73,6 +73,9 @@ class MessageState(TypedDict, total=False):
     read_ids: list
     # The tagged message that opened this loop, as one line. It sets what she takes part in.
     called_for: Optional[str]
+    # History search (skills/history.py): what the search agent left for its own next turn in this
+    # loop — the chats it narrowed to, what it already ruled out. Cleared on a fresh tag.
+    history_notes: Optional[dict]
 
     # --- per-turn scratch ---
     raw: dict
@@ -144,6 +147,9 @@ class MessageState(TypedDict, total=False):
     stop_reason: Optional[str]
     tool_calls: list
     error_category: str
+    # The message ids the search agent asked to send back into his chat with himself this turn.
+    # Sent by `act` after the reply, then cleared; context clears it on every activation too.
+    history_files: list
 
     # tool loop (confirm -> execute -> respond nodes)
     actions: list  # actions the model wants run this turn; [] if none

@@ -30,7 +30,7 @@ from app.roster import DailyCap, Roster  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
 from app.skills import (  # noqa: E402
     SKILLS, confirm_policies, context_block_for, count_optionals, count_unions, handlers,
-    output_schema_for, render_policies, resolve_gates, system_prompt_for,
+    output_schema_for, render_policies, resolve_gates, skill_enabled, system_prompt_for,
 )
 from app.skills.calendar import presets_block  # noqa: E402
 from app.skills.calendar_format import compose_create, compose_delete  # noqa: E402
@@ -586,7 +586,9 @@ async def p8_router():
     check("a skill that does not hold its loop still loses it to a matcher", d == "calendar")
     d, _ = await route_domain({**held, "is_self_chat": False}, s, reasoner=StubReasoner())
     check("outside the self-chat setup is never held", d != "setup")
-    check("only setup holds its loop", [n for n, sk in SKILLS.items() if sk.holds_loop] == ["setup"])
+    # History search holds its loop too, but only exists with HISTORY_ENABLED (run_history_skill.py).
+    check("only setup holds its loop",
+          [n for n, sk in SKILLS.items() if sk.holds_loop and skill_enabled(sk, s)] == ["setup"])
 
     # Called by name, setup beats the calendar's vocabulary in what follows (found live: "@lisa
     # setup não quero que os convidados recebam e-mail" went to the calendar, which promised).

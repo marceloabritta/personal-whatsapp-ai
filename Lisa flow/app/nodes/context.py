@@ -559,6 +559,9 @@ async def context_node(
         "next_call": None,
         "resume_caller": False,
         "skill_calls": 0,
+        # Files the history search asked to send are this turn's alone: a turn that never reaches
+        # `reason` must not send the last one's again.
+        "history_files": [],
         "carried_yes": carried,
         "owner_replies": owner_replies,
         "seen_owner_ids": seen_owner_ids,
@@ -603,6 +606,8 @@ async def context_node(
         update["pending_side_effects"] = []
         update["skill_stack"] = []
         update["pending_call"] = None
+        # The history search's notes belong to the search that wrote them.
+        update["history_notes"] = None
 
     if card_keys:
         prior = [] if reset else list(state.get("seen_chat_keys") or [])

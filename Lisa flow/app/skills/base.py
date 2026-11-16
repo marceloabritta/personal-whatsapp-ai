@@ -8,8 +8,10 @@ A skill carries everything the graph needs to serve its domain and nothing more:
   - how a tool result becomes a reply                       → render   (skills.render)
   - and either a local handler or native server tools       → kind + handler_cls | server_tools
 
-`kind` is "local" (actions run through a handler behind the execute node) or "native" (the
-model uses Anthropic server tools inside the reason call — no local execution). The graph never
+`kind` is "local" (actions run through a handler behind the execute node), "native" (the
+model uses Anthropic server tools inside the reason call — no local execution) or "agent" (the
+reason pass hands the turn to an agent with its own prompt and tools, and maps what it returns onto
+the usual reason output; no actions, no confirm, no execute — see nodes/reason.py). The graph never
 imports a concrete skill; it reaches them only through the fan-out in `skills/__init__.py`."""
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from typing import Any, Callable, Optional
 @dataclass
 class Skill:
     name: str
-    kind: str                                        # "local" | "native"
+    kind: str                                        # "local" | "native" | "agent"
     describe: str                                    # one line for the prompt's tool list
     guidance: str                                    # the per-domain prompt block
     verbs: list[str] = field(default_factory=list)
