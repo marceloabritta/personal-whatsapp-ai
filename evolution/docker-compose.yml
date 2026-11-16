@@ -203,6 +203,18 @@ services:
       # calendar's ability to call it mid-booking. Separate from the silent learning above. On
       # since 2026-11-10, after tests/live_contacts.py wrote to and deleted a throwaway contact.
       CONTACTS_CRUD_ENABLED: "true"
+      # History search (app/history/): "@lisa com quem eu falei sobre…" in the chat with myself.
+      # Three switches, each on its own. The index mirrors Evolution's messages into lisa_search;
+      # the voice capture transcribes every voice note in every chat while WhatsApp still serves
+      # it (2-4 weeks), so spoken conversations become searchable; the skill answers in the
+      # self-chat only. HISTORY_DATABASE_URL may point the skill at a read-only role.
+      HISTORY_INDEX_ENABLED: "false"
+      HISTORY_VOICE_CAPTURE_ENABLED: "true"
+      # A pass reads Evolution's whole "Message" table (no index on time or type): ~0.5 s.
+      HISTORY_VOICE_INTERVAL_SECONDS: "120"
+      HISTORY_ENABLED: "false"
+      HISTORY_MODEL: claude-opus-5-5
+      HISTORY_EFFORT: medium
     networks:
       - evolution-net
 

@@ -201,6 +201,12 @@ async def lifespan(app: FastAPI):
             log.warning("session-review disabled: %s", exc)
             reviewer = reaper = None
 
+    # History search — the index, the voice-note capture and the skill's store (app/history/).
+    # Each part is switched on by its own HISTORY_* setting and is best-effort.
+    from .history import runtime as history_runtime
+
+    history_closers = await history_runtime.start(deps)
+
     app.state.deps = deps
     app.state.logstore = store
     app.state.reaper = reaper
@@ -212,6 +218,7 @@ async def lifespan(app: FastAPI):
         # Reached only after uvicorn has waited for the turns in flight (see STOPPING above).
         # A turn it gave up on logs its own "turn_cut" line, possibly after this one.
         log.info('{"shutdown":"teardown"}')
+        await history_runtime.stop(history_closers)
         if deps.directory is not None:
             await deps.directory.aclose()
         if cstore is not None:

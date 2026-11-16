@@ -14,6 +14,7 @@ from .reasoning import build_reasoner
 from .roster import DailyCap, Roster
 from .sessions import InMemorySessions, RedisSessions
 from .directory import Directory
+from .history.runtime import build_runtime as build_history_runtime
 from .skills import (
     confirm_policies, handlers, render_policies, resolve_gates, side_effect_verbs,
 )
@@ -48,6 +49,8 @@ class Deps:
     # Meeting presets — read by the calendar's prompt block and confirm step, written by setup.
     # None = presets off, which is the pre-feature build.
     presets: Any = None
+    # History search (app/history/runtime.py). None = HISTORY_ENABLED is off.
+    history: Any = None
 
 
 def build_deps(settings: Settings | None = None) -> Deps:
@@ -134,4 +137,5 @@ def build_deps(settings: Settings | None = None) -> Deps:
         roster=roster,
         caps=caps,
         presets=presets,
+        history=build_history_runtime(settings, evolution, transcription),
     )
