@@ -105,6 +105,12 @@ class HistoryStore(Protocol):
     async def get_message(self, msg_id: str) -> Optional[Hit]:
         ...
 
+    async def coverage(self) -> dict:
+        """What the index holds: {"first_ts", "last_ts", "n_messages", "n_chats",
+        "voice_total", "voice_transcribed"}. For the agent's prompt, so it knows how far back
+        the history goes and how much of what was spoken it can read."""
+        ...
+
 
 class FileResult(TypedDict, total=False):
     ok: bool
@@ -112,6 +118,7 @@ class FileResult(TypedDict, total=False):
     mimetype: Optional[str]
     file_name: Optional[str]
     base64: Optional[str]
+    sent_id: Optional[str]       # send_to_owner only: the sent message's id, for echo-filtering
 
 
 class HistoryMedia(Protocol):
@@ -126,7 +133,8 @@ class HistoryMedia(Protocol):
         ...
 
     async def send_to_owner(self, msg_id: str, *, caption: str = "") -> FileResult:
-        """Re-send a file into the owner's chat with himself. The ONLY destination there is."""
+        """Re-send a file into the owner's chat with himself. The ONLY destination there is.
+        Uses Evolution.send_media_id; the caller records `sent_id` as an echo."""
         ...
 
 

@@ -93,6 +93,31 @@ class Evolution:
             return False
         return True
 
+    async def send_media_id(
+        self, number: str, *, mediatype: str, mimetype: str, media_b64: str,
+        filename: str, caption: str = "",
+    ) -> Optional[str]:
+        """send_media, returning the sent message's id like send_text does: the id on success, ""
+        when the send was 2xx but no id came back, None on failure. A file Lisa sends into a chat
+        comes back through the webhook as the owner's own message, so the caller records the id
+        as an echo, or the file would wake her as if he had sent it."""
+        payload: dict = {"number": number, "mediatype": mediatype, "mimetype": mimetype,
+                         "media": media_b64, "fileName": filename, "caption": caption}
+        try:
+            resp = await self._post(f"/message/sendMedia/{self.instance}", payload)
+        except httpx.HTTPError as exc:
+            log.error("sendMedia transport error: %s", exc)
+            return None
+        if resp.status_code >= 400:
+            log.error("sendMedia failed %s: %s", resp.status_code, resp.text[:500])
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return ""
+        key = (data.get("key") if isinstance(data, dict) else None) or {}
+        return key.get("id") or ""
+
     async def get_media_base64(
         self, message_id: str, *, convert_to_mp4: bool = False
     ) -> Optional[dict]:
