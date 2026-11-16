@@ -183,6 +183,29 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
+    # History search (app/history/). Three independent switches, all OFF in code:
+    #   history_index_enabled          the indexer mirrors Evolution's "Message" into lisa_search
+    #   history_voice_capture_enabled  every voice note in every chat is transcribed on arrival
+    #   history_enabled                the skill: "@lisa ..." in the self-chat searches the history
+    history_enabled: bool = False
+    history_index_enabled: bool = False
+    history_voice_capture_enabled: bool = False
+    history_schema: str = "lisa_search"
+    # A read-only role for the skill's queries, when one exists. Unset = DATABASE_URL, with every
+    # query in a read-only transaction.
+    history_database_url: str | None = None
+    history_model: str = "claude-opus-5-5"
+    history_effort: str = "medium"
+    history_max_tool_calls: int = 25     # tool calls in one turn
+    history_max_seconds: int = 90        # wall clock for one turn; under the 100 s shutdown grace
+    history_ack_after_seconds: float = 8.0  # a "searching…" note goes out if the answer is slower
+    history_index_interval_seconds: int = 60
+    history_voice_interval_seconds: int = 60
+    history_voice_concurrency: int = 2
+    history_voice_backfill_days: int = 35   # WhatsApp serves media for roughly 2-4 weeks
+    history_voice_max_seconds: int = 1800   # longer clips are skipped (declared length)
+    history_max_files: int = 3              # files sent back in one turn
+
     prompt_version: str = "2026-11-10-last-used-address"
 
     @property
