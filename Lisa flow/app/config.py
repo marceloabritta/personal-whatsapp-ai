@@ -202,8 +202,22 @@ class Settings(BaseSettings):
     history_index_interval_seconds: int = 60
     history_voice_interval_seconds: int = 60
     history_voice_concurrency: int = 2
-    history_voice_backfill_days: int = 35   # WhatsApp serves media for roughly 2-4 weeks
+    # How far back voice notes are looked for. A probe on 2026-11-16 found WhatsApp still serving
+    # notes 7 and 14 days old and refusing ones 21, 28, 35 and 45 days old; the log holds a
+    # transcript made from a 16-day-old one. A week past the first refusal costs one failed
+    # download per note, once, and catches a straggler that lived longer.
+    history_voice_backfill_days: int = 28
     history_voice_max_seconds: int = 1800   # longer clips are skipped (declared length)
+    # A note this young is left to the live paths (auto-transcribe, a @lisa window). The
+    # dispatcher retries a forward for 150 s, so the live path may only start that late.
+    history_voice_min_age_seconds: int = 300
+    # A download that fails on a note at least this old is final: it is marked expired at once.
+    # A younger one is retried with backoff (10 min, doubling, 12 h at most).
+    history_voice_expire_days: float = 21.0
+    history_voice_max_attempts: int = 10    # tries before a note is given up on (~45 h of retries)
+    # Audio minutes transcribed in any 24 hours. Normal volume is a few minutes a day; the busiest
+    # day in the record was about two hours. 0 = no cap.
+    history_voice_daily_minutes: int = 240
     history_max_files: int = 3              # files sent back in one turn
 
     prompt_version: str = "2026-11-10-last-used-address"
