@@ -288,10 +288,13 @@ class Judge:
         """{"verdict", "why", "usage"}; verdict None when the call or the JSON failed."""
         try:
             resp = await self._c().messages.create(
-                model=self.model, max_tokens=600, system=JUDGE_SYSTEM,
+                model=self.model, max_tokens=4000, system=JUDGE_SYSTEM,
                 messages=[{"role": "user", "content": judge_message(case, reply, n_files)}],
-                thinking={"type": "disabled"},
-                output_config={"format": {"type": "json_schema", "schema": JUDGE_SCHEMA}},
+                # Sonnet 5.5 refuses thinking "disabled" (400); adaptive at low effort is the
+                # cheap setting it accepts. Thinking tokens count against max_tokens.
+                thinking={"type": "adaptive"},
+                output_config={"effort": "low",
+                               "format": {"type": "json_schema", "schema": JUDGE_SCHEMA}},
             )
         except Exception as exc:  # transport, auth, rate limit: graded on the code checks alone
             return {"verdict": None, "why": f"judge error: {type(exc).__name__}: {str(exc)[:200]}",
