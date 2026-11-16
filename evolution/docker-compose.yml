@@ -209,7 +209,9 @@ services:
       # it (2-4 weeks), so spoken conversations become searchable; the skill answers in the
       # self-chat only. HISTORY_DATABASE_URL may point the skill at a read-only role.
       HISTORY_INDEX_ENABLED: "false"
-      HISTORY_VOICE_CAPTURE_ENABLED: "false"
+      HISTORY_VOICE_CAPTURE_ENABLED: "true"
+      # A pass reads Evolution's whole "Message" table (no index on time or type): ~0.5 s.
+      HISTORY_VOICE_INTERVAL_SECONDS: "120"
       HISTORY_ENABLED: "false"
       HISTORY_MODEL: claude-opus-5-5
       HISTORY_EFFORT: medium
