@@ -200,6 +200,8 @@ class Settings(BaseSettings):
     history_max_seconds: int = 90        # wall clock for one turn; under the 100 s shutdown grace
     history_ack_after_seconds: float = 8.0  # a "searching…" note goes out if the answer is slower
     history_index_interval_seconds: int = 60
+    history_index_batch: int = 500             # rows per page of a sync or backfill
+    history_index_pause_seconds: float = 0.25  # between pages, so the gateway's database breathes
     history_voice_interval_seconds: int = 60
     history_voice_concurrency: int = 2
     # How far back voice notes are looked for. A probe on 2026-11-16 found WhatsApp still serving
