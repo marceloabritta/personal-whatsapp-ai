@@ -13,7 +13,7 @@ It needs the contacts token and ANTHROPIC_API_KEY, so it runs on the droplet, in
 from the NEW lisa image with this folder mounted and the live service's env passed in (the env never
 touches the disk):
 
-    docker run --rm --env-file <(docker exec lisa_brain env) \\
+    docker run --rm --env-file <(docker exec lisa_brain env) --env-file /opt/evolution/tests.env \\
       -v "/opt/personal-whatsapp-ai/Lisa flow/tests:/app/tests:ro" evolution-lisa \\
       python tests/live_contacts.py
 
@@ -264,4 +264,7 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    from live_key import require_tests_key
+
+    require_tests_key()
     raise SystemExit(asyncio.run(main()))

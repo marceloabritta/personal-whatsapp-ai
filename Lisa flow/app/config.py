@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     review_scope_version: str = ""      # only review loops with this prompt_version ("" = all)
     review_judge_version: str = "v5"    # the rubric's identity; bump to re-score history
     review_model: str = "claude-opus-4-8"   # NOT claude_model — a model judging itself favours it
+    # The judge bills to its own Anthropic key, so the Console shows what grading production costs
+    # apart from production itself. Unset = the judge falls back to ANTHROPIC_API_KEY.
+    review_anthropic_api_key: str = Field(
+        default="", validation_alias=AliasChoices("REVIEW_ANTHROPIC_API_KEY")
+    )
     review_effort: str = "medium"
     review_max_tokens: int = 2048
     review_sweep_seconds: int = 60      # how often the reaper looks for quiet loops

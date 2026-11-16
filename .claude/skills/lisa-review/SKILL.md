@@ -25,7 +25,7 @@ cd "Lisa flow" && rsync -az --delete --exclude '__pycache__' app scripts tests \
 
 # 2. env, lifted from the running container (stays on the droplet)
 ssh secretaria-droplet 'docker exec lisa_brain env | \
-    grep -E "^(DATABASE_URL|ANTHROPIC_API_KEY|LOG_SCHEMA|OWNER_NAME|MARY_TRIGGER_TAG)=" \
+    grep -E "^(DATABASE_URL|ANTHROPIC_API_KEY|REVIEW_ANTHROPIC_API_KEY|LOG_SCHEMA|OWNER_NAME|MARY_TRIGGER_TAG)=" \
     > /opt/review-staging/.env.run && chmod 600 /opt/review-staging/.env.run'
 
 # 3. grade anything not yet graded at this judge version
