@@ -30,11 +30,10 @@ def build_runtime(settings, evolution, transcription) -> HistoryRuntime | None:
     from .store import PgHistoryStore
 
     dsn = settings.history_database_url or settings.database_url
-    return HistoryRuntime(
-        store=PgHistoryStore(dsn, schema=settings.history_schema),
-        media=EvolutionHistoryMedia(evolution, transcription, settings),
-        settings=settings,
-    )
+    store = PgHistoryStore(dsn, schema=settings.history_schema)
+    media = EvolutionHistoryMedia(evolution, transcription, settings)
+    media.store = store  # names and dates a file from the index, not a findMessages round trip
+    return HistoryRuntime(store=store, media=media, settings=settings)
 
 
 async def start(deps) -> list:
@@ -48,7 +47,9 @@ async def start(deps) -> list:
     if s.history_index_enabled:
         from .indexer import HistoryIndexer
 
-        idx = HistoryIndexer(s.database_url, schema=s.history_schema, settings=s)
+        # The address book, when contacts is on, gives chats and senders the owner's own names.
+        idx = HistoryIndexer(s.database_url, schema=s.history_schema, settings=s,
+                             directory=getattr(deps, "directory", None))
         try:
             await idx.open()
             idx.start()

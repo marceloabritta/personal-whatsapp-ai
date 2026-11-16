@@ -41,6 +41,7 @@ _CLASSIFY_SYSTEM = (
     "transcribed automatically, and in which direction; listing, changing or removing those "
     'chats. Only ever offered in {owner}\'s chat with himself.\n'
     '{contacts_rule}'
+    '{history_rule}'
     '- "web": anything else — general questions, chit-chat, or looking something up online.\n'
     'Respond ONLY as JSON, e.g. {"domain": "calendar"}.'
 )
@@ -52,6 +53,20 @@ _CONTACTS_RULE = (
     "email.\n"
 )
 
+# Only where the history skill can be routed to: his own chat with himself, on his own message, with
+# HISTORY_ENABLED on. A bare search there ("busca Zentara") is his chats, not the web: the matcher
+# leaves "busca"/"procura"/"search" with nothing after them that says which, and this is what
+# settles it.
+_HISTORY_RULE = (
+    '- "history": searching {owner}\'s own WhatsApp conversations — who said or sent something, '
+    "when, and in which chat or group; finding a past message, voice note, file, photo or link "
+    "someone sent. \"com quem eu falei sobre…\", \"quem me mandou o pdf…\", \"acha aquela "
+    "conversa…\", \"what did Ana send me?\" are history, and so is a follow-up about what a search "
+    "found. In {owner}'s chat with himself, a bare search for a name or a subject with nothing "
+    "that points to the internet (\"busca Zentara\", \"procura a feira de Lisboa\") is history. "
+    "Looking something up on the internet — news, prices, facts, places — is web. Only ever "
+    "offered in {owner}'s chat with himself.\n"
+)
 
 # Added to the setup line only when presets are on, so with them off the classifier is not told
 # about a setting the setup skill cannot change.
@@ -67,10 +82,12 @@ def _classify_system(owner: str, domains: list[str] | None = None,
     # The rule only exists when the domain does: told about an option its schema then refuses, the
     # classifier has to land a contacts request somewhere it never would otherwise.
     rule = _CONTACTS_RULE if domains and "contacts" in domains else ""
+    history = _HISTORY_RULE if domains and "history" in domains else ""
     text = _CLASSIFY_SYSTEM
     if presets:
         text = text.replace("chats. Only ever offered", _PRESETS_CLAUSE + "Only ever offered", 1)
-    return text.replace("{contacts_rule}", rule).replace("{owner}", owner or "the owner")
+    return (text.replace("{contacts_rule}", rule).replace("{history_rule}", history)
+            .replace("{owner}", owner or "the owner"))
 
 
 def _neutral(messages: list) -> list[dict]:
