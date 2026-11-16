@@ -4,17 +4,28 @@ Skill-scoped: `state["domain"]` (set by `route`) picks the skill, and everything
 skill's — the system prompt, the enforced-output schema, and the native server tools attached to
 the call (calendar attaches none; web loads web_search/web_fetch). Converts the checkpointed
 messages to the neutral [{role, content}] shape and calls the reasoner. On a calendar readback
-this is `reason ②`, writing the reply from the tool result (see the respond node)."""
+this is `reason ②`, writing the reply from the tool result (see the respond node).
+
+An "agent" skill (history) is not one reasoner call: `_agent_pass` runs its agent and maps what it
+returns onto the same update, so `act` sends it like any reply."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 
+from ..clients.evolution import send_target
+from ..identity import frame
+from ..intent import detect_language
 from ..skills import (
     SKILLS, context_block_for, output_schema_for, reason_runtime_for, server_tools_for,
-    system_prompt_for,
+    skill_enabled, system_prompt_for,
 )
+from ..skills.history import guess_lang, run_agent
 from ..state import MessageState
 from ..trace import Trace
+
+log = logging.getLogger("mary.reason")
 
 
 def _to_neutral(messages: list) -> list[dict]:
@@ -29,10 +40,19 @@ def _to_neutral(messages: list) -> list[dict]:
 
 
 async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
-                      directory=None, presets=None) -> dict:
+                      directory=None, presets=None, history=None, evolution=None,
+                      echoes=None) -> dict:
     tid = state["trace_id"]
     domain = state.get("domain") or settings.default_domain
     locked_lang = state.get("session_lang")  # set once per loop; None right after a fresh tag
+
+    agent_skill = SKILLS.get(domain)
+    if agent_skill is not None and agent_skill.kind == "agent":
+        if skill_enabled(agent_skill, settings):
+            return await _agent_pass(state, skill=agent_skill, settings=settings, trace=trace,
+                                     history=history, evolution=evolution, echoes=echoes)
+        # Switched off with a loop still on it: the turn is the pre-feature one.
+        domain = settings.default_domain
 
     # The address book, injected as a prompt block — no tool hop, no await, ~0.3 ms.
     #
@@ -131,6 +151,187 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     if not locked_lang and result.get("lang"):
         update["session_lang"] = result["lang"]
     return update
+
+
+# --- the agent kind (history search) -----------------------------------------------------
+
+# What she says herself, in code, around the search. Short on purpose: the agent writes the answers.
+_SAY = {
+    "ack": {"pt": "🔎 Procurando…", "es": "🔎 Buscando…", "en": "🔎 Searching…"},
+    "self_only": {
+        "pt": "Só busco no seu histórico na sua conversa com você mesmo.",
+        "es": "Solo busco en tu historial en tu chat contigo mismo.",
+        "en": "I only search your history in your chat with yourself.",
+    },
+    "unavailable": {
+        "pt": "A busca no histórico está indisponível agora. Tente de novo mais tarde.",
+        "es": "La búsqueda en el historial no está disponible ahora. Inténtalo más tarde.",
+        "en": "History search is unavailable right now. Try again later.",
+    },
+    "failed": {
+        "pt": "Não consegui terminar essa busca. Pode pedir de novo?",
+        "es": "No pude terminar esa búsqueda. ¿Puedes pedirla de nuevo?",
+        "en": "I couldn't finish that search. Could you ask again?",
+    },
+}
+_STATES = ("keep_listening", "awaiting_answer", "close")
+# Keys a trace record sets itself; an agent event must not overwrite them.
+_OWN_KEYS = {"trace_id", "level", "node", "loop_id", "domain", "tid"}
+
+
+def _say(what: str, lang: str | None) -> str:
+    texts = _SAY[what]
+    code = (lang or "en").lower()[:2]
+    return texts.get(code) or texts["en"]
+
+
+def _agent_update(state: MessageState, settings, *, message, llm_state, lang, model=None,
+                  usage=None, latency_ms=None, stop_reason=None, request_id=None,
+                  tool_calls=None, error_category="none", notes=None, files=None) -> dict:
+    """The same update a reason pass produces, plus the search's notes and files. No actions and no
+    call, so `route_after_reason` goes straight to `act`."""
+    update: dict = {
+        "llm_state": llm_state if llm_state in _STATES else "keep_listening",
+        "reply_body": message,
+        "lang": lang,
+        "actions": [],
+        "workflow": None,
+        "call": None,
+        "provider": settings.llm_provider,
+        "model": model or getattr(settings, "history_model", None),
+        "provider_request_id": request_id,
+        "usage": usage or {},
+        "latency_ms": latency_ms,
+        "stop_reason": stop_reason,
+        "tool_calls": tool_calls or [],
+        "error_category": error_category or "none",
+        "history_notes": notes if isinstance(notes, dict) else (state.get("history_notes") or {}),
+        "history_files": list(files or []),
+    }
+    if not state.get("session_lang") and lang:
+        update["session_lang"] = lang
+    return update
+
+
+async def _send_ack(state: MessageState, settings, *, evolution, echoes, trace: Trace,
+                    lang: str, after_s: float) -> bool:
+    """ONE short framed note, so a slow search is not silence. Recorded as an echo so it is never
+    read back as his; never added to the thread, so the agent does not see itself say it."""
+    tid, jid = state["trace_id"], state["remote_jid"]
+    try:
+        sent_id = await evolution.send_text(send_target(jid),
+                                            frame(_say("ack", lang), settings.owner_name, lang))
+    except Exception as exc:  # a note that fails to go must not cost him the answer
+        log.warning("history ack failed: %s", exc)
+        sent_id = None
+    if sent_id and echoes is not None:
+        echoes.record(jid, sent_id)
+    trace.code(tid, node="history", loop_id=state.get("loop_id"), domain="history", ack=True,
+               after_s=after_s, delivered=sent_id is not None, wa_id=sent_id or None)
+    return sent_id is not None
+
+
+async def _agent_pass(state: MessageState, *, skill, settings, trace: Trace, history,
+                      evolution, echoes) -> dict:
+    """One turn of the history search: guard, run the agent (with a note if it is slow), map."""
+    tid = state["trace_id"]
+    loop_id = state.get("loop_id")
+    domain = skill.name
+    locked_lang = state.get("session_lang")
+    # Before the agent has said anything, her own words follow his: the locked language, else his —
+    # read off the words a search is made of first (detect_language takes any accent for
+    # Portuguese, and "quién me mandó" is Spanish), then the general markers.
+    text = state.get("text") or ""
+    lang = locked_lang or guess_lang(text) or detect_language(text) or "en"
+
+    # Belt and braces on top of routing: his own message, in his own chat with himself. Anyone
+    # else is not answered at all — a contact is not told there is anything to search.
+    if not (state.get("is_self_chat") and state.get("from_me")):
+        trace.code(tid, node="reason", loop_id=loop_id, domain=domain, refused="not_self_chat",
+                   from_me=bool(state.get("from_me")), is_self_chat=bool(state.get("is_self_chat")))
+        body = _say("self_only", lang) if state.get("from_me") else None
+        return _agent_update(state, settings, message=body, llm_state="keep_listening",
+                             lang=lang, stop_reason="refused")
+
+    # Switched on, but the store did not open at boot (history/runtime.py set it to None).
+    if history is None:
+        trace.code(tid, node="reason", loop_id=loop_id, domain=domain, unavailable=True)
+        return _agent_update(state, settings, message=_say("unavailable", lang),
+                             llm_state="close", lang=lang, stop_reason="unavailable")
+
+    def on_event(event: dict) -> None:
+        try:
+            fields = {k: v for k, v in (event or {}).items() if k not in _OWN_KEYS}
+            trace.code(tid, node="history", loop_id=loop_id, domain=domain, **fields)
+        except Exception:  # the log must never break the search
+            pass
+
+    ack_after = max(0.0, float(getattr(settings, "history_ack_after_seconds", 8.0) or 0.0))
+    t0 = time.monotonic()
+    task = asyncio.ensure_future(run_agent(
+        convo=_to_neutral(state.get("messages")),
+        store=history.store, media=history.media,
+        settings=getattr(history, "settings", None) or settings,
+        notes=state.get("history_notes"), session_lang=locked_lang, now_ts=int(time.time()),
+        on_event=on_event,
+    ))
+    acked = False
+    error = None
+    result: dict = {}
+    try:
+        done, _ = await asyncio.wait({task}, timeout=ack_after)
+        if not done and evolution is not None:
+            acked = await _send_ack(state, settings, evolution=evolution, echoes=echoes,
+                                    trace=trace, lang=lang, after_s=ack_after)
+        result = await task or {}
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    except Exception as exc:  # the agent's own failure: a short apology, the window kept
+        error = exc
+        log.exception("history agent failed")
+    finally:
+        if not task.done():
+            task.cancel()
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    message = result.get("message")
+    category = result.get("error_category") or "none"
+    if error is not None:
+        message, category = _say("failed", lang), "provider"
+    elif not message and category != "none":
+        # It gave up without a word (a provider error, the budget spent). He asked something and
+        # may already have seen "Searching…": silence would leave him waiting.
+        message = _say("failed", result.get("lang") or lang)
+    out_lang = result.get("lang") or lang
+    llm_state = result.get("state") if error is None else "keep_listening"
+    files = list(dict.fromkeys(f for f in (result.get("files") or [])
+                               if isinstance(f, str) and f))
+    usage = result.get("usage") or {}
+    model = result.get("model") or getattr(settings, "history_model", None)
+
+    # The same record a reason pass leaves: its decision and metadata. What the tools returned is
+    # never here — `tool_calls` names each call and its arguments, and the agent's own events
+    # (node="history") say what ran.
+    trace.code(
+        tid, node="reason", loop_id=loop_id, domain=domain,
+        provider=settings.llm_provider, model=model,
+        state=llm_state, message=message, lang=out_lang,
+        reasoning=result.get("reasoning"), stop_reason=result.get("stop_reason"),
+        request_id=result.get("provider_request_id"), usage=usage,
+        tools=result.get("tool_calls") or [], actions=[], latency_ms=latency_ms,
+        files=files or None, acked=acked or None,
+        error=type(error).__name__ if error is not None else None,
+    )
+    return _agent_update(
+        state, settings, message=message, llm_state=llm_state, lang=out_lang, model=model,
+        usage=usage, latency_ms=latency_ms,
+        stop_reason="error" if error is not None else result.get("stop_reason"),
+        request_id=result.get("provider_request_id"), tool_calls=result.get("tool_calls"),
+        error_category=category,
+        notes=None if error is not None else result.get("notes"),
+        files=files,
+    )
 
 
 def route_after_reason(state: MessageState) -> str:

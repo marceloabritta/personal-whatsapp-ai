@@ -13,13 +13,20 @@ from .base import Skill, count_optionals, count_unions
 from .calendar import CALENDAR
 from .confirm import ConfirmPolicy
 from .contacts import CONTACTS
+from .history import HISTORY
 from .render import LLMReadback, Programmatic
 from .setup import SETUP
 from .web import WEB
 
-# Order matters: the router asks each matcher in turn. Contacts goes before calendar because calendar
-# claims the bare word "agenda", which in Brazil is the address book as often as the calendar.
+# Order matters: the router asks each matcher in turn. History goes first: its matcher fires only on
+# recall PHRASES ("com quem eu falei…", "quem me mandou o pdf…", "acha aquela conversa…"), which say
+# more than any one word of the others' — "quem me mandou o contato do encanador?" is a search of his
+# chats, not the address book, and "com quem eu falei sobre a reunião de sexta?" is not a booking.
+# It routes only in his chat with himself, on his own message, with HISTORY_ENABLED on. Contacts goes
+# before calendar because calendar claims the bare word "agenda", which in Brazil is the address book
+# as often as the calendar.
 SKILLS: dict[str, Skill] = {
+    "history": HISTORY,
     "contacts": CONTACTS,
     "calendar": CALENDAR,
     "setup": SETUP,
@@ -76,7 +83,8 @@ def callable_skills(domain: str, settings=None, skills: dict = SKILLS) -> list[s
 def output_schema_for(domain: str, skills: dict = SKILLS, settings=None) -> dict:
     """The enforced-JSON contract for ONE skill. Local skills (with verbs) get `actions` +
     `workflow`, where `actions.items` is an anyOf over just this domain's verbs; native skills
-    (web) get the lean base — reasoning/state/message/lang, no actions."""
+    (web) get the lean base — reasoning/state/message/lang, no actions. An agent skill (history)
+    gets the lean base too, though no reason call uses it: its agent has its own contract."""
     skill = skills[domain]
     props: dict[str, Any] = {
         "reasoning": {"type": "string"},
@@ -168,7 +176,8 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
 # --- runtime fan-out --------------------------------------------------------------------
 
 def handlers(settings, skills: dict = SKILLS) -> dict[str, Any]:
-    """{domain: handler_instance} for every local skill that has a handler (for execute)."""
+    """{domain: handler_instance} for every local skill that has a handler (for execute). Native and
+    agent skills have none: nothing of theirs runs through execute."""
     out: dict[str, Any] = {}
     for name, skill in skills.items():
         if skill.kind == "local" and skill.handler_cls is not None:

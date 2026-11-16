@@ -10,7 +10,8 @@ happens to be open on that chat.
 
 A programmatic `route` node picks the skill (state["domain"]) in code; `reason` runs that one
 skill's prompt + schema (+ native tools). If it emits actions the skill's confirm/execute/respond
-path runs; otherwise it goes straight to act.
+path runs; otherwise it goes straight to act. An agent skill (history search) runs its own agent
+inside `reason` and always goes straight to act, which sends its message and then its files.
 
   reason  -> confirm (has actions)          | handoff (calls another skill) | act (none)
   confirm -> execute (approved)             | reason (blocked, ask) | act
@@ -90,7 +91,8 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_node(
         "reason",
         partial(reason_node, reasoner=deps.reasoner, settings=deps.settings, trace=deps.trace,
-                directory=deps.directory, presets=deps.presets),
+                directory=deps.directory, presets=deps.presets, history=deps.history,
+                evolution=deps.evolution, echoes=deps.echoes),
     )
     g.add_node(
         "confirm",
@@ -114,7 +116,7 @@ def build_graph(deps: Deps, checkpointer=None):
         "act",
         partial(act_node, evolution=deps.evolution, sessions=deps.sessions,
                 echoes=deps.echoes, settings=deps.settings, trace=deps.trace,
-                reaper=deps.reaper),
+                reaper=deps.reaper, history=deps.history),
     )
     g.add_node("handoff", partial(handoff_node, settings=deps.settings, trace=deps.trace))
 
