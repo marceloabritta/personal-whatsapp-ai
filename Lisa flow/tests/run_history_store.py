@@ -958,8 +958,44 @@ async def p6_perf(pg: PG) -> None:
             await c.execute(f"DROP DATABASE IF EXISTS {perf_db} WITH (FORCE)")
 
 
+async def coverage_cache_checks() -> None:
+    """coverage() counts the whole table, so it keeps its answer a few minutes (no DB needed)."""
+    import app.history.store as st_mod
+    store = st_mod.PgHistoryStore("postgresql://unused")
+    calls = []
+
+    async def counted():
+        calls.append(1)
+        return {"first_ts": 1, "last_ts": 2, "n_messages": 10 + len(calls), "n_chats": 1,
+                "voice_total": 0, "voice_transcribed": 0, "complete": True}
+
+    store._coverage_now = counted
+    a = await store.coverage()
+    b = await store.coverage()
+    check("coverage: the second ask within the TTL does not count again", len(calls) == 1 and a == b)
+    store._cov_at -= st_mod.COVERAGE_TTL + 1
+    c = await store.coverage()
+    check("coverage: past the TTL it counts again", len(calls) == 2 and c["n_messages"] == 12)
+    b["n_messages"] = -1
+    check("coverage: a caller changing its copy does not change the cache",
+          (await store.coverage())["n_messages"] == 12)
+    empty = st_mod.PgHistoryStore("postgresql://unused")
+
+    async def nothing():
+        calls.append(1)
+        return {"n_messages": 0}
+
+    empty._coverage_now = nothing
+    n = len(calls)
+    await empty.coverage()
+    await empty.coverage()
+    check("coverage: an empty or failed count is not kept", len(calls) == n + 2)
+
+
 async def main() -> int:
     p1_extract()
+    print()
+    await coverage_cache_checks()
     print()
     async with PG() as pg:
         if pg is None:
