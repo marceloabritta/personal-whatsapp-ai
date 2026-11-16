@@ -62,6 +62,19 @@ def _clamp(n: Any, lo: int, hi: int, default: int) -> int:
         return default
 
 
+# A voice note still "pending" this long after it was sent will never be transcribed: WhatsApp
+# stops serving the audio after about 17-18 days (measured 2026-11-16: 17.0 days served, 17.9
+# refused). Reported as expired, so the agent does not spend a slow, failing download on it.
+VOICE_GONE_AFTER_SECONDS = 18 * 86400
+
+
+def _voice_status(r: dict) -> Optional[str]:
+    status = r.get("transcript")
+    if status == "pending" and r.get("ts") and time.time() - int(r["ts"]) > VOICE_GONE_AFTER_SECONDS:
+        return "expired"
+    return status
+
+
 class PgHistoryStore:
     def __init__(self, dsn: str, *, schema: str = "lisa_search", owner_name: Optional[str] = None,
                  statement_timeout_ms: int = STATEMENT_TIMEOUT_MS) -> None:
@@ -194,7 +207,7 @@ class PgHistoryStore:
                 "ts": int(r["ts"]), "from_me": bool(r["from_me"]), "by_lisa": bool(r["by_lisa"]),
                 "sender": sender, "kind": r["kind"], "text": text, "file_name": r.get("file_name"),
                 "mimetype": r.get("mimetype"), "seconds": r.get("seconds"),
-                "transcript": r.get("transcript") if r["kind"] == "voice" else None,
+                "transcript": _voice_status(r) if r["kind"] == "voice" else None,
                 "quoted_msg_id": r.get("quoted_msg_id")}
 
     @staticmethod

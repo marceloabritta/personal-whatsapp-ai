@@ -812,7 +812,15 @@ async def p3_store(store, conn) -> None:
           and g["kind"] == "document")
     g = await store.get_message("VOICE2")
     check("get_message: a voice note carries its length, type and transcript status",
-          g and g["seconds"] == 30 and g["mimetype"].startswith("audio/ogg") and g["transcript"] == "pending")
+          g and g["seconds"] == 30 and g["mimetype"].startswith("audio/ogg")
+          and g["transcript"] == ("pending" if time.time() - T0 < 18 * 86400 else "expired"))
+    from app.history.store import _voice_status
+    now = int(time.time())
+    check("a pending voice note older than WhatsApp keeps audio reads as expired",
+          _voice_status({"transcript": "pending", "ts": now - 19 * 86400}) == "expired"
+          and _voice_status({"transcript": "pending", "ts": now - 3 * 86400}) == "pending"
+          and _voice_status({"transcript": "done", "ts": now - 90 * 86400}) == "done"
+          and _voice_status({"transcript": "failed", "ts": now - 90 * 86400}) == "failed")
     rc = await R(chat="5511000000000@s.whatsapp.net")
     check("read_chat on an unknown chat: empty, n_messages 0, no raise",
           rc["messages"] == [] and rc["chat"]["n_messages"] == 0 and not rc["more_before"])
