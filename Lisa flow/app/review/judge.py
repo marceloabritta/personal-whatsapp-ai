@@ -35,7 +35,12 @@ class Judge:
         if self._client is None:
             import anthropic
 
-            self._client = anthropic.AsyncAnthropic(api_key=self.s.anthropic_api_key)
+            key = getattr(self.s, "review_anthropic_api_key", "") or ""
+            if not key:
+                log.warning("REVIEW_ANTHROPIC_API_KEY is not set: the judge bills to "
+                            "ANTHROPIC_API_KEY, production's key")
+            self._client = anthropic.AsyncAnthropic(
+                api_key=key or self.s.anthropic_api_key)
         return self._client
 
     async def judge(self, *, lines: list[dict], reply_text: Optional[str], turn_ts=None) -> dict:

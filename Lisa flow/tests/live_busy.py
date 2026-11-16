@@ -12,7 +12,7 @@ message is sent to anyone.
 It needs ANTHROPIC_API_KEY and the model settings, so it runs on the droplet, in a throwaway
 container from the lisa image with this folder mounted and the live service's env passed in:
 
-    docker run --rm --env-file <(docker exec lisa_brain env) \\
+    docker run --rm --env-file <(docker exec lisa_brain env) --env-file /opt/evolution/tests.env \\
       -v "/opt/personal-whatsapp-ai/Lisa flow/tests:/app/tests:ro" evolution-lisa \\
       python tests/live_busy.py 10 > out.txt 2>&1; grep -E '^(\\[|  )' out.txt
 
@@ -342,4 +342,7 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    from live_key import require_tests_key
+
+    require_tests_key()
     sys.exit(asyncio.run(main()))

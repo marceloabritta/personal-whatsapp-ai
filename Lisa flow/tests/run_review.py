@@ -398,8 +398,21 @@ async def test_postgres() -> None:
         await store.aclose()
 
 
+def test_judge_key() -> None:
+    """The judge bills to its own key when one is set, and to production's when it is not."""
+    from app.config import Settings
+    from app.review.judge import Judge
+
+    base = dict(ANTHROPIC_API_KEY="sk-ant-prod-x", OWNER_NAME="Marcelo")
+    own = Judge(Settings(**base, REVIEW_ANTHROPIC_API_KEY="sk-ant-judge-x"))._client_or_make()
+    check("judge uses REVIEW_ANTHROPIC_API_KEY when set", own.api_key == "sk-ant-judge-x")
+    fallback = Judge(Settings(**base))._client_or_make()
+    check("judge falls back to ANTHROPIC_API_KEY when it is not", fallback.api_key == "sk-ant-prod-x")
+
+
 def main() -> int:
     test_pure()
+    test_judge_key()
     test_baseline()
     asyncio.run(test_postgres())
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")

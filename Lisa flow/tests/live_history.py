@@ -18,7 +18,7 @@ It needs the index, ANTHROPIC_API_KEY and the Evolution settings, so it runs on 
 throwaway container from the lisa image with this folder and the gold file mounted read-only and
 the live service's env passed in (the env never touches the disk):
 
-    docker run --rm --env-file <(docker exec lisa_brain env) \\
+    docker run --rm --env-file <(docker exec lisa_brain env) --env-file /opt/evolution/tests.env \\
       -e HISTORY_EVAL_PATH=/eval/gold.json -v /root/history-eval:/eval:ro \\
       -v "/opt/personal-whatsapp-ai/Lisa flow/tests:/app/tests:ro" evolution-lisa \\
       python tests/live_history.py
@@ -612,4 +612,7 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    from live_key import require_tests_key
+
+    require_tests_key()
     sys.exit(asyncio.run(main()))

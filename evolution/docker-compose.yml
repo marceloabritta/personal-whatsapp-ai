@@ -144,6 +144,9 @@ services:
       # Reasoning (provider-neutral; Anthropic today).
       LLM_PROVIDER: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # The review judge's own key, so grading shows apart from production in the Console.
+      # Empty = the judge uses ANTHROPIC_API_KEY.
+      REVIEW_ANTHROPIC_API_KEY: ${REVIEW_ANTHROPIC_API_KEY:-}
       CLAUDE_MODEL: claude-sonnet-5
       CLAUDE_EFFORT: high
       CLAUDE_MAX_TOKENS: "10000"
