@@ -208,7 +208,7 @@ services:
       # the voice capture transcribes every voice note in every chat while WhatsApp still serves
       # it (2-4 weeks), so spoken conversations become searchable; the skill answers in the
       # self-chat only. HISTORY_DATABASE_URL may point the skill at a read-only role.
-      HISTORY_INDEX_ENABLED: "false"
+      HISTORY_INDEX_ENABLED: "true"
       HISTORY_VOICE_CAPTURE_ENABLED: "true"
       # A pass reads Evolution's whole "Message" table (no index on time or type): ~0.5 s.
       HISTORY_VOICE_INTERVAL_SECONDS: "120"
