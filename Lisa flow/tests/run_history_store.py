@@ -84,10 +84,10 @@ def p1_extract() -> None:
     check("an image with no caption is still kept", r and r["kind"] == "image" and r["text"] == "")
     r = X("videoMessage", {"videoMessage": {"caption": "pitch", "seconds": 42, "mimetype": "video/mp4"}})
     check("video caption + seconds", r and r["kind"] == "video" and r["seconds"] == 42)
-    r = X("documentMessage", {"documentMessage": {"fileName": "Proposta Turuk.pdf", "title": "Proposta Turuk",
+    r = X("documentMessage", {"documentMessage": {"fileName": "Proposta Kestrel.pdf", "title": "Proposta Kestrel",
                                                   "caption": "segue", "mimetype": "application/pdf"}})
     check("document: file name, caption, title folded into the file name",
-          r and r["kind"] == "document" and r["file_name"] == "Proposta Turuk.pdf" and r["text"] == "segue")
+          r and r["kind"] == "document" and r["file_name"] == "Proposta Kestrel.pdf" and r["text"] == "segue")
     r = X("documentWithCaptionMessage", {"documentWithCaptionMessage": {"message": {"documentMessage": {
         "fileName": "deck.pdf", "caption": "o deck"}}}})
     check("documentWithCaptionMessage wrapper", r and r["file_name"] == "deck.pdf" and r["text"] == "o deck")
@@ -152,7 +152,7 @@ def p1_extract() -> None:
         check(f"Lisa's header recognised and cut: {hdr[:14]!r}", r["by_lisa"] and r["text"] == "Corpo")
     r = X("conversation", {"conversation": "[Marcelo's AI Assistant]: x"}, from_me=False, owner_name="Marcelo")
     check("someone else quoting the header is not Lisa", not r["by_lisa"])
-    r = X("conversation", {"conversation": "@lisa quem falou de Turuk?"}, from_me=True,
+    r = X("conversation", {"conversation": "@lisa quem falou de Kestrel?"}, from_me=True,
           owner_name="Marcelo", tags=["@lisa"])
     check("the owner's @lisa request is flagged to_lisa", r["to_lisa"] and not r["by_lisa"])
     r = X("conversation", {"conversation": "@lisandro oi"}, from_me=True, owner_name="Marcelo", tags=["@lisa"])
@@ -329,11 +329,11 @@ async def seed(evo: Evo) -> None:
     await m(ANA_LID, "Claro, a aceleradora em São Paulo indicou", mid="A2", ts=T0 + 60, alt=ANA,
             from_me=True)
     await m(ANA_LID, "reunião às 10", mid="A3", ts=T0 + 120, alt=ANA, push="Aninha")
-    await m(ANA_LID, "A Turuk vai junto pro EUA", mid="A4", ts=T0 + 2 * DAY, alt=ANA, push="Aninha")
-    await m(ANA, "*[Marcelo's AI Assistant]:*\n\nCombinado, Turuk anotado na agenda", mid="A5",
+    await m(ANA_LID, "A Kestrel vai junto pro EUA", mid="A4", ts=T0 + 2 * DAY, alt=ANA, push="Aninha")
+    await m(ANA, "*[Marcelo's AI Assistant]:*\n\nCombinado, Kestrel anotado na agenda", mid="A5",
             ts=T0 + 2 * DAY + 30, from_me=True)
     await m(ANA_LID, None, mid="A6", ts=T0 + 2 * DAY + 60, alt=ANA, push="Aninha", mtype="documentMessage",
-            message={"documentMessage": {"fileName": "Proposta Turuk.pdf", "mimetype": "application/pdf",
+            message={"documentMessage": {"fileName": "Proposta Kestrel.pdf", "mimetype": "application/pdf",
                                          "jpegThumbnail": "A" * 4000}})
     await m(ANA_LID, None, mid="A7", ts=T0 + 2 * DAY + 90, alt=ANA, push="Aninha", mtype="reactionMessage",
             message={"reactionMessage": {"text": "❤️", "key": {"id": "A4"}}})
@@ -341,7 +341,7 @@ async def seed(evo: Evo) -> None:
             message={"protocolMessage": {"type": 14, "key": {"id": "A3"},
                                          "editedMessage": {"conversation": "reunião às 11"}}})
     await m(ANA_LID, "sem alt aqui", mid="A9", ts=T0 + 3 * DAY, push="Aninha")
-    long = ("bla " * 600) + "o investidor de Turuk ligou" + (" fim" * 300)
+    long = ("bla " * 600) + "o investidor de Kestrel ligou" + (" fim" * 300)
     await m(ANA_LID, long, mid="A10", ts=T0 + 3 * DAY + 10, alt=ANA, push="Aninha")
     await m(ANA_LID, "resposta", mid="A11", ts=T0 + 3 * DAY + 20, alt=ANA, push="Aninha",
             ctx={"stanzaId": "A10", "quotedMessage": {"conversation": "o investidor"}})
@@ -363,27 +363,27 @@ async def seed(evo: Evo) -> None:
         await m(BRUNO_LID, f"Bruno aqui, mensagem {i} sobre o hackathon", mid=f"B{i}", ts=T0 + i * 100,
                 push="Bruno B.")
     # Carla: a @lid forever; both topics in one message.
-    await m(CARLA_LID, "No demo day a Turuk apresentou", mid="C1", ts=T0 + 10 * DAY)
+    await m(CARLA_LID, "No demo day a Kestrel apresentou", mid="C1", ts=T0 + 10 * DAY)
     await m(CARLA_LID, "beleza", mid="C2", ts=T0 + 10 * DAY + 5, from_me=True)
     # A group: Ana and Daniel write, and the owner.
     await m(GROUP, "Pessoal, o Demo Day é em Austin", mid="G1", ts=T0 + DAY, part=ANA_LID, part_alt=ANA,
             push="Aninha")
-    await m(GROUP, "Eu vou! Levo a Turuk", mid="G2", ts=T0 + DAY + 50, part=DANI_LID, part_alt=DANI, push="Dani")
+    await m(GROUP, "Eu vou! Levo a Kestrel", mid="G2", ts=T0 + DAY + 50, part=DANI_LID, part_alt=DANI, push="Dani")
     await m(GROUP, "Fechado", mid="G3", ts=T0 + DAY + 80, part=OWNER_LID, from_me=True)
     await m(GROUP, "@lisa marca com todos", mid="G4", ts=T0 + DAY + 90, part=OWNER_LID, from_me=True,
             push="Você")
     await m(GROUP, "@444444444444444 você leva o pitch?", mid="G6", ts=T0 + DAY + 95, part=ANA_LID,
             part_alt=ANA, push="Aninha")
-    await m(OLD_GROUP, "grupo antigo sobre Turuk? não", mid="OG1", ts=T0 + 8 * DAY, part=DANI, push="Dani")
+    await m(OLD_GROUP, "grupo antigo sobre Kestrel? não", mid="OG1", ts=T0 + 8 * DAY, part=DANI, push="Dani")
     # A second group: the topics far apart (39 days).
     await m(GROUP2, "demo day foi ótimo", mid="H1", ts=T0, part=DANI_LID, part_alt=DANI, push="Dani")
-    await m(GROUP2, "lembra da turuk?", mid="H2", ts=T0 + 39 * DAY, part=DANI_LID, part_alt=DANI, push="Dani")
+    await m(GROUP2, "lembra da kestrel?", mid="H2", ts=T0 + 39 * DAY, part=DANI_LID, part_alt=DANI, push="Dani")
     await m(GROUP3, "evento sexta", mid="S1", ts=T0 + 20 * DAY, part=DANI_LID, part_alt=DANI, push="Dani")
     # The owner's chat with himself: his note, his question to Lisa, her answer (via the API).
-    await m(OWNER_LID, "nota: Turuk demo day", mid="O1", ts=T0 + 30 * DAY, alt=OWNER, from_me=True)
-    await m(OWNER_LID, "@lisa quem falou de Turuk?", mid="O2", ts=T0 + 30 * DAY + 10, alt=OWNER,
+    await m(OWNER_LID, "nota: Kestrel demo day", mid="O1", ts=T0 + 30 * DAY, alt=OWNER, from_me=True)
+    await m(OWNER_LID, "@lisa quem falou de Kestrel?", mid="O2", ts=T0 + 30 * DAY + 10, alt=OWNER,
             from_me=True)
-    await m(OWNER, "*[Marcelo's AI Assistant]:*\n\nFoi a Ana, sobre Turuk", mid="O3",
+    await m(OWNER, "*[Marcelo's AI Assistant]:*\n\nFoi a Ana, sobre Kestrel", mid="O3",
             ts=T0 + 30 * DAY + 20, from_me=True, push="Você")
     await m(OWNER_LID, "lembrete encaminhado", mid="O4", ts=T0 + 30 * DAY + 30, alt=OWNER, from_me=False,
             push="Você")
@@ -392,8 +392,8 @@ async def seed(evo: Evo) -> None:
             message={"secretEncryptedMessage": {"encPayload": "zz"}})
     await m(ANA_LID, None, mid="X2", ts=T0 + 6 * DAY, alt=ANA, mtype="albumMessage",
             message={"albumMessage": {"expectedImageCount": 2}})
-    await m("status@broadcast", "meu status Turuk", mid="X3", ts=T0 + 6 * DAY, part=ANA_LID)
-    await m(ANA_LID, "outra instância Turuk", mid="X4", ts=T0 + 6 * DAY, alt=ANA, instance="inst-other")
+    await m("status@broadcast", "meu status Kestrel", mid="X3", ts=T0 + 6 * DAY, part=ANA_LID)
+    await m(ANA_LID, "outra instância Kestrel", mid="X4", ts=T0 + 6 * DAY, alt=ANA, instance="inst-other")
     # A row in a shape nobody planned for (remoteJid a number): skipped, never a stuck cursor.
     await c.execute('INSERT INTO "Message" (id, key, "messageType", message, "messageTimestamp", '
                     '"instanceId") VALUES (%s, %s, %s, %s, %s, %s)',
@@ -511,7 +511,7 @@ async def p2_index(pg: PG) -> None:
     check("counts leave reactions out", chats[ANA][4] == (await one(
         "SELECT count(*) FROM lisa_search.messages WHERE chat = %s AND kind <> 'reaction'", ANA))[0])
     r = await one("SELECT by_lisa, text FROM lisa_search.messages WHERE msg_id = 'A5'")
-    check("Lisa's message flagged, header cut", r[0] and r[1] == "Combinado, Turuk anotado na agenda", str(r))
+    check("Lisa's message flagged, header cut", r[0] and r[1] == "Combinado, Kestrel anotado na agenda", str(r))
     r = await one("SELECT to_lisa, by_lisa FROM lisa_search.messages WHERE msg_id = 'O2'")
     check("the owner's @lisa request flagged to_lisa", r == (True, False))
     r = await one("SELECT text, edited FROM lisa_search.messages WHERE msg_id = 'A3'")
@@ -660,26 +660,26 @@ async def p3_store(store, conn) -> None:
     check("case-insensitive: 'eua' finds 'EUA'", "A4" in [h["msg_id"] for h in res["hits"]])
     res = await S(terms=["acelerad"])
     check("substring: 'acelerad' finds 'aceleradora'", res["total"] == 1)
-    res = await S(terms=["turuk"])
+    res = await S(terms=["kestrel"])
     ids = [h["msg_id"] for h in res["hits"]]
     check("Lisa's messages and the owner's requests to her are left out by default",
           "A5" not in ids and "O3" not in ids and "O2" not in ids and "O1" in ids, str(ids))
-    res2 = await S(terms=["turuk"], include_lisa=True)
+    res2 = await S(terms=["kestrel"], include_lisa=True)
     ids2 = [h["msg_id"] for h in res2["hits"]]
     check("include_lisa brings them back", {"A5", "O3", "O2"} <= set(ids2) and res2["total"] == res["total"] + 3)
     check("results are newest first", [h["ts"] for h in res["hits"]] == sorted(
         [h["ts"] for h in res["hits"]], reverse=True))
     check("a file name is searchable", "A6" in ids)
     check("total counts every match, not just the page",
-          (await S(terms=["turuk"], limit=2))["total"] == res["total"] and len((await S(terms=["turuk"], limit=2))["hits"]) == 2)
+          (await S(terms=["kestrel"], limit=2))["total"] == res["total"] and len((await S(terms=["kestrel"], limit=2))["hits"]) == 2)
     byc = {c["chat"]: c["n_hits"] for c in res["by_chat"]}
     check("by_chat: hits per chat, most first", res["by_chat"][0]["n_hits"] == max(byc.values())
           and byc.get(ANA) == 3, str(byc))
     check("by_chat rows carry the chat's name", any(c["name"] == "Ana Paula" for c in res["by_chat"]))
-    res = await S(terms=["demo day", "turuk"], match="all")
+    res = await S(terms=["demo day", "kestrel"], match="all")
     check("match all: both terms in one message", {h["msg_id"] for h in res["hits"]} == {"C1", "O1"},
           str([h["msg_id"] for h in res["hits"]]))
-    res = await S(terms=["demo day", "turuk"], match="any")
+    res = await S(terms=["demo day", "kestrel"], match="any")
     check("match any: either term; messages with both rank first",
           res["total"] > 2 and {h["msg_id"] for h in res["hits"][:2]} == {"C1", "O1"},
           str([h["msg_id"] for h in res["hits"][:3]]))
@@ -692,18 +692,18 @@ async def p3_store(store, conn) -> None:
     res = await S(terms=["reunião às 10"])
     check("an edited message is found by its new words only", res["total"] == 0
           and (await S(terms=["reuniao as 11"]))["total"] == 1)
-    res = await S(terms=["turuk"], chat=ANA)
+    res = await S(terms=["kestrel"], chat=ANA)
     check("filter: chat", res["total"] == 3 and all(h["chat"] == ANA for h in res["hits"]))
-    res = await S(terms=["turuk"], chat=ANA_LID)
+    res = await S(terms=["kestrel"], chat=ANA_LID)
     check("filter: chat given as its @lid twin", res["total"] == 3)
-    res = await S(terms=["turuk"], chat="5511888880000")
+    res = await S(terms=["kestrel"], chat="5511888880000")
     check("filter: chat given as bare digits", res["total"] == 3)
-    res = await S(terms=["turuk"], from_me=True)
+    res = await S(terms=["kestrel"], from_me=True)
     check("filter: from_me", {h["msg_id"] for h in res["hits"]} == {"O1"})
-    res = await S(terms=["turuk"], kinds=["document"])
+    res = await S(terms=["kestrel"], kinds=["document"])
     check("filter: kinds", [h["msg_id"] for h in res["hits"]] == ["A6"]
-          and res["hits"][0]["file_name"] == "Proposta Turuk.pdf")
-    res = await S(terms=["turuk"], after=T0 + 9 * DAY, before=T0 + 31 * DAY)
+          and res["hits"][0]["file_name"] == "Proposta Kestrel.pdf")
+    res = await S(terms=["kestrel"], after=T0 + 9 * DAY, before=T0 + 31 * DAY)
     check("filter: after/before", {h["msg_id"] for h in res["hits"]} == {"C1", "O1"},
           str([h["msg_id"] for h in res["hits"]]))
     res = await S(terms=[], kinds=["reaction"])
@@ -716,7 +716,7 @@ async def p3_store(store, conn) -> None:
     res = await S(terms=["investidor"])
     h = next((x for x in res["hits"] if x["msg_id"] == "A10"), {})
     check("a long message comes back as a ~300-char snippet around the match",
-          "investidor de Turuk" in h.get("text", "") and len(h.get("text", "")) <= 304, str(len(h.get("text", ""))))
+          "investidor de Kestrel" in h.get("text", "") and len(h.get("text", "")) <= 304, str(len(h.get("text", ""))))
     check("a reply does not match on the text it quotes", "A11" not in [x["msg_id"] for x in res["hits"]])
     res = await S(terms=["Demo Day é em Austin"])
     h = res["hits"][0] if res["hits"] else {}
@@ -735,7 +735,7 @@ async def p3_store(store, conn) -> None:
           res["hits"] and res["hits"][0]["sender"] == "Marcelo", str(res["hits"][:1]))
 
     T = store.topics_together
-    out = await T(topics=[["demo day"], ["turuk", "turuc"]], within_days=14)
+    out = await T(topics=[["demo day"], ["kestrel", "turuc"]], within_days=14)
     chats = [o["chat"]["chat"] for o in out]
     check("topics_together: tightest window first (one message holds both)",
           set(chats[:2]) == {CARLA_LID, OWNER}, str(chats))
@@ -745,14 +745,14 @@ async def p3_store(store, conn) -> None:
     check("…ties on the window go to the more recent chat", chats[0] == OWNER)
     ana = next(o for o in out if o["chat"]["chat"] == ANA)
     texts = " ".join(e["text"].lower() for e in ana["examples"])
-    check("…examples cover every topic", "demo day" in texts and "turuk" in texts, texts[:120])
+    check("…examples cover every topic", "demo day" in texts and "kestrel" in texts, texts[:120])
     check("…the window is where the topics meet", ana["first_ts"] == T0 and ana["last_ts"] <= T0 + 3 * DAY + 10
           and ana["first_ts"] <= ana["last_ts"], f"{ana['first_ts'] - T0}..{ana['last_ts'] - T0}")
-    out = await T(topics=[["demo day"], ["turuk"]], within_days=60)
+    out = await T(topics=[["demo day"], ["kestrel"]], within_days=60)
     check("a wider window brings the far chat in", GROUP2 in [o["chat"]["chat"] for o in out])
     out = await T(topics=[["demo day"], ["nada disso existe"]])
     check("a topic nobody mentioned: no chats", out == [])
-    out = await T(topics=[["demo day"], ["turuk"]], after=T0 + 9 * DAY)
+    out = await T(topics=[["demo day"], ["kestrel"]], after=T0 + 9 * DAY)
     check("topics_together honours after", {o["chat"]["chat"] for o in out} == {CARLA_LID, OWNER},
           str([o["chat"]["chat"] for o in out]))
 
@@ -803,12 +803,12 @@ async def p3_store(store, conn) -> None:
           rc["chat"]["chat"] == ANA and "A1" in [m["msg_id"] for m in rc["messages"]])
 
     g = await store.get_message("A10")
-    check("get_message: the whole message", g and g["msg_id"] == "A10" and "investidor de Turuk" in g["text"]
+    check("get_message: the whole message", g and g["msg_id"] == "A10" and "investidor de Kestrel" in g["text"]
           and g["chat"] == ANA and g["sender"] == "Ana Paula")
     check("get_message: unknown id", await store.get_message("NOPE") is None)
     g = await store.get_message("A6")
     check("get_message: a document names its file and type (the media seam relies on it)",
-          g and g["file_name"] == "Proposta Turuk.pdf" and g["mimetype"] == "application/pdf"
+          g and g["file_name"] == "Proposta Kestrel.pdf" and g["mimetype"] == "application/pdf"
           and g["kind"] == "document")
     g = await store.get_message("VOICE2")
     check("get_message: a voice note carries its length, type and transcript status",
