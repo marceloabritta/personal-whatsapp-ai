@@ -48,7 +48,9 @@ async def start(deps) -> list:
     if s.history_index_enabled:
         from .indexer import HistoryIndexer
 
-        idx = HistoryIndexer(s.database_url, schema=s.history_schema, settings=s)
+        # The address book, when contacts is on, gives chats and senders the owner's own names.
+        idx = HistoryIndexer(s.database_url, schema=s.history_schema, settings=s,
+                             directory=getattr(deps, "directory", None))
         try:
             await idx.open()
             idx.start()
