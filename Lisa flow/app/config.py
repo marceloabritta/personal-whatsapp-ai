@@ -196,8 +196,11 @@ class Settings(BaseSettings):
     history_database_url: str | None = None
     history_model: str = "claude-opus-5-5"
     history_effort: str = "medium"
-    history_max_tool_calls: int = 25     # tool calls in one turn
-    history_max_seconds: int = 90        # wall clock for one turn; under the 100 s shutdown grace
+    # One turn's budget. Most questions take ~4 calls and ~20 s; the hard ones (several clues, no
+    # literal match) needed ~40 calls and ~150 s in the 2026-11-16 eval, and at 25 / 90 s they ran out
+    # before reaching the answer. Past the 100 s shutdown grace a deploy can cut such a turn short.
+    history_max_tool_calls: int = 40
+    history_max_seconds: int = 150
     history_ack_after_seconds: float = 8.0  # a "searching…" note goes out if the answer is slower
     history_index_interval_seconds: int = 60
     history_index_batch: int = 500             # rows per page of a sync or backfill
