@@ -432,7 +432,7 @@ def extract(message_type: Optional[str], message: Any, *, context_info: Any = No
         quoted = _s((c.get("key") or {}).get("id")) or quoted
     # Media keep their row even without words: a picture, a voice note or a file is something
     # that was sent, and read_chat should show it. A text-ish message with no words is noise.
-    if not text and not fname and kind in ("text", "other", "contact", "poll", "location", "reaction"):
+    if not text and not fname and kind in ("text", "other", "contact", "poll", "reaction"):
         return None
     return _finish(kind, text, fname, mime, secs, quoted, from_me=from_me,
                    owner_name=owner_name, tags=tags)
@@ -446,7 +446,10 @@ def _finish(kind, text, fname, mime, secs, quoted, *, from_me, owner_name, tags)
             by_lisa, text = True, body
     if from_me and not by_lisa and text:
         to_lisa = matched_tag(text.lstrip(), all_tags(tags)) is not None
-    return {"kind": kind, "text": text or "", "file_name": fname, "mimetype": mime,
+    # Postgres text cannot hold a NUL; jsonb never stores one, but a wrapper might decode one.
+    text = (text or "").replace("\x00", "")
+    fname = fname.replace("\x00", "") if fname else fname
+    return {"kind": kind, "text": text, "file_name": fname, "mimetype": mime,
             "seconds": secs, "quoted_msg_id": quoted, "by_lisa": by_lisa, "to_lisa": to_lisa,
             "edit_of": None}
 

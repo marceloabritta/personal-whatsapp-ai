@@ -84,6 +84,7 @@ class HistoryIndexer:
         self._instance_id: Optional[str] = None
         self._identity_done = False
         self._alias: dict[str, str] = {}       # lid -> phone jid
+        self._lid_chats: set[str] = set()      # lids that are a chat's canonical key today
         self._aliases_loaded = False
         self._names_at = 0.0
         self._names_dirty = True
@@ -214,6 +215,8 @@ class HistoryIndexer:
             cur = await conn.execute(
                 f"SELECT jid, canonical FROM {self.schema}.jids WHERE jid <> canonical")
             self._alias = {j: c for j, c in await cur.fetchall()}
+            cur = await conn.execute(f"SELECT chat FROM {self.schema}.chats WHERE chat LIKE '%%@lid'")
+            self._lid_chats = {r[0] for r in await cur.fetchall()}
         self._aliases_loaded = True
 
     def _canon(self, jid: Optional[str]) -> Optional[str]:
@@ -248,16 +251,17 @@ class HistoryIndexer:
         start = it.cuid_floor(ms - OVERLAP_MS) if (ms and not backfilling) else cursor
         if cursor and ms is None:
             log.warning("history index: cursor %r is not a cuid; re-reading from it", cursor[:12])
-        inst = ' AND "instanceId" = %s' if self._instance_id else ""
+        # The instance is filtered in Python, not here: with `"instanceId" = …` in the WHERE the
+        # planner may walk Message_instanceId_idx (every row) and sort, instead of the primary-key
+        # range it must use.
         sql = ('SELECT id, key::text, "pushName", "messageType", message::text, '
-               '"contextInfo"->>\'stanzaId\', "messageTimestamp" '
-               f'FROM "Message" WHERE id > %s{inst} ORDER BY id LIMIT %s')
+               '"contextInfo"->>\'stanzaId\', "messageTimestamp", "instanceId" '
+               'FROM "Message" WHERE id > %s ORDER BY id LIMIT %s')
         exhausted = False
         rows: list = []
         while not self._stop.is_set():
-            params = (start, self._instance_id, self.batch) if inst else (start, self.batch)
             async with self._pool.connection() as conn:
-                cur = await conn.execute(sql, params)
+                cur = await conn.execute(sql, (start, self.batch))
                 rows = await cur.fetchall()
             if not rows:
                 exhausted = True
@@ -274,6 +278,9 @@ class HistoryIndexer:
                 raise
             cursor, start = new_cursor, last
             stats["pages"] += 1
+            if backfilling and stats["pages"] % 20 == 0:
+                log.info("%s", json.dumps({"history_index": "backfill", "pages": stats["pages"],
+                                           "rows": stats["ingested"], "stored_at": it.cuid_ms(last)}))
             if len(rows) < self.batch:
                 exhausted = True
                 break
@@ -283,6 +290,11 @@ class HistoryIndexer:
                 except asyncio.TimeoutError:
                     pass
         if exhausted and backfilling:
+            async with self._pool.connection() as conn:
+                # Fresh statistics now, rather than whenever autovacuum gets to the new tables:
+                # the store's plans depend on them.
+                await conn.execute(f"ANALYZE {self.schema}.messages, {self.schema}.chats, "
+                                   f"{self.schema}.jids")
             await self._put_state({"backfill_done": int(time.time())})
             self._names_dirty = True
             self._stats_all = True
@@ -315,76 +327,98 @@ class HistoryIndexer:
                 learned[lid] = phone
                 self._alias[lid] = phone
 
-        for src_id, key_txt, push, mtype, msg_txt, stanza, ts in rows:
+        bad = 0
+        for src_id, key_txt, push, mtype, msg_txt, stanza, ts, inst in rows:
+            if self._instance_id and inst != self._instance_id:
+                continue
             try:
                 key = json.loads(key_txt) if key_txt else {}
+                if not isinstance(key, dict):
+                    continue
             except ValueError:
                 continue
-            jid = it.bare_jid(key.get("remoteJid"))
-            if not jid or jid.endswith("@broadcast") or not key.get("id"):
-                continue
-            alt = it.bare_jid(key.get("remoteJidAlt"))
-            part = it.bare_jid(key.get("participant"))
-            part_alt = it.bare_jid(key.get("participantAlt"))
-            from_me = key.get("fromMe") in (True, "true")
-            # Teach aliases from both shapes, whichever side the phone is on.
-            learn(jid, alt)
-            learn(alt, jid)
-            learn(part, part_alt)
-            learn(part_alt, part)
             try:
-                message = json.loads(msg_txt) if msg_txt else None
-            except ValueError:
-                message = None
-            rec = it.extract(mtype, message, context_info={"stanzaId": stanza} if stanza else None,
-                             from_me=from_me, owner_name=self.owner_name, tags=self.tags)
-            group = it.jid_domain(jid) in ("g.us", "newsletter")
-            chat = jid if group else self._canon(jid)
-            # Who wrote it, as a raw jid: the jids table resolves it to a name (and follows a lid
-            # learned later). The owner's own messages are his, wherever they were sent.
-            if from_me:
-                sender = owner
-            elif group:
-                sender = part_alt or part or None
-                seen(part, push, ts)
-                seen(part_alt, push, ts)
-            else:
-                sender = jid
-                seen(jid, push, ts)
-            seen(jid)
-            seen(alt)
-            if rec is None:
-                continue
-            ts = int(ts or 0)
-            if rec["edit_of"]:
-                edits.append({"target": rec["edit_of"], "text": rec["text"], "msg_id": key["id"],
-                              "rec": rec, "src_id": src_id, "chat": chat, "jid": jid, "ts": ts,
-                              "from_me": from_me, "sender": sender, "push": push})
-                continue
-            row = {"msg_id": key["id"], "src_id": src_id, "chat": chat, "jid": jid, "ts": ts,
-                   "from_me": from_me, "by_lisa": rec["by_lisa"], "to_lisa": rec["to_lisa"],
-                   "sender_jid": sender, "push_name": it.clean_name(push) if not from_me else None,
-                   "kind": rec["kind"], "text": rec["text"], "file_name": rec["file_name"],
-                   "mimetype": rec["mimetype"], "seconds": rec["seconds"],
-                   "quoted_msg_id": rec["quoted_msg_id"],
-                   "transcript": "pending" if rec["kind"] == "voice" else None,
-                   "norm": it.search_norm(rec["text"], rec["file_name"])}
-            prev = msgs.get(row["msg_id"])
-            if prev is not None:
-                # The same message stored twice: keep the copy with words, and the earliest time
-                # (a re-sent copy carries a fresh timestamp).
-                if not row["text"] and prev["text"]:
-                    row = {**prev}
-                row["ts"] = min(prev["ts"], ts) if prev["ts"] else ts
-                row["src_id"] = min(prev["src_id"], src_id)
-            msgs[row["msg_id"]] = row
-            if row["kind"] == "voice":
-                voice_ids.append(row["msg_id"])
-            c = chats.setdefault(chat, {"chat": chat, "aliases": set()})
-            if jid != chat:
-                c["aliases"].add(jid)
-            if alt and alt != chat and not group:
-                c["aliases"].add(alt)
+                self._one(key, src_id, push, mtype, msg_txt, stanza, ts, owner, seen, learn,
+                          msgs, edits, chats, voice_ids)
+            except Exception as exc:
+                # One row Evolution stored in a shape nobody expected must not stop the cursor
+                # here forever: it is skipped, and counted.
+                bad += 1
+                if bad == 1:
+                    log.warning("history index: skipped a row it could not read (%s): %s",
+                                src_id, type(exc).__name__)
+        return self._finish_page(owner, msgs, edits, jids, chats, learned, voice_ids)
+
+    def _one(self, key, src_id, push, mtype, msg_txt, stanza, ts, owner, seen, learn,
+             msgs, edits, chats, voice_ids) -> None:
+        """One "Message" row into msgs / edits / chats (and the jids and aliases it shows)."""
+        jid = it.bare_jid(key.get("remoteJid"))
+        if not jid or jid.endswith("@broadcast") or not key.get("id"):
+            return
+        alt = it.bare_jid(key.get("remoteJidAlt"))
+        part = it.bare_jid(key.get("participant"))
+        part_alt = it.bare_jid(key.get("participantAlt"))
+        from_me = key.get("fromMe") in (True, "true")
+        # Teach aliases from both shapes, whichever side the phone is on.
+        learn(jid, alt)
+        learn(alt, jid)
+        learn(part, part_alt)
+        learn(part_alt, part)
+        try:
+            message = json.loads(msg_txt) if msg_txt else None
+        except ValueError:
+            message = None
+        rec = it.extract(mtype, message, context_info={"stanzaId": stanza} if stanza else None,
+                         from_me=from_me, owner_name=self.owner_name, tags=self.tags)
+        group = it.jid_domain(jid) in ("g.us", "newsletter")
+        chat = jid if group else self._canon(jid)
+        # Who wrote it, as a raw jid: the jids table resolves it to a name (and follows a lid
+        # learned later). The owner's own messages are his, wherever they were sent.
+        if from_me:
+            sender = owner
+        elif group:
+            sender = part_alt or part or None
+            seen(part, push, ts)
+            seen(part_alt, push, ts)
+        else:
+            sender = jid
+            seen(jid, push, ts)
+        seen(jid)
+        seen(alt)
+        if rec is None:
+            return
+        ts = int(ts or 0)
+        if rec["edit_of"]:
+            edits.append({"target": rec["edit_of"], "text": rec["text"], "msg_id": key["id"],
+                          "rec": rec, "src_id": src_id, "chat": chat, "jid": jid, "ts": ts,
+                          "from_me": from_me, "sender": sender, "push": push})
+            return
+        row = {"msg_id": key["id"], "src_id": src_id, "chat": chat, "jid": jid, "ts": ts,
+               "from_me": from_me, "by_lisa": rec["by_lisa"], "to_lisa": rec["to_lisa"],
+               "sender_jid": sender, "push_name": it.clean_name(push) if not from_me else None,
+               "kind": rec["kind"], "text": rec["text"], "file_name": rec["file_name"],
+               "mimetype": rec["mimetype"], "seconds": rec["seconds"],
+               "quoted_msg_id": rec["quoted_msg_id"],
+               "transcript": "pending" if rec["kind"] == "voice" else None,
+               "norm": it.search_norm(rec["text"], rec["file_name"])}
+        prev = msgs.get(row["msg_id"])
+        if prev is not None:
+            # The same message stored twice: keep the copy with words, and the earliest time
+            # (a re-sent copy carries a fresh timestamp).
+            if not row["text"] and prev["text"]:
+                row = {**prev}
+            row["ts"] = min(prev["ts"], ts) if prev["ts"] else ts
+            row["src_id"] = min(prev["src_id"], src_id)
+        msgs[row["msg_id"]] = row
+        if row["kind"] == "voice":
+            voice_ids.append(row["msg_id"])
+        c = chats.setdefault(chat, {"chat": chat, "aliases": set()})
+        if jid != chat:
+            c["aliases"].add(jid)
+        if alt and alt != chat and not group:
+            c["aliases"].add(alt)
+
+    def _finish_page(self, owner, msgs, edits, jids, chats, learned, voice_ids) -> dict:
         for e in edits:
             c = chats.setdefault(e["chat"], {"chat": e["chat"], "aliases": set()})
         # Re-canonicalise with everything learned in this page (a lid's alias may come later in it).
@@ -464,6 +498,8 @@ class HistoryIndexer:
                                        {s}.chats.phone IS DISTINCT FROM EXCLUDED.phone)""",
                             page["chats"])
                         touched.update(c["chat"] for c in page["chats"])
+                        self._lid_chats.update(c["chat"] for c in page["chats"]
+                                               if it.jid_domain(c["chat"]) == "lid")
                     if page["msgs"]:
                         await cur.executemany(
                             f"""INSERT INTO {s}.messages AS m (msg_id, src_id, chat, jid, ts, from_me,
@@ -491,7 +527,8 @@ class HistoryIndexer:
                                    OR (EXCLUDED.transcript = 'done'
                                        AND m.transcript IS DISTINCT FROM 'done')""",
                             page["msgs"])
-                        stats["ingested"] += len(page["msgs"])
+                        # Rows actually written: the overlap re-read of an idle pass counts 0.
+                        stats["ingested"] += max(cur.rowcount or 0, 0)
                     if page["edits"]:
                         stats["edits"] += await self._apply_edits(cur, page["edits"], touched)
                 await self._put_state({"msg_cursor": cursor}, conn)
@@ -526,12 +563,18 @@ class HistoryIndexer:
         return n
 
     async def _rekey(self, cur, learned: dict, touched: set) -> None:
-        """lid -> phone jid learned: move what was indexed under the lid to the phone jid."""
+        """lid -> phone jid learned: move what was indexed under the lid to the phone jid. Most
+        aliases are group members who never had a chat under their lid; for those only the jids
+        row changes."""
         s = self.schema
+        await cur.executemany(f"UPDATE {s}.jids SET canonical = %s WHERE jid = %s",
+                              [(phone, lid) for lid, phone in learned.items()])
         for lid, phone in learned.items():
+            if lid not in self._lid_chats:
+                continue
+            self._lid_chats.discard(lid)
             await cur.execute(f"UPDATE {s}.messages SET chat = %s WHERE chat = %s", (phone, lid))
             moved = cur.rowcount or 0
-            await cur.execute(f"UPDATE {s}.jids SET canonical = %s WHERE jid = %s", (phone, lid))
             await cur.execute(f"SELECT aliases FROM {s}.chats WHERE chat = %s", (lid,))
             row = await cur.fetchone()
             if row is not None or moved:
