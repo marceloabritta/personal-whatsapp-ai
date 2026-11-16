@@ -707,27 +707,38 @@ async def h5_graph() -> None:
 
 # ============================ H6 — the "searching…" note ==================================
 
+def is_ack(text: str) -> bool:
+    from app.nodes.reason import _ACK
+
+    return any(text.endswith(v) for kind in _ACK.values() for opts in kind.values() for v in opts)
+
+
 async def h6_ack() -> None:
     print("H6 — the searching note")
+    from app.nodes.reason import _ACK, _ack_text
+
     fake = FakeAgent()
     with patched_agent(fake):
         c = Chat(settings(history_ack_after_seconds=0.05))
         fake.script = [{}]
         await c.say("@lisa quem me mandou o pdf do aluguel?")
-        check("a fast answer: no note", len(c.evo.sent) == 1 and "🔎" not in c.evo.sent[0][1])
+        check("a fast answer: no note", len(c.evo.sent) == 1 and not is_ack(c.evo.sent[0][1]))
 
         c = Chat(settings(history_ack_after_seconds=0.05))
         fake.script = [{"_delay": 0.3}]
         st = await c.say("@lisa quem me mandou o pdf do aluguel?")
-        acks = [x for x in c.evo.sent if "🔎" in x[1]]
+        acks = [x for x in c.evo.sent if is_ack(x[1])]
         check("a slow answer: exactly one note, then the answer",
               len(acks) == 1 and len(c.evo.sent) == 2 and c.evo.sent[0] is acks[0]
               and "Foi no grupo" in c.evo.sent[1][1])
         number, text, ack_id = acks[0] if acks else ("", "", "")
-        check("the note is framed, in his language, to the chat itself",
-              text == "*[Assistente IA do Marcelo]:*\n\n🔎 Procurando…" and number == "5511999990000", text)
+        body = text.split("\n\n", 1)[-1]
+        check("the note is framed, in his language, to the chat itself, like a secretary would say it",
+              text.startswith("*[Assistente IA do Marcelo]:*\n\n") and body in _ACK["new"]["pt"]
+              and number == "5511999990000", text)
+        check("no emoji, no bare 'searching'", "🔎" not in text and "Procurando" not in text, text)
         check("its id is recorded as an echo", c.deps.echoes.is_ours(OWNER_JID, ack_id))
-        check("it is not in the thread", "Procurando" not in thread_text(st))
+        check("it is not in the thread", body and body not in thread_text(st))
         check("the reasoning record says a note went out",
               any(e.get("acked") for e in c.events("reason") if e.get("domain") == "history"))
         calls = len(fake.calls)
@@ -738,17 +749,28 @@ async def h6_ack() -> None:
         c = Chat(settings(history_ack_after_seconds=0.05))
         fake.script = [{"_delay": 0.4, "lang": "en", "message": "It was in the fair group."}]
         await c.say("@lisa who sent me the lease pdf?")
-        acks = [x for x in c.evo.sent if "🔎" in x[1]]
+        acks = [x for x in c.evo.sent if is_ack(x[1])]
         check("a slower one still sends only one, in English",
-              len(acks) == 1 and acks[0][1] == "*[Marcelo's AI Assistant]:*\n\n🔎 Searching…",
-              str(acks))
+              len(acks) == 1 and acks[0][1].startswith("*[Marcelo's AI Assistant]:*\n\n")
+              and acks[0][1].split("\n\n", 1)[-1] in _ACK["new"]["en"], str(acks))
 
         c = Chat(settings(history_ack_after_seconds=0.05))
         fake.script = [{"_delay": 0.3, "lang": "es", "message": "Fue en el grupo de la feria."}]
         await c.say("@lisa quién me mandó el contrato?")
-        acks = [x for x in c.evo.sent if "🔎" in x[1]]
-        check("in Spanish, accents and all", len(acks) == 1 and acks[0][1].endswith("🔎 Buscando…"),
-              str(acks))
+        acks = [x for x in c.evo.sent if is_ack(x[1])]
+        check("in Spanish, accents and all",
+              len(acks) == 1 and acks[0][1].split("\n\n", 1)[-1] in _ACK["new"]["es"], str(acks))
+
+    # The wording itself: a follow-up in a search already under way is shorter; the same turn
+    # always says the same thing; different turns do not all say the same thing.
+    st_new = {"trace_id": "t-1"}
+    st_more = {"trace_id": "t-1", "history_notes": {"candidates": [{"chat": "x"}]}}
+    check("a new search says what she is about to do", _ack_text(st_new, "pt") in _ACK["new"]["pt"])
+    check("a follow-up is shorter", _ack_text(st_more, "pt") in _ACK["more"]["pt"])
+    check("the same turn, the same words", _ack_text(st_new, "pt") == _ack_text(dict(st_new), "pt"))
+    seen = {_ack_text({"trace_id": f"t-{i}"}, "pt") for i in range(40)}
+    check("she does not always say the same thing", len(seen) >= 2, str(seen))
+    check("an unknown language falls back to English", _ack_text(st_new, "fr") in _ACK["new"]["en"])
 
 
 # ============================ H7 — files ==================================================

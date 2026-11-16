@@ -155,9 +155,42 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
 
 # --- the agent kind (history search) -----------------------------------------------------
 
+# The note a slow search sends first, the way a secretary would answer before going to look: a new
+# search says what she is about to do, a follow-up in the same search is shorter. A few ways of
+# saying each, picked per turn, so she does not answer every question with the same words.
+_ACK = {
+    "new": {
+        "pt": ("Ok. Vou procurar no histórico e ver o que acho.",
+               "Certo, vou dar uma olhada nas suas conversas e já te conto.",
+               "Deixa comigo. Vou procurar aqui e te falo o que encontrar."),
+        "es": ("Ok. Voy a buscar en el historial y ver qué encuentro.",
+               "Claro, voy a revisar tus conversaciones y te cuento.",
+               "Déjamelo a mí. Busco y te digo qué encuentro."),
+        "en": ("Ok. I'll look through your history and see what I find.",
+               "Sure, let me go through your chats and I'll get back to you.",
+               "Leave it with me. I'll search and tell you what I find."),
+    },
+    "more": {
+        "pt": ("Ok, deixa eu ver.", "Certo, vou olhar.", "Tá, vou conferir e já te falo."),
+        "es": ("Ok, déjame ver.", "Claro, lo reviso.", "Vale, lo miro y te digo."),
+        "en": ("Ok, let me check.", "Sure, give me a moment.", "Let me look into that."),
+    },
+}
+
+
+def _ack_text(state: MessageState, lang: str | None) -> str:
+    """What the note says: a new search or a follow-up, in his language, one of a few ways — the
+    same one for the same turn (seeded by the trace id), so a test can predict it."""
+    import random
+
+    kind = "more" if state.get("history_notes") else "new"
+    texts = _ACK[kind]
+    options = texts.get((lang or "en").lower()[:2]) or texts["en"]
+    return random.Random(state.get("trace_id") or "").choice(options)
+
+
 # What she says herself, in code, around the search. Short on purpose: the agent writes the answers.
 _SAY = {
-    "ack": {"pt": "🔎 Procurando…", "es": "🔎 Buscando…", "en": "🔎 Searching…"},
     "self_only": {
         "pt": "Só busco no seu histórico na sua conversa com você mesmo.",
         "es": "Solo busco en tu historial en tu chat contigo mismo.",
@@ -220,7 +253,7 @@ async def _send_ack(state: MessageState, settings, *, evolution, echoes, trace: 
     tid, jid = state["trace_id"], state["remote_jid"]
     try:
         sent_id = await evolution.send_text(send_target(jid),
-                                            frame(_say("ack", lang), settings.owner_name, lang))
+                                            frame(_ack_text(state, lang), settings.owner_name, lang))
     except Exception as exc:  # a note that fails to go must not cost him the answer
         log.warning("history ack failed: %s", exc)
         sent_id = None
