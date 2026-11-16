@@ -597,6 +597,16 @@ async def p2_index(pg: PG) -> None:
     await idx.run_once()
     await idx.run_once()
     check("two more passes change nothing (idempotent)", before == await snapshot(conn))
+    other = HistoryIndexer(pg.dsn, settings=settings(), batch_size=5, pause_seconds=0)
+    await other.open()
+    async with await psycopg.AsyncConnection.connect(pg.dsn, autocommit=True) as holder:
+        await holder.execute("SELECT pg_advisory_lock(hashtext('lisa_history_indexer:lisa_search'))")
+        b = await other.run_once()
+        await holder.execute("SELECT pg_advisory_unlock(hashtext('lisa_history_indexer:lisa_search'))")
+    a = await other.run_once()
+    check("while another indexer is mid-pass, a second one skips its pass; then it runs",
+          "skipped" in b and "skipped" not in a and not a.get("errors"), f"{b} / {a}")
+    await other.aclose()
 
     # An edit arriving later rewrites its target; a re-read of the original does not undo it.
     await evo.msg(BRUNO_LID, None, mid="B10", ts=T0 + 52 * DAY, alt=BRUNO, mtype="protocolMessage",

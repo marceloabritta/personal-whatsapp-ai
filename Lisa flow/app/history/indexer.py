@@ -93,13 +93,14 @@ class HistoryIndexer:
         self._stats_all = True          # recount every chat on the first pass after a start
         self._dir_ready = False
         self.last_pass: dict = {}
+        self._lock_key = f"lisa_history_indexer:{self.schema}"
 
     # -- lifecycle ---------------------------------------------------------------------------
     async def open(self) -> None:
         from psycopg_pool import AsyncConnectionPool
 
         self._pool = AsyncConnectionPool(
-            self.dsn, min_size=1, max_size=2, open=False,
+            self.dsn, min_size=1, max_size=3, open=False,
             kwargs={"autocommit": True, "application_name": "lisa_history_indexer",
                     "options": "-c statement_timeout=60000 -c lock_timeout=10000"})
         await self._pool.open()
@@ -137,7 +138,20 @@ class HistoryIndexer:
 
     # -- one pass ----------------------------------------------------------------------------
     async def run_once(self) -> dict:
-        """One sync pass. Each step is independent: a failure is logged and the rest still run."""
+        """One sync pass, unless another indexer (the app's, or index_run by hand) is mid-pass:
+        a session advisory lock keeps two writers off the same cursor."""
+        async with self._pool.connection() as lock:
+            cur = await lock.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (self._lock_key,))
+            if not (await cur.fetchone())[0]:
+                self.last_pass = {"skipped": "another indexer is running"}
+                return self.last_pass
+            try:
+                return await self._pass()
+            finally:
+                await lock.execute("SELECT pg_advisory_unlock(hashtext(%s))", (self._lock_key,))
+
+    async def _pass(self) -> dict:
+        """Each step is independent: a failure is logged and the rest still run."""
         t0 = time.monotonic()
         stats: dict = {"ingested": 0, "pages": 0, "edits": 0, "aliases": 0, "transcripts": 0,
                        "voice_marked": 0, "names": 0, "chats": 0}
