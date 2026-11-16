@@ -435,13 +435,18 @@ def _as_blocks(content: Any) -> list[dict]:
 
 def _normalize(convo: Any) -> list[dict]:
     """The neutral thread as Anthropic messages: user/assistant alternating, starting and (for a
-    question to answer) ending with the user. Earlier assistant turns keep their text only."""
+    question to answer) ending with the user. Earlier assistant turns keep their text only.
+
+    Text only, on both sides. The thread is Lisa's view of his chat with himself, and with media on
+    the context pass puts the newest images and PDFs there (up to 8) as blocks: his photos, not the
+    question. The search reads files through open_file when it needs one; carried here they went
+    to the model on every hop of the loop. On 2026-11-16 eight photos made the first search's
+    request ~40k tokens bigger than the question needed, about three quarters of its cost. The
+    labelled transcript already marks each one ("[image]", "[PDF: name]"), so nothing is lost."""
     out: list[dict] = []
     for m in convo or []:
         role = "assistant" if _get(m, "role") in ("assistant", "ai") else "user"
-        blocks = _as_blocks(_get(m, "content"))
-        if role == "assistant":
-            blocks = [b for b in blocks if b.get("type") == "text"]
+        blocks = [b for b in _as_blocks(_get(m, "content")) if b.get("type") == "text"]
         if not blocks:
             continue
         if out and out[-1]["role"] == role:

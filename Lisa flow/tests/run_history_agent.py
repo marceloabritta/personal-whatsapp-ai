@@ -668,9 +668,32 @@ async def p13_convo():
     res, client, *_ = await turn([answer("ok")], convo=convo)
     m = client.requests[0]["messages"]
     check("leading assistant dropped, same-role turns merged",
-          [x["role"] for x in m] == ["user", "assistant", "user"] and len(m[0]["content"]) == 3)
-    check("images pass through; stray cache marks are stripped",
-          m[0]["content"][2]["type"] == "image" and all("cache_control" not in b for b in m[0]["content"]))
+          [x["role"] for x in m] == ["user", "assistant", "user"] and len(m[0]["content"]) == 2)
+    check("the chat's images and PDFs stay out of the search; stray cache marks are stripped",
+          all(b["type"] == "text" for x in m for b in x["content"])
+          and all("cache_control" not in b for b in m[0]["content"]))
+
+    # Lisa's thread with media on: the turn is the labelled transcript plus the newest photos. The
+    # search gets the transcript (which marks each photo) and none of the photos, on every hop.
+    photo = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "B" * 4000}}
+    pdf = {"type": "document", "title": "x.pdf",
+           "source": {"type": "base64", "media_type": "application/pdf", "data": "C" * 4000}}
+    convo = [{"role": "user", "content": [{"type": "text", "text": "Marcelo: [image]\nMarcelo: [PDF: x.pdf]\n"
+                                                                    "Marcelo: @lisa quem falou de Kestrel?"},
+                                          photo, photo, pdf]}]
+    res, client, *_ = await turn([tools_turn(("t1", "search_messages", {"terms": ["kestrel"]})),
+                                  answer("ok")], convo=convo)
+    sent = [b for req in client.requests for x in req["messages"] if x["role"] == "user"
+            for b in (x["content"] if isinstance(x["content"], list) else [])
+            if b.get("type") in ("image", "document")]
+    check("no photo or PDF from the chat on any hop", len(client.requests) == 2 and not sent,
+          f"{len(client.requests)} requests, {len(sent)} media blocks")
+    q = client.requests[0]["messages"][0]["content"]
+    check("the transcript's markers are still there", "[PDF: x.pdf]" in q[0]["text"] and "Kestrel" in q[0]["text"])
+    only_media = [{"role": "user", "content": [photo]}, {"role": "user", "content": "@lisa e isso?"}]
+    res, client, *_ = await turn([answer("ok")], convo=only_media)
+    check("a turn that was only a photo is skipped, the question still goes",
+          client.requests and client.requests[0]["messages"][-1]["content"][-1]["text"] == "@lisa e isso?")
 
 
 # ============================ the media seam ================================================

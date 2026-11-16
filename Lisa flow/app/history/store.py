@@ -67,6 +67,9 @@ def _clamp(n: Any, lo: int, hi: int, default: int) -> int:
 # refused). Reported as expired, so the agent does not spend a slow, failing download on it.
 VOICE_GONE_AFTER_SECONDS = 18 * 86400
 
+# How long coverage() reuses its last count (see coverage()).
+COVERAGE_TTL = 300.0
+
 
 def _voice_status(r: dict) -> Optional[str]:
     status = r.get("transcript")
@@ -84,6 +87,8 @@ class PgHistoryStore:
         self.timeout_ms = int(statement_timeout_ms)
         self.ext: Optional[str] = None
         self._pool: Any = None
+        self._cov: Optional[dict] = None
+        self._cov_at = 0.0
 
     # -- lifecycle ---------------------------------------------------------------------------
     async def open(self) -> None:
@@ -533,6 +538,18 @@ class PgHistoryStore:
             return None
 
     async def coverage(self) -> dict:
+        """What the index holds, as of at most COVERAGE_TTL ago. Every search asks for it before
+        its first model call, and counting it reads the whole table (~0.5 s on production);
+        a few minutes stale costs nothing — it is the prompt's "from June to today, N messages"."""
+        now = time.monotonic()
+        if self._cov is not None and now - self._cov_at < COVERAGE_TTL:
+            return dict(self._cov)
+        out = await self._coverage_now()
+        if out.get("n_messages"):
+            self._cov, self._cov_at = dict(out), now
+        return out
+
+    async def _coverage_now(self) -> dict:
         out = {"first_ts": 0, "last_ts": 0, "n_messages": 0, "n_chats": 0, "voice_total": 0,
                "voice_transcribed": 0, "complete": False}
         if self._pool is None:
