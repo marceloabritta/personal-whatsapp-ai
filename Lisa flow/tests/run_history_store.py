@@ -394,6 +394,11 @@ async def seed(evo: Evo) -> None:
             message={"albumMessage": {"expectedImageCount": 2}})
     await m("status@broadcast", "meu status Turuk", mid="X3", ts=T0 + 6 * DAY, part=ANA_LID)
     await m(ANA_LID, "outra instância Turuk", mid="X4", ts=T0 + 6 * DAY, alt=ANA, instance="inst-other")
+    # A row in a shape nobody planned for (remoteJid a number): skipped, never a stuck cursor.
+    await c.execute('INSERT INTO "Message" (id, key, "messageType", message, "messageTimestamp", '
+                    '"instanceId") VALUES (%s, %s, %s, %s, %s, %s)',
+                    (evo.cuid((T0 + 6 * DAY) * 1000), json.dumps({"id": "BAD1", "remoteJid": 12345}),
+                     "conversation", json.dumps({"conversation": "x"}), T0 + 6 * DAY, INSTANCE))
     # Edu: a 1:1 by phone only, whose Contact name is just his number.
     await m(EDU, "Edu: proposta de viagem", mid="E1", ts=T0 + 7 * DAY, push="Eduardo")
 
@@ -478,6 +483,7 @@ async def p2_index(pg: PG) -> None:
     ids = {r[0] for r in await all_("SELECT msg_id FROM lisa_search.messages")}
     check("skipped shapes, statuses and other instances stay out",
           not ids & {"X1", "X2", "X3", "X4", "A8"}, str(sorted(ids & {"X1", "X2", "X3", "X4", "A8"})))
+    check("a malformed row is skipped and the rows after it are indexed", "BAD1" not in ids and "E1" in ids)
     check("every message worth indexing is in", {"A1", "A6", "A7", "VOICE1", "C1", "G1", "O3", "E1"} <= ids,
           f"{n} rows")
     chats = {r[0]: r for r in await all_("SELECT chat, kind, name, aliases, n_messages, phone FROM lisa_search.chats")}
@@ -606,8 +612,10 @@ async def p2_index(pg: PG) -> None:
     await idx.aclose()
 
     print("P5 — never raises")
-    bad = HistoryIndexer(pg.dsn.replace(pg.dbname, "postgres") if pg.container else pg.dsn,
-                         schema="lisa_search_bad", settings=settings())
+    empty_db = pg.dbname + "_empty"
+    async with await psycopg.AsyncConnection.connect(pg.admin, autocommit=True) as c:
+        await c.execute(f"CREATE DATABASE {empty_db}")
+    bad = HistoryIndexer(pg.dsn.replace(pg.dbname, empty_db), settings=settings())
     try:
         await bad.open()
         await conn.execute("SELECT 1")
@@ -618,6 +626,8 @@ async def p2_index(pg: PG) -> None:
         check("an indexer on a database without Evolution's tables logs and returns", False, repr(exc))
     finally:
         await bad.aclose()
+        async with await psycopg.AsyncConnection.connect(pg.admin, autocommit=True) as c:
+            await c.execute(f"DROP DATABASE IF EXISTS {empty_db} WITH (FORCE)")
     ghost = PgHistoryStore(pg.dsn, schema="no_such_schema")
     await ghost.open()
     res = await ghost.search(terms=["x"])
@@ -786,6 +796,21 @@ async def p3_store(store, conn) -> None:
     check("get_message: the whole message", g and g["msg_id"] == "A10" and "investidor de Turuk" in g["text"]
           and g["chat"] == ANA and g["sender"] == "Ana Paula")
     check("get_message: unknown id", await store.get_message("NOPE") is None)
+    g = await store.get_message("A6")
+    check("get_message: a document names its file and type (the media seam relies on it)",
+          g and g["file_name"] == "Proposta Turuk.pdf" and g["mimetype"] == "application/pdf"
+          and g["kind"] == "document")
+    g = await store.get_message("VOICE2")
+    check("get_message: a voice note carries its length, type and transcript status",
+          g and g["seconds"] == 30 and g["mimetype"].startswith("audio/ogg") and g["transcript"] == "pending")
+    rc = await R(chat="5511000000000@s.whatsapp.net")
+    check("read_chat on an unknown chat: empty, n_messages 0, no raise",
+          rc["messages"] == [] and rc["chat"]["n_messages"] == 0 and not rc["more_before"])
+    res = await S(terms=["sao paulo"], before=T0 + 60)
+    check("before is exclusive, after inclusive", res["total"] == 0
+          and (await S(terms=["sao paulo"], after=T0 + 60))["total"] == 1)
+    res = await S(terms=[r"reuniao as 1[01]"], regex=True)
+    check("a regex written in folded form (lowercase, no accents) matches", res["total"] == 1)
     cov = await store.coverage()
     check("coverage", cov["first_ts"] == T0 and cov["voice_total"] == 5 and cov["voice_transcribed"] == 1
           and cov["n_chats"] >= 8 and cov["complete"] and cov["n_messages"] > 30, json.dumps(cov))
