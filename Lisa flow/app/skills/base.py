@@ -74,6 +74,13 @@ class Skill:
     # (the same object) when there is nothing to do. None = the model's word stands.
     revise: Optional[Callable] = None
 
+    # (result, state, settings) -> (result, note | None). A check on the model's output that code
+    # can settle but not repair: the result comes back with any check-only fields taken off, and a
+    # note when the output is wrong. With a note the reason node asks the model ONCE more, with
+    # the note as the last message, and uses that answer instead. Pure and synchronous. None = no
+    # such check.
+    recheck: Optional[Callable] = None
+
     # (state, ctx) -> str | None. A block appended to this skill's system prompt, built in code from
     # in-memory state on the turn it is used. MUST be pure and synchronous: it runs inside the reply
     # path, so anything that awaits or burns CPU here stalls every chat, not just this one.

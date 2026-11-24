@@ -14,6 +14,11 @@ from __future__ import annotations
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 _BOOL = {"type": "boolean"}
+# The weekday of the event's day, as she means it. Checked in code against "start"
+# (skills/weekday_check.py) and dropped before anything runs. REQUIRED on create and update, so it
+# adds nothing to the 24-optional cap (calendar sits at 23).
+_WEEKDAY = {"type": "string", "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                                       "Saturday", "Sunday"]}
 _STRARR = {"type": "array", "items": {"type": "string"}}
 
 
@@ -34,10 +39,11 @@ def _verb(required: list[str], properties: dict) -> dict:
 # against the live API, which rejects 25 with "too many optional parameters". duration_min
 # was dropped (use `end`) to keep margin under it; the handler still honours it if present.
 CREATE = _verb(
-    ["title", "start"],
+    ["title", "start", "weekday"],
     {
         "title": _STR,
         "start": _STR,            # ISO 8601 with offset, resolved by the model
+        "weekday": _WEEKDAY,      # the start's weekday; a check, never sent to Google
         "end": _STR,              # ISO 8601; omitted -> start + default_meeting_minutes
         "virtual": _BOOL,         # true -> Google Meet link; nulls location (video wins)
         "location": _STR,
@@ -66,9 +72,10 @@ FIND = _verb(
 
 # update — needs a resolved event_id; any create-like field may be patched.
 UPDATE = _verb(
-    ["event_id"],
+    ["event_id", "weekday"],
     {
         "event_id": _STR,
+        "weekday": _WEEKDAY,      # the event's weekday after the change; checked when "start" moves
         "title": _STR,
         "start": _STR,
         "end": _STR,

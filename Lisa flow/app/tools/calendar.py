@@ -334,6 +334,7 @@ HOW YOU WORK HERE — you do NOT write the confirmation, the result, or the agen
 
 ALWAYS
 - Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase. Read it from the day of the message that says it: every line carries the time it was sent, and the date rule at the end of these instructions applies here too.
+- Every create and update carries "weekday": the weekday of the event's day, in English. Take the date and its weekday together from the table of the days around today; never count days yourself. When someone named a weekday ("quinta", "Thursday"), that weekday is the day they mean. The system checks "weekday" against "start" and sends you back when they disagree. Whenever you write a weekday next to a date in a message, the same rule holds.
 - To create, change or cancel anything, just emit the action and leave "message" null. The system shows {owner_name} a confirmation and runs it for you when he agrees — you never mark anything approved, and you never re-send an action you already sent. Only `list` and `find` run without asking.
 - Two kinds of event. Set "all_day": true for whole-day things — birthdays, holidays, travel and trips, time off, a deadline with no hour, "block Thursday". Leave it out for anything with an hour.
 - On an all-day event write "start" as a bare date, "2026-09-14". On a timed one write a full ISO datetime with offset, "2026-09-14T15:00:00-03:00".
@@ -869,8 +870,11 @@ class GoogleCalendarService:
                     "summary": f"Google accepted the change but did not apply: {', '.join(missed)}.",
                     "data": {**view, "meet_link": meet}}
 
+        # `notified` rides on the result as it does for create and delete: without it the change
+        # card always said "the guests won't be notified", even when Google had just emailed them.
         return {"ok": True, "summary": f"Updated '{view['title']}' → {self._fmt_when(view)}",
-                "data": {**view, "meet_link": meet}}
+                "data": {**view, "meet_link": meet,
+                         "notified": self._send_updates(inp) != "none"}}
 
     @staticmethod
     def _unapplied(inp: dict, view: dict, meet: str | None) -> list[str]:

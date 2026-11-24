@@ -11,6 +11,7 @@ returns onto the same update, so `act` sends it like any reply."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -86,9 +87,13 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
         system=system, messages=convo, output_schema=schema, server_tools=server_tools,
         model=runtime["model"], effort=runtime["effort"], think=runtime["think"],
     )
+    skill = SKILLS.get(domain)
+    if skill is not None and skill.recheck is not None:
+        result = await _rechecked(result, skill, state, settings, reasoner=reasoner, trace=trace,
+                                  system=system, convo=convo, schema=schema,
+                                  server_tools=server_tools, runtime=runtime, domain=domain)
     latency_ms = int((time.monotonic() - t0) * 1000)
 
-    skill = SKILLS.get(domain)
     if skill is not None and skill.revise is not None:
         # This pass's address block counts as seen: it is what the model just read.
         seen_now = {**(state.get("seen_contacts") or {}), **seen_contacts}
@@ -151,6 +156,50 @@ async def reason_node(state: MessageState, *, reasoner, settings, trace: Trace,
     if not locked_lang and result.get("lang"):
         update["session_lang"] = result["lang"]
     return update
+
+
+_ECHOED = ("reasoning", "state", "message", "lang", "actions", "workflow", "call")
+
+
+def _add_usage(a: dict | None, b: dict | None) -> dict:
+    keys = set(a or {}) | set(b or {})
+    return {k: (a or {}).get(k, 0) + (b or {}).get(k, 0) for k in keys}
+
+
+async def _rechecked(result: dict, skill, state: MessageState, settings, *, reasoner,
+                     trace: Trace, system, convo, schema, server_tools, runtime,
+                     domain) -> dict:
+    """Skill.recheck on this pass, and ONE more model call when it finds the output wrong.
+
+    The second call sees the whole first answer, then the check's note, as the last two messages.
+    Its answer replaces the first one, and its tokens are added to the turn's. When the second
+    answer fails the check as well, it still stands, and the log says so: the card the system
+    composes writes the real weekday beside the date, so a mistake that survives is still on show."""
+    tid = state["trace_id"]
+    cleaned, note = skill.recheck(result, state, settings)
+    if not note:
+        return cleaned
+    trace.code(tid, node="reason", loop_id=state.get("loop_id"), domain=domain, recheck="sent_back",
+               note=note, was_actions=result.get("actions") or [], was_message=result.get("message"),
+               was_reasoning=result.get("reasoning"))
+    first = {k: result.get(k) for k in _ECHOED if result.get(k) is not None}
+    again_convo = [*convo, {"role": "assistant", "content": json.dumps(first, ensure_ascii=False)},
+                   {"role": "user", "content": note}]
+    second = await reasoner.respond(
+        system=system, messages=again_convo, output_schema=schema, server_tools=server_tools,
+        model=runtime["model"], effort=runtime["effort"], think=runtime["think"],
+    )
+    if (second.get("error_category") or "none") != "none" or second.get("stop_reason") == "refusal":
+        # The retry itself failed: the first answer goes ahead, and its card shows the real weekday.
+        trace.code(tid, node="reason", loop_id=state.get("loop_id"), domain=domain,
+                   recheck="retry_failed", stop_reason=second.get("stop_reason"))
+        return cleaned
+    usage = _add_usage(result.get("usage"), second.get("usage"))
+    cleaned2, still = skill.recheck(second, state, settings)
+    if still:
+        trace.code(tid, node="reason", loop_id=state.get("loop_id"), domain=domain,
+                   recheck="still_wrong", note=still)
+    return {**cleaned2, "usage": usage}
 
 
 # --- the agent kind (history search) -----------------------------------------------------
