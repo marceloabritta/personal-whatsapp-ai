@@ -87,8 +87,10 @@ def unit_checks() -> None:
           {_task_const(b): set(b["required"]) for b in _branches(cal)}["calendar.remember"]
           == {"task", "name", "email"})
     req = {_task_const(b): set(b["required"]) for b in _branches(cal)}
-    check("create requires task+title+start", req["calendar.create"] == {"task", "title", "start"})
-    check("update requires task+event_id", req["calendar.update"] == {"task", "event_id"})
+    # `weekday` is a check on the model's date (skills/weekday_check.py), dropped before anything runs.
+    check("create requires task+title+start+weekday",
+          req["calendar.create"] == {"task", "title", "start", "weekday"})
+    check("update requires task+event_id+weekday", req["calendar.update"] == {"task", "event_id", "weekday"})
     create = next(b for b in _branches(cal) if _task_const(b) == "calendar.create")
     check("optional 'end' is plain-typed, not null-unioned",
           create["properties"]["end"] == {"type": "string"})

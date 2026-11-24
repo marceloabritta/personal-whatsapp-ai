@@ -458,6 +458,19 @@ def _contacts_first(result: dict, state: dict, settings) -> dict:
                                              "reason": f"need {guest}'s email"}]}}
 
 
+def calendar_recheck(result: dict, state: dict, settings):
+    """Every weekday she wrote must be its date's (skills/weekday_check.py). Returns the result
+    without the check-only `weekday` field, and the note that sends her back when one is wrong."""
+    from datetime import date
+
+    from ..prompt import today_in
+    from .weekday_check import correction, mismatches, strip_weekday
+
+    today = date.fromisoformat(today_in(getattr(settings, "calendar_timezone", "UTC")))
+    found = mismatches(result, today)
+    return strip_weekday(result), (correction(found) if found else None)
+
+
 def calendar_resolve_gate(verb: str, inputs: dict, state: dict):
     """(patched_inputs, error) — update/delete must target an event surfaced by a prior search
     in THIS loop. Moved verbatim out of the execute node, which used to hardcode it; behaviour
@@ -515,6 +528,7 @@ CALENDAR = Skill(
                     ("busy_check_enabled", BUSY_GUIDANCE)],
     calls={"contacts"},
     revise=calendar_revise,
+    recheck=calendar_recheck,
     # Local, short, no live-web hops → the fast lane: Sonnet, medium effort, no thinking.
     model="claude-sonnet-5",
     effort="medium",
