@@ -158,16 +158,19 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
             guidance = guidance + "\n" + extra
     if called_by:
         context_block = (context_block or "") + called_by_block(owner, called_by)
+    targets = callable_skills(domain, settings, skills)
     return build_system_prompt(
         owner, settings.primary_tag,
-        guidance=guidance.format(owner_name=owner),
+        # A guidance line that leans on another skill names it only when this one can call it.
+        guidance=guidance.format(
+            owner_name=owner,
+            found_by_contacts=" and none found by the contacts skill" if "contacts" in targets else ""),
         describe=skill.describe.format(owner_name=owner),
         has_actions=bool(skill.enabled_verbs(settings)),
         session_lang=session_lang,
         context_block=context_block,
         tz_name=getattr(settings, "calendar_timezone", "UTC"),
-        call_targets=[(t, skills[t].describe.format(owner_name=owner))
-                      for t in callable_skills(domain, settings, skills)],
+        call_targets=[(t, skills[t].describe.format(owner_name=owner)) for t in targets],
         sees_media=bool(getattr(settings, "media_enabled", False)),
         called_for=called_for,
     )

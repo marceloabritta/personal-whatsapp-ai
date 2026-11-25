@@ -42,7 +42,7 @@ from app.skills import (  # noqa: E402
     render_policies, resolve_gates, routable, side_effect_verbs, system_prompt_for,
 )
 from app.skills.contacts import (  # noqa: E402
-    contacts_context, contacts_matcher, contacts_resolve_gate, problem_with,
+    contacts_context, contacts_matcher, contacts_resolve_gate, problem_with, resolve_target,
 )
 from app.skills.contacts_format import (  # noqa: E402
     compose_create, compose_delete, compose_update, fmt_update,
@@ -52,9 +52,10 @@ from app.skills.router import route_domain  # noqa: E402
 from app.state import HANDOFF_MARK  # noqa: E402
 from app.threads import make_thread_id  # noqa: E402
 from app.tools.contacts import (  # noqa: E402
-    ContactsService, describe_person, mask_email, mask_phone, person_view, unmask_changes,
+    ContactsService, describe_person, mask_email, mask_phone, person_view, public_id, unmask_changes,
 )
 from app.tools.people import ChangeError, GooglePeople, build_update, same_value  # noqa: E402
+from app.tools.people import view as people_view  # noqa: E402
 from app.trace import build_trace  # noqa: E402
 from run_step3 import StubCalendar, StubReasoner, _invoke  # noqa: E402
 
@@ -1598,6 +1599,99 @@ async def rest_checks() -> None:
     check("a called skill hands back in any language", st.get("skill_stack") == [] and domains_called(c)[-1] == "calendar", str(domains_called(c)))
 
 
+# --- a learned card's id ------------------------------------------------------------------------
+#
+# Directory keys a card she only knows herself as "learned/<address>". Printed as it is, that id put
+# the address in front of the model in exactly the chats where the email field next to it was masked.
+
+LEARNED_RN = "learned/zuleica@example.net"
+LEARNED_MAIL = "zuleica@example.net"
+
+
+def learned_row(rn=LEARNED_RN, name="Zuleica Prado", email=LEARNED_MAIL) -> dict:
+    return {"resource_name": rn, "name": name, "emails": [email], "phones": [], "nicknames": [],
+            "source": LEARNED, "preferred": None, "used_at": None}
+
+
+def _shown_to_model(c) -> str:
+    """Everything the model was handed this run: every system prompt and every message."""
+    return "\n".join(str(call.get("system")) + "\n" + "\n".join(
+        str(m.get("content")) for m in call.get("messages") or []) for call in c.stub.calls)
+
+
+async def learned_id_checks() -> None:
+    print("\na learned card's id")
+    alias = public_id(LEARNED_RN)
+    check("a learned card goes by an alias with no address in it",
+          alias.startswith("learned/") and "@" not in alias and "zuleica" not in alias, alias)
+    check("the same alias every time", public_id(LEARNED_RN) == alias)
+    check("two learned cards get two aliases", public_id("learned/other@example.net") != alias)
+    check("a Google id is shown as it is", public_id("people/c123") == "people/c123")
+
+    view = person_view(learned_row(), visible=False)
+    line = describe_person(view)
+    check("a masked learned card names no address anywhere on its line",
+          LEARNED_MAIL not in line and "zuleica@" not in line and f"[{alias}]" in line, line)
+    check("its id still is the real one, for the writes", view["resource_name"] == LEARNED_RN)
+    check("shown in full, the line carries the alias too",
+          f"[{alias}]" in describe_person({**view, "visible": True}))
+
+    seen = {LEARNED_RN: view, "people/a": {"resource_name": "people/a", "name": "Ana Silva"}}
+    check("the alias resolves to the real id", resolve_target({"contact_id": alias}, {"seen_people": seen}) == LEARNED_RN)
+    check("so does the real id", resolve_target({"contact_id": LEARNED_RN}, {"seen_people": seen}) == LEARNED_RN)
+    check("an alias of a card nobody surfaced resolves to nothing",
+          resolve_target({"contact_id": public_id("learned/x@example.net")}, {"seen_people": seen}) is None)
+    patched, err = contacts_resolve_gate("delete", {"contact_id": alias}, {"seen_people": seen})
+    check("the gate hands the handler the real id", err is None and patched["contact_id"] == LEARNED_RN, str(err))
+
+    # find, in a chat the person is not in
+    c = Chat([person("people/f", "Felipe Dias", emails=["felipe@x.com"], phones=["+5511992890847"])])
+    c.directory.load([{**people_view(p), "preferred": None, "used_at": None} for p in c.google.db.values()]
+                     + [learned_row()], ready=True)
+    check("the harness holds the learned card", c.directory.get(LEARNED_RN) is not None)
+    # Routed by "contato": a calendar turn shows the addresses of the people it names on purpose
+    # (Directory.block), since an invite hands them to the room anyway.
+    await c.say("@lisa qual o email do contato da zuleica prado?", script=[
+        {"lang": "pt", "actions": [{"task": "contacts.find", "query": "zuleica prado"}]},
+        {"lang": "pt", "message": "Esse eu só te passo no seu chat comigo."}])
+    found = c.stub.calls[-1]["messages"][-1]["content"]
+    check("find in someone else's chat shows the card under its alias",
+          f"[{alias}]" in found and "z***@e***.net" in found, found)
+    check("and nowhere in what the model saw is the address", LEARNED_MAIL not in _shown_to_model(c))
+
+    # the address-book block, when the owner names her
+    block = (contacts_context({"from_me": True, "turn_text": "@lisa apaga o contato da zuleica prado",
+                               "phone": "5511992890847", "participant_phones": [], "participants": []},
+                              {"directory": c.directory, "settings": c.settings}) or {}).get("block") or ""
+    check("the block lists her under the alias, with no address",
+          f"[{alias}]" in block and LEARNED_MAIL not in block, block)
+
+    # an update through the alias: the write runs, and makes her a real card
+    await c.say("@lisa poe o telefone 11 91234-5678 no contato da zuleica prado", script=[
+        {"lang": "pt", "actions": [{"task": "contacts.find", "query": "zuleica prado"}]},
+        {"lang": "pt", "actions": [{"task": "contacts.update", "contact_id": alias, "changes": [
+            {"field": "phone", "op": "add", "old": "", "new": "11 91234-5678"}]}]}])
+    check("an update by alias gets its card", "Zuleica Prado" in c.last() and LEARNED_MAIL not in c.last(), c.last())
+    await c.say("sim", script=[])
+    made = c.google.creates[-1] if c.google.creates else {}
+    check("and on his yes it is written: what she knew, plus the change",
+          made.get("emailAddresses") == [{"value": LEARNED_MAIL}] and bool(made.get("phoneNumbers")), str(made))
+    check("the learned row gives way to the real card", c.directory.get(LEARNED_RN) is None)
+    check("still nothing in front of the model holds the address", LEARNED_MAIL not in _shown_to_model(c))
+
+    # a delete through the alias
+    c = Chat([])
+    c.directory.load([learned_row()], ready=True)
+    await c.say("@lisa apaga o contato da zuleica prado", script=[
+        {"lang": "pt", "actions": [{"task": "contacts.find", "query": "zuleica prado"}]},
+        {"lang": "pt", "actions": [{"task": "contacts.delete", "contact_id": alias}]}])
+    check("a delete by alias asks on its own card", "Apagar este contato?" in c.last()
+          and LEARNED_MAIL not in c.last(), c.last())
+    await c.say("apaga", script=[])
+    check("and deletes it", c.directory.get(LEARNED_RN) is None and LEARNED_RN in c.store.deleted, str(c.store.deleted))
+    check("nothing in front of the model held the address", LEARNED_MAIL not in _shown_to_model(c))
+
+
 async def main() -> int:
     merge_checks()
     client_checks()
@@ -1629,6 +1723,7 @@ async def main() -> int:
     await profile_checks()
     await value_checks()
     await rest_checks()
+    await learned_id_checks()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

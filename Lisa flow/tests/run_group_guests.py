@@ -231,9 +231,9 @@ def the_contacts_call() -> None:
     check("the request is read only by the skill it was sent to",
           "Caio Teixeira" not in (elsewhere.get("block") or ""), elsewhere.get("block") or "")
     stranger = contacts_context({**called, "participants": [{"phone": CAIO, "name": "Ana Souza"}]}, s) or {}
-    # The field, not the whole line: a learned card's id is "learned/<address>" (pre-existing).
+    # The whole block: a learned card is shown under an alias, not its "learned/<address>" id.
     check("a linked card under someone else's name stays masked",
-          f"email: {CAIO_MAIL}" not in (stranger.get("block") or ""), stranger.get("block") or "")
+          CAIO_MAIL not in (stranger.get("block") or ""), stranger.get("block") or "")
 
 
 if __name__ == "__main__":
