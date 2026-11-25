@@ -5,7 +5,9 @@ Only this can show that Google agrees with the fake, and that the model chooses 
 and propose as its prompts ask.
 
 WHAT IT TOUCHES. It creates one card, "Zeferino Testolino", with an example.com address, and every
-write in this file targets that card. It deletes the card at the end, even after a failure. It reads
+write in this file targets that card. It deletes the card at the end, even after a failure. A second
+person, "Quitéria Testolina", exists only in Lisa's memory for the run (an in-memory store), never in
+Google. It reads
 the rest of the book to search it, and writes nothing else. The calendar is a stub, so nothing is booked,
 and WhatsApp is a fake, so nothing is sent. The delete's copy goes to an in-memory store.
 
@@ -42,6 +44,7 @@ from app.graph import build_graph  # noqa: E402
 from app.reasoning import build_reasoner  # noqa: E402
 from app.sessions import InMemorySessions  # noqa: E402
 from app.skills import confirm_policies, render_policies, resolve_gates, side_effect_verbs  # noqa: E402
+from app.skills.contacts import resolve_target  # noqa: E402
 from app.threads import make_thread_id  # noqa: E402
 from app.tools.contacts import ContactsService  # noqa: E402
 from app.tools.people import GooglePeople, card_view  # noqa: E402
@@ -54,6 +57,9 @@ STAMP = int(time.time())
 NAME = "Zeferino Testolino"
 OLD = f"zeferino.{STAMP}@example.com"
 NEW = f"zeferino.novo.{STAMP}@example.com"
+# A card she only knows herself: in her memory (an in-memory store here), never in Google.
+LEARNED_NAME = "Quitéria Testolina"
+LEARNED_MAIL = f"quiteria.{STAMP}@example.com"
 
 PASS = FAIL = 0
 
@@ -135,16 +141,34 @@ def google_checks(gp: GooglePeople) -> None:
 
 # --- the real model, on the real graph -------------------------------------------------------
 
+class _Recorder:
+    """The real reasoner, keeping a copy of everything it is handed, so a check can say what the
+    model was shown and not just what she sent."""
+
+    def __init__(self, inner, shown: list) -> None:
+        self._inner = inner
+        self._shown = shown
+
+    async def respond(self, **kw):
+        self._shown.append(str(kw.get("system")) + "\n" + "\n".join(
+            str(m.get("content")) for m in kw.get("messages") or []))
+        return await self._inner.respond(**kw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class Chat:
     def __init__(self, s: Settings, gp: GooglePeople, directory: Directory) -> None:
         # Stamped now: the fixed past stamp the offline suite uses turns "sexta" into a day gone.
         self.evo = ChatEvolution(start_ts=int(time.time()))
         self.cal = StubCalendar()
+        self.shown: list = []
         contacts = ContactsService(s)
         contacts.directory = directory
         self.deps = Deps(settings=s, evolution=self.evo, sessions=InMemorySessions(ttl=300),
                          echoes=InMemoryEchoes(ttl=3600), trace=build_trace(),
-                         reasoner=build_reasoner(s), redis=None,
+                         reasoner=_Recorder(build_reasoner(s), self.shown), redis=None,
                          tools={"calendar": self.cal, "contacts": contacts},
                          confirm_policies=confirm_policies(), render_policies=render_policies(),
                          resolve_gates=resolve_gates(), side_effects=side_effect_verbs(),
@@ -243,6 +267,33 @@ async def model_checks(s: Settings, gp: GooglePeople) -> None:
         if not deleted:
             gp.delete_contact(rn)
             print("  (the throwaway card was removed in cleanup)")
+
+    # 5. A card she only knows herself, in a chat its person is not in. Its id is
+    #    "learned/<address>", so she is shown it under an alias, and the alias must still delete it.
+    await directory._apply_learned({"email": LEARNED_MAIL, "name": LEARNED_NAME})
+    lrn = f"learned/{LEARNED_MAIL}"
+    check("the learned card is in her memory", directory.get(lrn) is not None)
+    try:
+        c = Chat(s, gp, directory)
+        await c.say("@lisa qual o email do contato da quitéria testolina?")
+        check("asked for a hidden address, she does not give it", LEARNED_MAIL not in c.last(), c.last())
+        check("and the model was never shown it",
+              c.shown and not any(LEARNED_MAIL in t for t in c.shown), str(len(c.shown)))
+        c = Chat(s, gp, directory)
+        st = await c.say("@lisa apaga o contato da quitéria testolina")
+        pending = st.get("pending_action") or {}
+        check("a delete of the learned card gets a card",
+              pending.get("task") == "contacts.delete" and resolve_target(pending, st) == lrn,
+              f"{pending} | {c.last()}")
+        check("which names no address", LEARNED_MAIL not in c.last(), c.last())
+        await c.say("apaga")
+        check("her card's own word deletes it, by the alias",
+              directory.get(lrn) is None and lrn in store.deleted, c.last())
+        check("and the model was never shown the address", not any(LEARNED_MAIL in t for t in c.shown))
+    finally:
+        if directory.get(lrn) is not None:
+            await directory.drop(lrn)
+            print("  (the learned card was removed in cleanup)")
 
 
 async def main() -> int:
