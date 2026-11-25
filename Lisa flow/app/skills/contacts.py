@@ -25,7 +25,8 @@ import unicodedata
 from ..intent import _normalize as _intent_normalize, classify_confirmation
 from ..nodes.confirm import _EMAIL_RE, _loop_text
 from ..tools.contacts import (
-    DESCRIBE, GUIDANCE, ContactsService, describe_person, person_view, unmask_changes, values_of,
+    DESCRIBE, GUIDANCE, ContactsService, describe_person, person_view, public_id, unmask_changes,
+    values_of,
 )
 from ..tools.contacts_schemas import CONTACTS_TASK_SCHEMAS
 from .base import Skill
@@ -139,11 +140,17 @@ def _fold(text: str) -> str:
 def resolve_target(action: dict, state: dict) -> str | None:
     """Which surfaced card this action means. Used by BOTH the composer and the gate, so the card
     named in the question is the card that gets written. Accepts a name where an id was expected,
-    the slip setup also tolerates, but only when exactly one surfaced card has it."""
+    the slip setup also tolerates, but only when exactly one surfaced card has it.
+
+    The model knows a learned card only by its alias (`public_id`), which maps back here to the id
+    the mirror keys it by."""
     seen = state.get("seen_people") or {}
     key = ((action or {}).get("contact_id") or "").strip()
     if key in seen:
         return key
+    aliased = [rn for rn in seen if public_id(rn) == key]
+    if len(aliased) == 1:
+        return aliased[0]
     wanted = _fold(key)
     hits = [rn for rn, v in seen.items() if wanted and _fold(v.get("name")) == wanted]
     return hits[0] if len(hits) == 1 else None

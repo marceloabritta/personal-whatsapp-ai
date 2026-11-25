@@ -22,6 +22,7 @@ The prose below is the model's whole briefing for this domain."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any
 
@@ -91,6 +92,18 @@ def mask(field: str, value: str) -> str:
     return "•••"
 
 
+def public_id(resource_name: str) -> str:
+    """The id the model is shown for a card. A Google id (people/c123) says nothing about anyone, so
+    it is shown as it is. A learned card's id is `learned/<address>` (Directory keys its mirror row and
+    the identity links on it), and printing that would hand the model the address that masking just
+    hid. So a learned card goes by a hash of its id instead: the same on every pass and every restart,
+    and mapped back to the real id by `resolve_target`, the only way an id comes back in."""
+    rn = resource_name or ""
+    if rn.startswith(f"{LEARNED}/"):
+        return f"{LEARNED}/{hashlib.sha256(rn.encode('utf-8')).hexdigest()[:10]}"
+    return rn
+
+
 def person_view(contact: dict, *, visible: bool, card: dict | None = None,
                 self_chat: bool = False) -> dict:
     """A card as this loop remembers it. Holds the real values, for the code that composes a
@@ -127,7 +140,7 @@ def person_view(contact: dict, *, visible: bool, card: dict | None = None,
 def describe_person(view: dict, *, reveal_emails: bool = False) -> str:
     """One line for the model. The ONLY place a card turns into text it reads, so this is the rail."""
     show = bool(view.get("visible"))
-    parts = [f"- {view.get('name') or '(unnamed)'} [{view.get('resource_name')}]"]
+    parts = [f"- {view.get('name') or '(unnamed)'} [{public_id(view.get('resource_name'))}]"]
     if view.get("company"):
         parts.append(f"company: {view['company']}")
     emails = view.get("emails") or []
