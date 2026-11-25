@@ -223,7 +223,7 @@ class ContactsService:
         found = await d.search(query)
         shown = found[:_SHOW]
         cards = await self._whole_cards(shown) if len(found) <= _READ_WHOLE else {}
-        members = d.member_ids(inputs.get("_phone"), inputs.get("_phones"))
+        members = d.member_ids(inputs.get("_phone"), inputs.get("_phones"), inputs.get("_names"))
         self_chat = bool(inputs.get("_self_chat"))
         views = {c["resource_name"]: person_view(
                      c, visible=self_chat or c["resource_name"] in members,

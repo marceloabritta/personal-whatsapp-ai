@@ -156,6 +156,7 @@ class Settings(BaseSettings):
     contacts_sync_seconds: float = 900.0      # incremental People sync cadence
     contacts_full_resync_hours: float = 96.0  # forced full sweep, before a sync token can expire
     contacts_max_in_prompt: int = 5           # contacts rendered into one turn's block
+    group_guests_max: int = 6                 # a group this small lists its people as likely guests
     contacts_default_region: str = "BR"       # phonenumbers parse region for bare numbers
     contacts_write_attempts: int = 3          # OUTBOX retries; the API call itself is always 1
     # Q1: Lisa may create people — but only on a phone-confirmed identity (see Directory).

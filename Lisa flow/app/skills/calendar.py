@@ -186,6 +186,43 @@ def chat_line(owner: str, partner: dict | None, name: str | None, *,
     return line
 
 
+def group_room(state: dict, settings, d) -> list:
+    """[(participant, card or None)] for a small group, or [] when this is not one.
+
+    A group counts as small while at most `group_guests_max` people besides the owner have written
+    in it. Past that, "the people here" is not a guest list, and only the people he names are."""
+    if state.get("chat_kind") != "group" or d is None or not getattr(d, "ready", False):
+        return []
+    people = list(state.get("participants") or [])
+    if not people or len(people) > getattr(settings, "group_guests_max", 6):
+        return []
+    return d.room(people)
+
+
+def group_line(owner: str, room: list) -> str | None:
+    """The line that tells the model it is in a small group, and who is in it. None for no room.
+
+    The calendar instructions make the people of a small group the guests of a meeting he asks for
+    there without naming anyone (GUIDANCE, "WHO it is with"). In a group where he and two others
+    agreed "15h30" and he said "@lisa agendar google meet", neither of them was named in
+    the text: their names were only the transcript's speaker labels, he called one of them by a
+    nickname and the other by an @-mention. She had both addresses and asked him for them."""
+    if not room:
+        return None
+    parts = []
+    for p, card in room:
+        who = f'"{p.get("name")}"' if p.get("name") else f"the person writing from {p.get('phone')}"
+        if card is None:
+            parts.append(f"{who} (no card in {owner}'s contacts has their number)")
+        else:
+            parts.append(f'{who} (in the address book: "{card.get("name") or "(unnamed)"}", the line '
+                         f"marked IN THIS CHAT below)")
+    others = len(room)
+    return (f"\n\nThis chat is a group of {others + 1}: {owner} and the {others} "
+            f"{'person' if others == 1 else 'people'} who have written in it: "
+            + "; ".join(parts) + ".")
+
+
 def calendar_context(state: dict, ctx: dict):
     """The prompt blocks for this turn — the owner's presets, who a one-to-one chat is with, and
     the address book — plus what the address book surfaced.
@@ -201,20 +238,26 @@ def calendar_context(state: dict, ctx: dict):
     pblock = presets_block(ctx.get("presets"), owner) or ""
 
     partner = None
+    room: list = []
     if one_to_one(state, settings):
         partner = d.chat_partner(state.get("phone")) if ready else None
         pblock += chat_line(owner, partner, state.get("partner_name"),
                             book_ready=ready, phone=state.get("phone")) or ""
+    else:
+        room = group_room(state, settings, d)
+        pblock += group_line(owner, room) or ""
 
-    book = _address_book_context(state, ctx, partner)
+    book = _address_book_context(state, ctx, partner, room)
     if book is None:
         return pblock or None
     return {"block": pblock + book["block"], "state": book["state"]}
 
 
-def _address_book_context(state: dict, ctx: dict, partner: dict | None = None):
+def _address_book_context(state: dict, ctx: dict, partner: dict | None = None,
+                          room: list | None = None):
     """The address-book block and the contacts it surfaced, or None. `partner` is the card of the
-    person a one-to-one chat is with: always listed, and marked as such."""
+    person a one-to-one chat is with: always listed, and marked as such. `room` is `group_room`'s:
+    the cards of a small group's people, listed first and marked IN THIS CHAT."""
     d = ctx.get("directory")
     settings = ctx.get("settings")
     if d is None or not getattr(d, "ready", False):
@@ -232,6 +275,12 @@ def _address_book_context(state: dict, ctx: dict, partner: dict | None = None):
         # `mentions` lists the chat's own card unless stronger hits filled the limit. The person
         # the meeting is with by default is the last one to cut.
         found = [(partner, "phone"), *found]
+    here = {card["resource_name"]: p.get("name") or "" for p, card in room or [] if card is not None}
+    if here:
+        # The people in the room come first, whatever else the scan surfaced: they are who a
+        # meeting arranged here is with. One of them it found as an ambiguous name is theirs now.
+        members = [(card, "member") for p, card in room if card is not None]
+        found = members + [(c, why) for c, why in found if c.get("resource_name") not in here]
     if not found:
         return None
     seen = {}
@@ -242,7 +291,7 @@ def _address_book_context(state: dict, ctx: dict, partner: dict | None = None):
             seen[e.lower()] = {"name": c.get("name") or "",
                                "resource_name": c.get("resource_name") or "",
                                "n_emails": len(c.get("emails") or [])}
-    block = d.block(found, settings.owner_name, partner=partner_rn)
+    block = d.block(found, settings.owner_name, partner=partner_rn, room=here or None)
     if not block.strip():
         return None
     return {"block": block, "state": {"seen_contacts": seen}}

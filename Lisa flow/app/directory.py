@@ -441,14 +441,71 @@ class Directory:
         found = self._resolve_phone(phone)
         return found[0] if len(found) == 1 else None
 
-    def member_ids(self, phone: Optional[str], phones: Optional[list]) -> set:
+    def member_ids(self, phone: Optional[str], phones: Optional[list],
+                   names: Optional[dict] = None) -> set:
         """The cards of the people in this chat: whose details may be read out in it. A number on
-        two cards names neither, the same rule `_resolve_phone` applies."""
+        two cards names neither, the same rule `_resolve_phone` applies.
+
+        `names` ({phone: the WhatsApp name they write under}) lets a linked card count too, through
+        `linked_card`: a card with no number on it, that a booking tied to this number, whose name is
+        the one this person writes under."""
         out: set = set()
         for p in ([phone] if phone else []) + list(phones or []):
-            cards = self.by_phone(p)
-            if len(cards) == 1:
-                out.add(cards[0]["resource_name"])
+            card = self.member_card(p, (names or {}).get(p))
+            if card is not None:
+                out.add(card["resource_name"])
+        return out
+
+    def member_card(self, phone: str, name: Optional[str] = None) -> Optional[dict]:
+        """The card of the person writing from `phone`, or None when the book cannot say.
+
+        The card with this number on it, when exactly one has it. Otherwise `linked_card`."""
+        cards = self.by_phone(phone)
+        if len(cards) == 1:
+            return cards[0]
+        if cards:
+            return None  # a number on two cards names neither
+        return self.linked_card(phone, name)
+
+    def linked_card(self, phone: str, name: Optional[str]) -> Optional[dict]:
+        """The card a booking linked this number to, when that card is plainly this person's.
+
+        A link says "a booking from this chat used that address", and a booking can have several
+        guests, so on its own it may point at somebody else (see `by_phone`). It counts only when
+        the card's first name is the first name of `name`, what this person calls themselves on
+        WhatsApp. That is the case of an address Lisa learned in a one-to-one chat: the card she
+        keeps has no number, and the link from that chat is the only thing tying it to its owner.
+        Without it, someone she had booked eight times was a stranger to her in a group."""
+        if not self._ready or not phone:
+            return None
+        want = _name_tokens(name or "")
+        if not want:
+            return None
+        e164 = to_e164(phone, self.s.contacts_default_region)
+        if not e164:
+            return None
+        for k in match_keys(e164):
+            rn = self._links.get(k)
+            card = self._contacts.get(rn) if rn else None
+            if card is not None:
+                return card if _given(card) == want[0] else None
+        return None
+
+    def room(self, participants: Optional[list]) -> list:
+        """[(participant, card or None)] for the people who have written in this chat, in order.
+
+        `participants` is `state["participants"]`: [{"phone", "name"}], the owner left out. The card
+        is `member_card`'s: the person's own, or None when the book has nobody for that number."""
+        if not self._ready:
+            return []
+        out: list = []
+        seen: set = set()
+        for p in participants or []:
+            phone = (p or {}).get("phone")
+            if not phone or phone in seen:
+                continue
+            seen.add(phone)
+            out.append((p, self.member_card(phone, p.get("name"))))
         return out
 
     async def search(self, query: str) -> list:
@@ -457,7 +514,8 @@ class Directory:
 
         return await asyncio.to_thread(search_contacts, list(self._contacts.values()), query)
 
-    def block(self, found: list, owner: str, *, partner: Optional[str] = None) -> str:
+    def block(self, found: list, owner: str, *, partner: Optional[str] = None,
+              room: Optional[dict] = None) -> str:
         """The prompt snippet. Pure string building; empty list -> "".
 
         `partner` is the resource name of the person a one-to-one chat is with. Their line is
@@ -469,6 +527,10 @@ class Directory:
         read out to people who never had it — but the person being invited receives the invitation,
         which carries the guest list, so the room learns the address anyway the moment the meeting
         is booked. The filter bought no privacy and cost Lisa the address she was asked for.
+
+        `room` is {resource_name: WhatsApp name} for the people in a group who have written in it.
+        Their lines are marked, so a meeting "with us" has its guests' cards and addresses in front
+        of her (a `"member"` entry in `found` is one of them, surfaced for being here).
         """
         if not found:
             return ""
@@ -498,8 +560,11 @@ class Directory:
                              f"{' | '.join(others)}")
             else:
                 lines.append(f"- {name} — {' | '.join(emails)}  (MORE THAN ONE: ask which)")
-            if why == "name":
+            here = (room or {}).get(c.get("resource_name"))
+            if why == "name" and here is None:
                 lines[-1] += "  [named in the chat, identity not confirmed — confirm before using]"
+            if here is not None:
+                lines[-1] += f'  [IN THIS CHAT: writes here as "{here}"]'
             if partner and c.get("resource_name") == partner:
                 lines[-1] += f"  [THIS CHAT: the person {owner} is talking to]"
         if ask:
