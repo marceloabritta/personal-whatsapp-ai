@@ -69,6 +69,21 @@ def _from_owner(state: dict) -> bool:
 
 # --- the per-turn block -------------------------------------------------------------------
 
+def _names(state: dict) -> dict:
+    """{phone: the WhatsApp name they write under}, for `Directory.member_ids`."""
+    return {p["phone"]: p.get("name") for p in state.get("participants") or [] if p.get("phone")}
+
+
+def _asked_for(state: dict) -> str:
+    """What the skill that called this one asked for, while that call is the one being answered.
+
+    `handoff` pushes the caller's frame with the request as its `goal` and hands the turn here."""
+    stack = state.get("skill_stack") or []
+    if not stack or state.get("domain") != "contacts":
+        return ""
+    return str(stack[-1].get("goal") or "")
+
+
 def contacts_context(state: dict, ctx: dict):
     """The cards this conversation points at, plus what it surfaced. Pure and synchronous, like the
     calendar block: `mentions` and `member_ids` are dictionary lookups, and the deliberate, slower
@@ -80,9 +95,15 @@ def contacts_context(state: dict, ctx: dict):
     if not _from_owner(state):
         return None  # someone else is talking: there is nothing here they should be answered from
     phone, phones = state.get("phone"), state.get("participant_phones")
-    members = d.member_ids(phone, phones)
+    members = d.member_ids(phone, phones, _names(state))
     self_chat = bool(state.get("is_self_chat"))
-    found = d.mentions(state.get("turn_text") or state.get("text") or "", phone=phone, phones=phones,
+    text = state.get("turn_text") or state.get("text") or ""
+    asked = _asked_for(state)
+    if asked:
+        # The skill that called this one names who it wants. In a group those names are often the
+        # transcript's speaker labels, which the scan strips, and nowhere in the text itself.
+        text = f"{text}\n{asked}"
+    found = d.mentions(text, phone=phone, phones=phones,
                        limit=getattr(settings, "contacts_max_in_prompt", 5))
     seen: dict = {}
     lines: list = []
@@ -212,6 +233,7 @@ def contacts_resolve_gate(verb: str, inputs: dict, state: dict):
     room = {
         "_self_chat": bool(state.get("is_self_chat")),
         "_phones": list(state.get("participant_phones") or []),
+        "_names": _names(state),
     }
     if verb == "find":
         if not _from_owner(state):

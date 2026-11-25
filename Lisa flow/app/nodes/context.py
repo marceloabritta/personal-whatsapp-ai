@@ -87,6 +87,36 @@ def _participant_phones(records: list[dict]) -> list[str]:
     return out
 
 
+def _participants(records: list[dict]) -> list[dict]:
+    """[{"phone", "name"}] for everyone but the owner who has written in this chat, first speaker
+    first. `name` is the WhatsApp name of their newest message that has one, cut to one short line
+    like `_partner_name`, or None. The same rail as `_participant_phones`: only an
+    `@s.whatsapp.net` JID is a phone.
+
+    It is how a group's people get a card. The transcript labels each line with that name, which
+    the address-book scan strips, and in a group people are rarely named in the text: he calls them
+    by nicknames or @-mentions, which arrive as opaque ids."""
+    order: list[str] = []
+    named: dict[str, tuple[int, str]] = {}
+    for r in records:
+        if r.get("from_me"):
+            continue
+        phone = None
+        for jid in (r.get("participant"), r.get("participant_alt")):
+            if jid and str(jid).endswith("@s.whatsapp.net"):
+                phone = chat_key(jid)
+                break
+        if not phone:
+            continue
+        if phone not in order:
+            order.append(phone)
+        name = " ".join(str(r.get("push_name") or "").replace('"', "").split())[:40].strip()
+        ts = r.get("ts") or 0
+        if name and (phone not in named or ts >= named[phone][0]):
+            named[phone] = (ts, name)
+    return [{"phone": p, "name": named[p][1] if p in named else None} for p in order]
+
+
 def _partner_name(records: list[dict]) -> str | None:
     """The WhatsApp name of the other person in a one-to-one chat, from the newest message they
     sent, or None while they have not written.
@@ -543,6 +573,8 @@ async def context_node(
         # Who is in this room. Read from the WHOLE fetched history, not the window: membership is
         # a property of the chat, and someone who spoke yesterday is still here today.
         "participant_phones": _participant_phones(records),
+        # The same people with the name each writes under, for the group's address-book lines.
+        "participants": _participants(records),
         "last_whatsapp_message_id": newest,
         "context_message_ids": ids,
         # Per-activation tool-loop scratch — always fresh so a bound/log never carries over.
