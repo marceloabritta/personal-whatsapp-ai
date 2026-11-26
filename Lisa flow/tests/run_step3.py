@@ -423,7 +423,7 @@ async def graph_checks() -> None:
     check("[create·yes] approval is the code stamp, never a field the handler sees",
           next((i for v, i in cal.calls if v == "create"), {}).get("_approved_by") is None)
     check("[create·yes] the SKILL rendered the success card",
-          "Scheduled" in evo.sent[-1][1] and "Call" in evo.sent[-1][1])
+          "Event link: http://cal/1" in evo.sent[-1][1])
     check("[create·yes] pending cleared", st.get("pending_action") is None)
 
     # 2. LIST — one model call, programmatic agenda (no reason ②).

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ..tools.calendar import changes, is_date_only, resolve_virtual, span_days
 
+import zlib
 from datetime import date, datetime
 
 LANGS = {"pt", "en", "es"}
@@ -340,15 +341,55 @@ def compose_delete(action: dict, state: dict) -> str | None:
 
 # --- success cards (after a write) --------------------------------------------------------
 
+# What she says once a booking has gone through: that it is booked, whether the guests were
+# invited, and the link. Nothing else. The card used to repeat the title, the date and the guests,
+# all of which were on the confirmation he had just said yes to. Each entry is one way of saying
+# it: (no guests, guests invited, guests added without an invite). The three words of one entry
+# are said together, so the wording always matches.
+_BOOKED = {
+    "pt": [
+        ("Agendado.", "Agendado. Já mandei os convites para os convidados.",
+         "Agendado. Os convidados não receberam convite."),
+        ("Pronto, está agendado.", "Pronto, está agendado. Os convidados já receberam o convite.",
+         "Pronto, está agendado. Não mandei convite aos convidados."),
+        ("Feito, já está na agenda.", "Feito, já está na agenda. Enviei os convites aos convidados.",
+         "Feito, já está na agenda. Os convidados não foram avisados."),
+    ],
+    "en": [
+        ("Booked.", "Booked. I've sent invites out to the guests.",
+         "Booked. The guests didn't get an invite."),
+        ("Done, it's booked.", "Done, it's booked. The guests have their invites.",
+         "Done, it's booked. I didn't send the guests an invite."),
+        ("All set, it's on the calendar.",
+         "All set, it's on the calendar. Invites are out to the guests.",
+         "All set, it's on the calendar. The guests weren't notified."),
+    ],
+    "es": [
+        ("Agendado.", "Agendado. Ya les envié las invitaciones a los invitados.",
+         "Agendado. Los invitados no recibieron invitación."),
+        ("Listo, quedó agendado.", "Listo, quedó agendado. Los invitados ya tienen su invitación.",
+         "Listo, quedó agendado. No les envié invitación a los invitados."),
+        ("Hecho, ya está en la agenda.",
+         "Hecho, ya está en la agenda. Envié las invitaciones a los invitados.",
+         "Hecho, ya está en la agenda. No se avisó a los invitados."),
+    ],
+}
+
+
+def _pick(options: list, key: str | None):
+    """One of the ways of saying it, chosen by the event, so the wording varies from booking to
+    booking but a given booking always reads the same (a replay, a test, the log)."""
+    return options[zlib.crc32((key or "").encode()) % len(options)]
+
+
 def fmt_create(results: list, state: dict) -> str:
-    # Kept deliberately minimal — same shape whether virtual or in-person: heading, blank, title,
-    # date/time, blank, the event link. The details were already in the confirmation.
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
-    lines = [f"{L['created']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang, _today(state)))
-    if d.get("attendees"):
-        lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
+    bare, invited, silent = _pick(_BOOKED[lang], d.get("event_id") or d.get("html_link"))
+    if not d.get("attendees"):
+        lines = [bare]
+    else:
+        lines = [invited if d.get("notified") else silent]
     if d.get("html_link"):
         lines += ["", f"{L['event_link']}: {d['html_link']}"]
     return _joined(lines)

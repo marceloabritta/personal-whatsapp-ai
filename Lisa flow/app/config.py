@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_refresh_token: str = ""
     google_calendar_id: str = "primary"
+    # The booking card's event link goes out as tinyurl.com/<code> (tools/shortlink.py) instead
+    # of Google's ~130-character link. Off, the card carries the long link, as before.
+    short_links_enabled: bool = True
     default_meeting_minutes: int = 45
     default_start_hour: str = "09:00:00"   # all-day -> timed, when no hour is given
     calendar_timezone: str = "America/Sao_Paulo"
