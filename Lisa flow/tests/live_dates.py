@@ -75,6 +75,19 @@ async def run(history: list, tag_text: str, tag_ts: int,
     st = await graph.ainvoke({"raw": body}, config=config)
     pending = st.get("pending_action") or {}
     said = evo.sent[-1][1] if evo.sent else ""
+    if not pending and "mail" in said.lower():
+        # Rodolfo is the one-to-one partner and no address of his is known, so she asks for it
+        # before any card. That question is not what this checks: he says to go ahead without
+        # the invite, and the date on the card that follows is.
+        text = "pode marcar sem convite"
+        evo.history.append({"id": "NOINV", "from_me": True, "text": text, "push_name": None,
+                            "ts": tag_ts + 20})
+        st = await graph.ainvoke({"raw": {"data": {
+            "key": {"remoteJid": CONTACT_JID, "fromMe": True, "id": "NOINV"},
+            "message": {"conversation": text},
+            "messageTimestamp": tag_ts + 20, "pushName": "Marcelo"}}}, config=config)
+        pending = st.get("pending_action") or {}
+        said = evo.sent[-1][1] if evo.sent else said
     return pending, said
 
 

@@ -179,6 +179,9 @@ def overlaps_taken(start_iso: str, minutes: int = 90) -> bool:
 async def opening(calendar: list, *, on: bool = True) -> tuple[Chat, str]:
     """The chat this was built for, up to her answer to the tag."""
     c = Chat(calendar, on=on)
+    # His address is in the chat: with none, she asks for it before any card (the one-to-one
+    # partner is a guest), and the cards these scenarios look for would wait on that question.
+    c.past("meu email, se precisar: rodolfo@example.com", mine=False)
     c.past("vc tá em sjc amanhã? vamos ver se a gente se fala", mine=True)
     c.past("Bora, estarei sim. Tenho as 9h uma agenda, as 11h to livre", mine=False)
     c.past("vc pode pela manhã ?", mine=False)
