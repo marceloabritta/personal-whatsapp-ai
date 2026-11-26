@@ -46,7 +46,6 @@ _L = {
         "ask_create": "Posso agendar?", "ask_update": "Posso alterar?", "ask_delete": "Cancelar?",
         "created": "Agendado", "updated": "Alterado", "cancelled": "Cancelado",
         "video": "Chamada de vídeo", "participants": "Participantes", "event_link": "Link do evento",
-        "u_done": "Agora com os detalhes acima.",
         "guests_will": "Os convidados serão avisados.", "guests_did": "Os convidados foram avisados.",
         "empty": "Nada na agenda.", "all_day": "Dia inteiro", "untitled": "(sem título)",
         "event": "(evento)",
@@ -67,7 +66,6 @@ _L = {
         "ask_delete": "Cancel this one?",
         "created": "Scheduled", "updated": "Updated", "cancelled": "Cancelled",
         "video": "Video call", "participants": "Guests", "event_link": "Event link",
-        "u_done": "Now with the details above.",
         "guests_will": "The guests will be notified.", "guests_did": "The guests were notified.",
         "empty": "Nothing on your calendar.", "all_day": "All day", "untitled": "(no title)",
         "event": "(event)",
@@ -87,7 +85,6 @@ _L = {
         "ask_create": "¿Lo agendo?", "ask_update": "¿Lo cambio?", "ask_delete": "¿Lo cancelo?",
         "created": "Agendado", "updated": "Actualizado", "cancelled": "Cancelado",
         "video": "Videollamada", "participants": "Invitados", "event_link": "Enlace del evento",
-        "u_done": "Ahora con los detalles de arriba.",
         "guests_will": "Se avisará a los invitados.", "guests_did": "Se avisó a los invitados.",
         "empty": "Nada en la agenda.", "all_day": "Todo el día", "untitled": "(sin título)",
         "event": "(evento)",
@@ -382,32 +379,58 @@ def _pick(options: list, key: str | None):
     return options[zlib.crc32((key or "").encode()) % len(options)]
 
 
-def fmt_create(results: list, state: dict) -> str:
+# The same for a change: that it is changed, whether the guests were told, and the link. The
+# changes themselves were listed on the confirmation just above, and so were the title and date.
+_CHANGED = {
+    "pt": [
+        ("Alterado.", "Alterado. Os convidados foram avisados.",
+         "Alterado. Os convidados não foram avisados."),
+        ("Pronto, está alterado.", "Pronto, está alterado. Já avisei os convidados.",
+         "Pronto, está alterado. Não avisei os convidados."),
+        ("Feito, já mudei na agenda.",
+         "Feito, já mudei na agenda. Os convidados receberam a atualização.",
+         "Feito, já mudei na agenda. Os convidados não foram avisados."),
+    ],
+    "en": [
+        ("Updated.", "Updated. The guests have been told about the change.",
+         "Updated. The guests weren't notified."),
+        ("Done, it's changed.", "Done, it's changed. I've let the guests know.",
+         "Done, it's changed. I didn't notify the guests."),
+        ("All set, the event is updated.",
+         "All set, the event is updated. The guests got the update.",
+         "All set, the event is updated. The guests weren't told."),
+    ],
+    "es": [
+        ("Actualizado.", "Actualizado. Se avisó a los invitados.",
+         "Actualizado. No se avisó a los invitados."),
+        ("Listo, quedó cambiado.", "Listo, quedó cambiado. Ya les avisé a los invitados.",
+         "Listo, quedó cambiado. No les avisé a los invitados."),
+        ("Hecho, ya lo cambié en la agenda.",
+         "Hecho, ya lo cambié en la agenda. Los invitados recibieron la actualización.",
+         "Hecho, ya lo cambié en la agenda. No se avisó a los invitados."),
+    ],
+}
+
+
+def _done_card(table: dict, results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
-    bare, invited, silent = _pick(_BOOKED[lang], d.get("event_id") or d.get("html_link"))
+    bare, told, silent = _pick(table[lang], d.get("event_id") or d.get("html_link"))
     if not d.get("attendees"):
         lines = [bare]
     else:
-        lines = [invited if d.get("notified") else silent]
+        lines = [told if d.get("notified") else silent]
     if d.get("html_link"):
         lines += ["", f"{L['event_link']}: {d['html_link']}"]
     return _joined(lines)
+
+
+def fmt_create(results: list, state: dict) -> str:
+    return _done_card(_BOOKED, results, state)
 
 
 def fmt_update(results: list, state: dict) -> str:
-    # The changes were listed in the confirmation just above, so the card points back to them
-    # ("now with the details above") instead of re-listing.
-    lang = _lang(state); L = _L[lang]
-    d = (results[0].get("data") or {})
-    lines = [f"{L['updated']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang, _today(state)))
-    if d.get("attendees"):
-        lines.append(L["guests_did"] if d.get("notified") else L["guests_silent"])
-    lines += ["", L["u_done"]]
-    if d.get("html_link"):
-        lines += ["", f"{L['event_link']}: {d['html_link']}"]
-    return _joined(lines)
+    return _done_card(_CHANGED, results, state)
 
 
 def fmt_delete(results: list, state: dict) -> str:

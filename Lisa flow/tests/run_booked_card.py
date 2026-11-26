@@ -28,7 +28,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import Settings  # noqa: E402
-from app.skills.calendar_format import _BOOKED, fmt_create  # noqa: E402
+from app.skills.calendar_format import _BOOKED, _CHANGED, fmt_create, fmt_update  # noqa: E402
 from app.tools.calendar import GoogleCalendarService  # noqa: E402
 from app.tools.shortlink import ShortLinks  # noqa: E402
 
@@ -84,6 +84,32 @@ def test_card() -> None:
           fmt_create(result(), {"session_lang": "de"}).split("\n")[0] in [v[0] for v in _BOOKED["en"]])
     check("each language has the same number of ways",
           len({len(v) for v in _BOOKED.values()}) == 1 and len(_BOOKED["en"]) >= 3, str(en))
+
+
+def test_update_card() -> None:
+    print("\nthe change card")
+    guests = ["ana@example.com"]
+    for lang, label in (("pt", "Link do evento"), ("en", "Event link"), ("es", "Enlace del evento")):
+        card = fmt_update(result(attendees=guests, notified=True), {"session_lang": lang})
+        lines = card.split("\n")
+        check(f"[{lang}] what changed, then the link",
+              len(lines) == 3 and lines[1] == "" and lines[2] == f"{label}: {SHORT}", repr(card))
+        check(f"[{lang}] no title, no date, no 'details above'",
+              "Acme" not in card and "27" not in card.replace(SHORT, "")
+              and "acima" not in card and "above" not in card and "arriba" not in card, repr(card))
+        check(f"[{lang}] says the guests were told", lines[0] in [v[1] for v in _CHANGED[lang]],
+              repr(lines[0]))
+        check(f"[{lang}] no guests: no word about them",
+              fmt_update(result(), {"session_lang": lang}).split("\n")[0]
+              in [v[0] for v in _CHANGED[lang]])
+        check(f"[{lang}] a quiet change says nobody was told",
+              fmt_update(result(attendees=guests, notified=False), {"session_lang": lang})
+              .split("\n")[0] in [v[2] for v in _CHANGED[lang]])
+    check("never worded like a booking",
+          not ({w for v in _CHANGED.values() for t in v for w in t}
+               & {w for v in _BOOKED.values() for t in v for w in t}))
+    openings = {fmt_update(result(event_id=f"ev{i}"), {"session_lang": "en"}) for i in range(40)}
+    check("40 changes use every way of saying it", len(openings) == len(_CHANGED["en"]))
 
 
 def test_variety() -> None:
@@ -218,6 +244,7 @@ def test_deps() -> None:
 
 async def main() -> None:
     test_card()
+    test_update_card()
     test_variety()
     await test_shortener()
     await test_handler()
