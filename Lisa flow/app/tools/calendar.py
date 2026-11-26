@@ -425,6 +425,10 @@ class GoogleCalendarService:
         # The owner's meeting presets, attached in deps. None = presets off. A create carries its
         # length already (apply_presets); this only covers the handler's own fallback.
         self.presets = None
+        # The event-link shortener (tools/shortlink.py), attached in deps. None = the card carries
+        # Google's own long link, as it did before; the selftests leave it None, so no test
+        # reaches the network.
+        self.shortlinks = None
         self._svc = None  # test seam ONLY: a fake service injected by the selftests
         self._creds = None
         self._creds_lock = threading.Lock()
@@ -1117,6 +1121,8 @@ class GoogleCalendarService:
         for attempt in range(attempts):
             try:
                 res = await asyncio.to_thread(getattr(self, method), inputs)
+                if res.get("ok") and verb in ("create", "update"):
+                    res = await self._short_link(res)
                 if res.get("ok") and used and self.directory is not None:
                     try:
                         await self.directory.note_used(used, phone=inputs.get("_phone"))
@@ -1131,6 +1137,20 @@ class GoogleCalendarService:
                             verb, exc, attempt + 1, attempts - 1)
                 await asyncio.sleep(_BACKOFF_BASE * (2 ** attempt))
         return self._on_error(last, verb)
+
+    async def _short_link(self, res: ActionResult) -> ActionResult:
+        """The card's event link, shortened after the write has landed. Outside the retry
+        ladder on purpose: the shortener can only ever hand back the long link, never fail a
+        booking or replay one."""
+        data = res.get("data") or {}
+        long = data.get("html_link")
+        if self.shortlinks is None or not long:
+            return res
+        short = await self.shortlinks.shorten(long)
+        if not short or short == long:
+            return res
+        return {**res, "summary": (res.get("summary") or "").replace(long, short),
+                "data": {**data, "html_link": short}}
 
     def _on_error(self, exc: Exception, verb: str) -> ActionResult:
         status = getattr(getattr(exc, "resp", None), "status", None)

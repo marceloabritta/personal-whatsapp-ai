@@ -105,6 +105,11 @@ def build_deps(settings: Settings | None = None) -> Deps:
         setup_tool.roster = roster
         setup_tool.evolution = evolution
 
+    if settings.short_links_enabled and tools.get("calendar") is not None:
+        from .tools.shortlink import ShortLinks
+
+        tools["calendar"].shortlinks = ShortLinks()
+
     # Meeting presets: in-memory here, the durable tier attached in the lifespan (as the roster).
     # Setup writes them; the calendar handler reads the standard length for its own fallback.
     presets = None

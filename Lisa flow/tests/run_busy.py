@@ -569,7 +569,7 @@ async def p6_graph():
           g.n("insert") == 1 and len(stub.calls) == 3
           and body.get("start", {}).get("dateTime") == at(12, 30)
           and body.get("end", {}).get("dateTime") == at(14))
-    check("[settle] the result card went out", "Agendado" in last(evo))
+    check("[settle] the result card went out", "Link do evento" in last(evo))
 
     # --- he says to book it anyway --------------------------------------------------------
     g, evo, stub, graph = build(taken)

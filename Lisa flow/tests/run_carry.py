@@ -182,7 +182,7 @@ async def carry_checks() -> None:
         check(f"  ...{tag!r} booked it once", c.cal.n("create") == 1, f"{c.cal.n('create')}")
         check(f"  ...{tag!r} sent no second card", c.evo.cards() == 1, f"{c.evo.cards()} cards")
         check(f"  ...{tag!r} never asked the model", len(c.stub.calls) == calls)
-        check(f"  ...{tag!r} replied with the booking", "Scheduled" in c.evo.sent[-1][1],
+        check(f"  ...{tag!r} replied with the booking", "Event link" in c.evo.sent[-1][1],
               c.evo.sent[-1][1][:60])
         return st
 
