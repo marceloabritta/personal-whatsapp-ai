@@ -1341,6 +1341,21 @@ async def allday_checks() -> None:
     missed = svc._unapplied({"attendees": ["b@x.com", "a@x.com"]},
                             {"attendees": ["a@x.com", "b@x.com"]}, None)
     check("[verify] guest ORDER is not a failure (Google reorders them)", missed == [])
+    # The live failure: she sent "Ana@x.com", Google stored "ana@x.com", and the update that had
+    # worked was reported "not applied"; the card she sent next named Ana as kept AND removed.
+    missed = svc._unapplied({"attendees": ["Ana@X.com"]}, {"attendees": ["ana@x.com"]}, None)
+    check("[verify] guest CASE is not a failure (Google lower-cases them)", missed == [], missed)
+    missed = svc._unapplied({"attendees": ["Ana@X.com"]}, {"attendees": []}, None)
+    check("[verify] ...while a guest really missing still is", missed == ["guests"], missed)
+    check("[verify] an address differing only in case is no change",
+          changes({"attendees": ["Ana@X.com"]}, {"attendees": ["ana@x.com"]}) == [])
+    st = {"session_lang": "en", "seen_events": {"E1": {
+        "title": "Sync", "start": "2026-09-14T10:00:00-03:00", "end": "2026-09-14T10:45:00-03:00",
+        "attendees": ["ana@x.com", "bia@x.com"]}}}
+    card = compose_update({"task": "calendar.update", "event_id": "E1",
+                           "attendees": ["Ana@X.com"]}, st) or ""
+    check("[verify] the card removes only who is really dropped",
+          "Removed: bia@x.com" in card and "ana@x.com" not in card.split("Removed")[-1], card)
 
 
 def message_clock_checks() -> None:

@@ -71,6 +71,18 @@ def provided(inp: dict, key: str) -> bool:
     return isinstance(inp, dict) and key in inp and inp[key] is not None
 
 
+def guest_key(email) -> str:
+    """An address as Google compares it: case does not matter. Google stores what it is sent in
+    lower case, so "Ana@acme.com" sent comes back "ana@acme.com". Compared as written, an update
+    that added the guest read as "not applied", and the next card listed the same person both as
+    the final guest and as "Removed"."""
+    return (email or "").strip().lower()
+
+
+def guest_set(emails) -> set[str]:
+    return {guest_key(e) for e in emails or [] if guest_key(e)}
+
+
 # --- one kind, decided once ----------------------------------------------------------------
 #
 # Google models the two kinds with different wire fields: a timed event carries
@@ -249,7 +261,7 @@ def changes(action: dict, before: dict | None = None) -> list[dict]:
             if _same_dt(new, old):
                 continue
         elif f == "attendees":
-            if set(new or []) == set(old or []):
+            if guest_set(new) == guest_set(old):
                 continue
         elif new == old:
             continue
@@ -346,7 +358,7 @@ ALWAYS
 
 CREATE — you only need a title and a start; do not interrogate {owner_name} for details he did not give.
 - Title is what the event is ABOUT — a short topic ("Budget review"). If you can't resolve the topic, use the format Name & Name for the people, starting with {owner_name}.
-- WHO it is with: in a one-to-one chat, a meeting {owner_name} asks for is with the person he is talking to, even when he names nobody ("agendar amanhã 13h"). A line starting "This chat is one-to-one", after these instructions, tells you that you are in one and who that person is. Treat them as a guest he named: their address goes in "attendees" under the same rules as any other guest's, and with no topic the title is {owner_name} & their name, never {owner_name} alone. One difference from a guest he named: when no address for them can be found, do not ask him for one. Book it with their name in the title and no guest. Leave them out only when what was said shows the event is not with them: it is plainly his own (the dentist, the gym, a flight, a payment, a reminder, a block of his time), he says who it is with and that is someone else ("reunião com o Felipe" said in Ana's chat is with Felipe), or he says to leave them out. An all-day event gets no guest unless he names one. In a small group, a line starting "This chat is a group" tells you so and lists the people who have written in it. A meeting he asks for there without naming who it is with ("agendar google meet", after they agreed a time) is with the people of the chat who are arranging it with him: treat each as a guest he named. Their cards are the lines marked IN THIS CHAT, and the transcript labels their messages with the names that line gives. In a group, one of them with no address on file{found_by_contacts}: ask him for it before any card, as for any guest he named. Leave someone out only when what was said shows they are not part of it. With neither line (a big group, his chat with himself, or a person nothing identifies yet) none of this applies: the only guests are the people he names, and you never ask him who a meeting is with.
+- WHO it is with: in a one-to-one chat, a meeting {owner_name} asks for is with the person he is talking to, even when he names nobody ("agendar amanhã 13h"). A line starting "This chat is one-to-one", after these instructions, tells you that you are in one and who that person is. Treat them as a guest he named: their address goes in "attendees" under the same rules as any other guest's, and with no topic the title is {owner_name} & their name, never {owner_name} alone. With no address for them on file{found_by_contacts}, ask for it before any card, as for any guest he named, calling them by name ("I don't have Ana's email for the invite. What is it?"): they read this chat too, so either of them may answer, and an address either writes here is the one to use. Book it with their name in the title and no guest only when he says to go ahead without it. Leave them out only when what was said shows the event is not with them: it is plainly his own (the dentist, the gym, a flight, a payment, a reminder, a block of his time), he says who it is with and that is someone else ("reunião com o Felipe" said in Ana's chat is with Felipe), or he says to leave them out. An all-day event gets no guest unless he names one. In a small group, a line starting "This chat is a group" tells you so and lists the people who have written in it. A meeting he asks for there without naming who it is with ("agendar google meet", after they agreed a time) is with the people of the chat who are arranging it with him: treat each as a guest he named. Their cards are the lines marked IN THIS CHAT, and the transcript labels their messages with the names that line gives. In a group, one of them with no address on file{found_by_contacts}: ask him for it before any card, as for any guest he named. Leave someone out only when what was said shows they are not part of it. With neither line (a big group, his chat with himself, or a person nothing identifies yet) none of this applies: the only guests are the people he names, and you never ask him who a meeting is with.
 - No end -> defaults to 45 minutes. Add "attendees" emails for the people the event is with (invited by default; "send_invites": false to suppress).
 - WHERE it happens: set "location" when he says a real-world place ("at the office", "Starbucks Faria Lima", "his apartment"). If he names no place, DO NOT ASK and do not send "virtual" — a timed event with no location automatically gets a Google Meet link, and the confirmation shows him "Video call" so he can correct it. "virtual": true is only worth sending when he explicitly asks for a call/Meet/Zoom.
 - Send "virtual": false for the timed things that are not a call he would dial into and that have no address worth writing: the dentist, the gym, a haircut, a flight, or a block of his own time (focus, lunch, commute). No place named and no Meet either.
@@ -383,7 +395,7 @@ CONTACTS_GUIDANCE = """ADDRESS BOOK — you keep {owner_name}'s contacts. The pe
 
 # Appended only when the contacts skill is on, for the same reason as the block above.
 CONTACTS_CALL_GUIDANCE = """THE CONTACTS SKILL — the list above only holds people this conversation clearly points at, so a name missing from it may still be in {owner_name}'s contacts.
-- He names someone for an event, no address is listed, and none is written in this chat -> before you ask him, call the contacts skill: {{"skill": "contacts", "request": "Find Felipe's email, for an invite"}}. You come back here with what it found, and the rules above apply to it: one address, use it; several, the one used last time, or ask which when none is marked; none, ask him. The one exception to asking: the person a one-to-one chat is with, when he did not name them. With no address found for them, book it without a guest (WHO it is with).
+- He names someone for an event, no address is listed, and none is written in this chat -> before you ask him, call the contacts skill: {{"skill": "contacts", "request": "Find Felipe's email, for an invite"}}. You come back here with what it found, and the rules above apply to it: one address, use it; several, the one used last time, or ask which when none is marked; none, ask him. The person a one-to-one chat is with is no exception: with no address found for them, ask (WHO it is with).
 - Naming who a meeting is with ("reunião com o Testolini") IS naming a guest, even when he says nothing about invites. Do not book it with only their name in the title and no guest: call first. Book without a guest only once the contacts skill has found no address, or when he says not to invite them.
 - He asks to change, save or delete a contact as part of this ("her email changed to x, update it and invite her") -> call the contacts skill for that part first, with the new value in the request. It asks him on its own card, and you come back here after his yes to do the calendar part.
 - A card of yours still standing is withdrawn when you call. When you come back, propose it again if it still applies.
@@ -894,7 +906,8 @@ class GoogleCalendarService:
         if provided(inp, "location") and not inp.get("virtual"):
             if (view.get("location") or "") != inp["location"]:
                 missed.append("location")
-        if provided(inp, "attendees") and set(view.get("attendees") or []) != set(inp["attendees"]):
+        if (provided(inp, "attendees")
+                and guest_set(view.get("attendees")) != guest_set(inp["attendees"])):
             missed.append("guests")
         if provided(inp, "all_day") and bool(view.get("all_day")) != bool(inp["all_day"]):
             missed.append("all-day setting")

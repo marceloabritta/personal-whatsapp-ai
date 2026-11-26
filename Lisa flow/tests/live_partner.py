@@ -114,6 +114,17 @@ class Chat:
         config = {"configurable": {"thread_id": make_thread_id("secretaria", self.jid)}}
         return await self.graph.ainvoke({"raw": body}, config=config)
 
+    async def hears(self, text: str, name: str = HER_NAME) -> dict:
+        """The other person writes while her window is open: it reaches the graph like any
+        message there does (no tag needed)."""
+        mid = f"o{next(self._n)}"
+        self.evo.store(mid, text, from_me=False, name=name)
+        body = {"data": {"key": {"remoteJid": self.jid, "fromMe": False, "id": mid},
+                         "message": {"conversation": text},
+                         "messageTimestamp": int(time.time()), "pushName": name}}
+        config = {"configurable": {"thread_id": make_thread_id("secretaria", self.jid)}}
+        return await self.graph.ainvoke({"raw": body}, config=config)
+
     def last(self) -> str:
         return self.evo.sent[-1][1] if self.evo.sent else ""
 
@@ -266,18 +277,40 @@ async def his_own_chat():
 
 # ============================ one-to-one, nobody on file ======================================
 
+def asked_for_an_address(st: dict, c: Chat) -> bool:
+    """A question, not a card: nothing held, nothing booked, and it is about an email."""
+    said = c.last().lower()
+    return (not held(st) and c.cal.n("create") == 0
+            and any(w in said for w in ("email", "e-mail", "endereço", "endereco")))
+
+
 async def no_card_for_the_number():
-    """Someone his contacts do not have. She cannot invite an address she does not hold, and he
-    offered none, so she does not ask for one: the card names the two of them, with no guest."""
+    """Someone his contacts do not have. She cannot invite an address she does not hold, so she
+    asks for it before any card; they read the chat too, and the address they write goes on."""
     c = Chat([FELIPE_CARD])
     c.other("Oi Marcelo, aqui e o Joao Pereira da marcenaria", name="Joao Pereira")
     c.other("Podemos falar amanha sobre o orcamento?", name="Joao Pereira")
     c.me("podemos")
     st = await c.say(ASK)
+    asked = asked_for_an_address(st, c)
+    question = c.last()
+    st = await c.hears("joao@marcenaria.example.com", name="Joao Pereira")
     p = held(st)
-    ok = (p.get("task") == "calendar.create" and not guests(p)
-          and "T13:00" in (p.get("start") or ""))
-    return ok, f"held={p} calls={st.get('skill_calls')} said={c.last()!r}"
+    ok = (asked and p.get("task") == "calendar.create"
+          and guests(p) == ["joao@marcenaria.example.com"] and "T13:00" in (p.get("start") or ""))
+    return ok, f"asked={question!r} held={p} said={c.last()!r}"
+
+
+async def he_names_the_title_in_english():
+    """The 2026-11-26 shape: they agree a time, he tags her with a title and the other person's
+    name in it, nobody's address on file. She asks for it; she does not book with no guest."""
+    c = Chat([FELIPE_CARD])
+    c.other("Hi Marcelo, Joao Pereira here. Could we have a call?", name="Joao Pereira")
+    c.me("sure, do you want to suggest a time?")
+    c.other("How about tomorrow at 1pm?", name="Joao Pereira")
+    c.me("ok!")
+    st = await c.say("@lisa book this. title Joao & Marcelo. Google meet.")
+    return asked_for_an_address(st, c), f"held={held(st)} said={c.last()!r}"
 
 
 async def nobody_to_go_by():
@@ -292,20 +325,26 @@ async def nobody_to_go_by():
 
 
 async def her_card_has_no_address():
+    """Her card has no email: she asks, and when he says to go ahead without it, the card names
+    the two of them with no guest."""
     c = Chat([her_card()])
     household(c)
     st = await c.say(ASK)
+    asked = asked_for_an_address(st, c)
+    question = c.last()
+    st = await c.say("pode marcar sem convite")
     p = held(st)
-    ok = (p.get("task") == "calendar.create" and not guests(p)
+    ok = (asked and p.get("task") == "calendar.create" and not guests(p)
           and "&" in (p.get("title") or ""))
-    return ok, f"held={p} calls={st.get('skill_calls')} said={c.last()!r}"
+    return ok, f"asked={question!r} held={p} said={c.last()!r}"
 
 
 SCENARIOS = [
     the_message_that_started_this, nobody_else_has_spoken, two_addresses_is_a_question,
     the_address_used_last_time_wins, he_asks_for_the_other_one, pointing_back_at_her_proposal, the_dentist_is_his_alone, he_says_only_him,
     a_day_off_has_no_guest, he_names_someone_else, a_group_names_nobody, his_own_chat,
-    no_card_for_the_number, nobody_to_go_by, her_card_has_no_address,
+    no_card_for_the_number, he_names_the_title_in_english, nobody_to_go_by,
+    her_card_has_no_address,
 ]
 
 

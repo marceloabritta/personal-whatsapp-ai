@@ -12,7 +12,7 @@ its `message` is null. Confirmations read from the action (create) or the cached
 `ActionResult.data`. Unsupported languages fall back to the model (see LANGS + the respond node)."""
 from __future__ import annotations
 
-from ..tools.calendar import changes, is_date_only, resolve_virtual, span_days
+from ..tools.calendar import changes, guest_key, guest_set, is_date_only, resolve_virtual, span_days
 
 import zlib
 from datetime import date, datetime
@@ -312,7 +312,8 @@ def _describe_change(ch: dict, L: dict, lang: str, names: dict | None = None,
         # addition. Naming it "Participantes" read as "these are being added" — and anyone the
         # model left out was silently uninvited AND mailed a cancellation.
         out = [L["guests_full"], *(_guest_line(e, names or {}) for e in new)]
-        dropped = sorted(set(ch.get("old") or []) - set(new))
+        kept = guest_set(new)
+        dropped = sorted({e for e in ch.get("old") or [] if guest_key(e) not in kept})
         if dropped:
             out.append(f"{L['guests_dropped']}: {', '.join(dropped)}")
         return out
