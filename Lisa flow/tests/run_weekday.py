@@ -30,7 +30,7 @@ from app.config import Settings  # noqa: E402
 from app.nodes.reason import reason_node  # noqa: E402
 from app.skills import SKILLS, output_schema_for  # noqa: E402
 from app.skills.base import count_optionals, count_unions  # noqa: E402
-from app.skills.calendar_format import fmt_update  # noqa: E402
+from app.skills.calendar_format import _CHANGED, fmt_update  # noqa: E402
 from app.skills.weekday_check import correction, mismatches, strip_weekday  # noqa: E402
 from app.tools.calendar import GoogleCalendarService  # noqa: E402
 from app.trace import build_trace  # noqa: E402
@@ -210,14 +210,15 @@ async def test_update_notice() -> None:
     check("a plain move emails the guests", calls[-1]["sendUpdates"] == "all")
     check("and the result says so", (r.get("data") or {}).get("notified") is True, str(r)[:300])
     card = fmt_update([r], {"session_lang": "pt"})
-    check("the card says they were told", "Os convidados foram avisados." in card, card)
+    check("the card says they were told", card.split("\n")[0] in [v[1] for v in _CHANGED["pt"]],
+          card)
     check("and not that they won't be", "não serão avisados" not in card, card)
 
     r = await g.run("update", {"event_id": "E1", "start": "2026-11-26T15:00:00-03:00",
                                "send_invites": False})
     check("a quiet move emails nobody", calls[-1]["sendUpdates"] == "none")
     card = fmt_update([r], {"session_lang": "pt"})
-    check("and its card says so", "Os convidados não serão avisados." in card, card)
+    check("and its card says so", card.split("\n")[0] in [v[2] for v in _CHANGED["pt"]], card)
 
 
 async def main() -> None:
