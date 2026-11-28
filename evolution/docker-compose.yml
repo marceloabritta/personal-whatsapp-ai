@@ -178,7 +178,7 @@ services:
       # prompt_version so it never re-grades turns from code that no longer exists.
       REVIEW_ENABLED: "true"
       REVIEW_SCOPE_VERSION: "2026-11-27-timezone-card"
-      REVIEW_JUDGE_VERSION: "v5"
+      REVIEW_JUDGE_VERSION: "v6"
       REVIEW_MODEL: claude-opus-4-8
       # The fix loop (app/fixdesk/): a session the judge found a mistake in becomes a case; his
       # Mac investigates it in Claude Code once a day (fixer/ at the repo root); she sends the plan

@@ -77,7 +77,8 @@ class Reviewer:
     async def _review_turn(self, turn: dict, audio: dict) -> dict:
         async with self._sem:
             verdict = await self.judge.judge(
-                lines=turn["lines"], reply_text=turn["reply_text"], turn_ts=turn["ts"]
+                lines=turn["lines"], reply_text=turn["reply_text"], turn_ts=turn["ts"],
+                files=turn.get("files"),
             )
 
         # Timing is scored even when the judge failed — the clock does not depend on the model.
