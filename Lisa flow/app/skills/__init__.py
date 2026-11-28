@@ -164,6 +164,7 @@ def system_prompt_for(domain: str, settings, session_lang: str | None = None,
         # A guidance line that leans on another skill names it only when this one can call it.
         guidance=guidance.format(
             owner_name=owner,
+            owner_tz=getattr(settings, "calendar_timezone", "UTC"),
             found_by_contacts=" and none found by the contacts skill" if "contacts" in targets else ""),
         describe=skill.describe.format(owner_name=owner),
         has_actions=bool(skill.enabled_verbs(settings)),

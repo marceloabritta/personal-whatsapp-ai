@@ -508,16 +508,26 @@ def _contacts_first(result: dict, state: dict, settings) -> dict:
 
 
 def calendar_recheck(result: dict, state: dict, settings):
-    """Every weekday she wrote must be its date's (skills/weekday_check.py). Returns the result
-    without the check-only `weekday` field, and the note that sends her back when one is wrong."""
+    """Every weekday she wrote must be its date's (skills/weekday_check.py), and every time zone
+    she named must be the one its time is written in (skills/timezone_check.py). Returns the
+    result without the check-only `weekday` field and with `timezone` left only where the time is
+    on another clock than his, and the note that sends her back when either check fails."""
     from datetime import date
 
     from ..prompt import today_in
-    from .weekday_check import correction, mismatches, strip_weekday
+    from . import timezone_check, weekday_check
 
-    today = date.fromisoformat(today_in(getattr(settings, "calendar_timezone", "UTC")))
-    found = mismatches(result, today)
-    return strip_weekday(result), (correction(found) if found else None)
+    home = getattr(settings, "calendar_timezone", "UTC")
+    today = date.fromisoformat(today_in(home))
+    notes = []
+    days = weekday_check.mismatches(result, today)
+    if days:
+        notes.append(weekday_check.correction(days))
+    zones = timezone_check.mismatches(result)
+    if zones:
+        notes.append(timezone_check.correction(zones))
+    cleaned = timezone_check.settle(weekday_check.strip_weekday(result), home)
+    return cleaned, ("\n\n".join(notes) if notes else None)
 
 
 def calendar_resolve_gate(verb: str, inputs: dict, state: dict):

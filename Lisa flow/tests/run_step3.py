@@ -88,9 +88,12 @@ def unit_checks() -> None:
           == {"task", "name", "email"})
     req = {_task_const(b): set(b["required"]) for b in _branches(cal)}
     # `weekday` is a check on the model's date (skills/weekday_check.py), dropped before anything runs.
-    check("create requires task+title+start+weekday",
-          req["calendar.create"] == {"task", "title", "start", "weekday"})
-    check("update requires task+event_id+weekday", req["calendar.update"] == {"task", "event_id", "weekday"})
+    # `timezone` is the zone the time was said in, checked against start's offset
+    # (skills/timezone_check.py) and kept on the action only when it is another clock than his.
+    check("create requires task+title+start+weekday+timezone",
+          req["calendar.create"] == {"task", "title", "start", "weekday", "timezone"})
+    check("update requires task+event_id+weekday+timezone",
+          req["calendar.update"] == {"task", "event_id", "weekday", "timezone"})
     create = next(b for b in _branches(cal) if _task_const(b) == "calendar.create")
     check("optional 'end' is plain-typed, not null-unioned",
           create["properties"]["end"] == {"type": "string"})

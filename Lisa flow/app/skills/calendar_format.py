@@ -13,6 +13,7 @@ its `message` is null. Confirmations read from the action (create) or the cached
 from __future__ import annotations
 
 from ..tools.calendar import changes, guest_key, guest_set, is_date_only, resolve_virtual, span_days
+from ..zones import zone_label, zone_of
 
 import zlib
 from datetime import date, datetime
@@ -166,19 +167,59 @@ def _dt(iso: str, lang: str, today: date | None = None) -> str:
     return f"{fmt_date(iso, lang, today)}, {fmt_time(iso, lang)}"
 
 
-def _when(ev: dict, lang: str, today: date | None = None) -> list:
+def _home(state: dict) -> str | None:
+    """The owner's time zone, by name. The confirm and respond nodes put it on the state they
+    hand the composers, beside his date; without it a card shows one clock, as it always did."""
+    return state.get("owner_tz") or None
+
+
+def _two_clocks(ev: dict, lang: str, today: date | None, home_tz: str | None) -> list | None:
+    """A timed event that is on another clock than the owner's, as two lines: the time where it
+    was agreed, then the same moment on his own clock. None when there is one clock to show.
+
+        02/dez - Quarta, 10:00 AM PT (Pacífico)
+        15:00 BRT (Brasília)
+
+    The other clock is the zone the event carries (`timezone`: what she named on a booking, what
+    Google stores on an event read back). With no zone named, the offset written in "start" is
+    still a clock: a start ending in -08:00 read "10:00 AM" on a card with nothing to say whose
+    ten o'clock that was. Both lines are worked out from the one moment, so they cannot disagree
+    with each other or with the event. His line repeats the date only when it is another day
+    there."""
+    home = zone_of(home_tz)
+    if home is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(ev["start"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        return None                 # no offset written: his own clock
+    zone = zone_of(ev.get("timezone"))
+    there = moment.astimezone(zone) if zone is not None else moment
+    here = moment.astimezone(home)
+    if there.utcoffset() == here.utcoffset():
+        return None                 # the same clock, whatever it is called
+    first = f"{_dt(there.isoformat(), lang, today)} {zone_label(ev.get('timezone'), there, lang)}"
+    his = fmt_time(here.isoformat(), lang) if here.date() == there.date() \
+        else _dt(here.isoformat(), lang, today)
+    return [first, f"{his} {zone_label(home_tz, here, lang)}"]
+
+
+def _when(ev: dict, lang: str, today: date | None = None, home_tz: str | None = None) -> list:
     """The date/time line(s) for any event, either kind — THE one renderer.
 
     Returns a list because an all-day event reads as two lines (the day, then "Dia inteiro")
-    while a timed one reads as one. Never route a date-only ISO through _dt: fmt_time would
-    turn it into midnight and print "12:00 AM" on a whole-day event."""
+    while a timed one reads as one, or as two when it is on another clock than the owner's
+    (_two_clocks). Never route a date-only ISO through _dt: fmt_time would turn it into midnight
+    and print "12:00 AM" on a whole-day event."""
     L = _L[lang]
     iso = ev.get("start")
     if not iso:
         return []
     all_day = ev.get("all_day", is_date_only(iso))
     if not all_day:
-        return [_dt(iso, lang, today)]
+        return _two_clocks(ev, lang, today, home_tz) or [_dt(iso, lang, today)]
     iso = iso[:10]                      # coerce, exactly as the handler does
     last = (ev.get("end") or iso)[:10]
     try:
@@ -220,7 +261,7 @@ def compose_create(action: dict, state: dict) -> str | None:
     if not action.get("start"):
         return None
     lines = [f"{L['confirm_create']}:", "", action.get("title") or L["event"],
-             *_when(action, lang, _today(state))]
+             *_when(action, lang, _today(state), _home(state))]
     # NOT `action.get("virtual")`: the video call is often the DEFAULT rather than something the
     # model asked for (a timed event with no place), and this card is the only place the owner
     # gets to see that before it happens. Same resolver the handler builds the body from.
@@ -256,7 +297,7 @@ def compose_update(action: dict, state: dict) -> str | None:
 
     lines = [f"{L['confirm_update']}:", "", header or L["event"]]
     if ev.get("start"):
-        lines.extend(_when(ev, lang, _today(state)))
+        lines.extend(_when(ev, lang, _today(state), _home(state)))
 
     described: list[str] = []
     chs = changes(action, ev)
@@ -268,10 +309,13 @@ def compose_update(action: dict, state: dict) -> str | None:
             "start": by["start"]["new"] if "start" in by else ev.get("start"),
             "end": by["end"]["new"] if "end" in by else ev.get("end"),
             "all_day": by["all_day"]["new"] if "all_day" in by else ev.get("all_day"),
+            # A new start is on the clock she named for it (none named: his own). An event whose
+            # start stays put keeps the clock it was booked on.
+            "timezone": action.get("timezone") if "start" in by else ev.get("timezone"),
         }
         if "all_day" in by:
             described.append(L["u_all_day"] if after["all_day"] else L["u_timed"])
-        when = _when(after, lang, _today(state))
+        when = _when(after, lang, _today(state), _home(state))
         if when:
             described.append(f"{(L['u_date'] if after['all_day'] else L['u_time'])}: {when[0]}")
             described.extend(when[1:])
@@ -327,7 +371,7 @@ def compose_delete(action: dict, state: dict) -> str | None:
         return None
     lines = [f"{L['confirm_delete']}:", "", ev.get("title") or L["event"]]
     if ev.get("start"):
-        lines.extend(_when(ev, lang, _today(state)))
+        lines.extend(_when(ev, lang, _today(state), _home(state)))
     if ev.get("attendees"):
         names = _guest_names(state)
         lines.append(L["participants"])
@@ -438,7 +482,7 @@ def fmt_delete(results: list, state: dict) -> str:
     lang = _lang(state); L = _L[lang]
     d = (results[0].get("data") or {})
     lines = [f"{L['cancelled']}:", "", d.get("title") or L["event"]]
-    lines.extend(_when(d, lang, _today(state)))
+    lines.extend(_when(d, lang, _today(state), _home(state)))
     if d.get("had_attendees"):
         lines.append(L["guests_did"] if d.get("notified", True) else L["guests_silent"])
     return _joined(lines)

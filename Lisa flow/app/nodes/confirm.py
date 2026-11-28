@@ -160,6 +160,7 @@ async def confirm_node(
                 continue
         composed = (policy.compose(action, {**state, "side_effects": stripped,
                                             "owner_today": today_in(settings.calendar_timezone),
+                                            "owner_tz": settings.calendar_timezone,
                                             "presets": presets.snapshot() if presets else None})
                     if carded and held_back is None else None)
         if composed:

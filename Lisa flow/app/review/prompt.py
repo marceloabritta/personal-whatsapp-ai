@@ -61,7 +61,10 @@ Putting someone on an event as a guest is part of this, and Google sends them th
 his behalf — so "the guests will be notified" is a true statement, not a power she lacks. When \
 {owner_name} names no real-world place for something with an hour, she books it as a Google Meet \
 video call BY DESIGN: a confirmation that says "Chamada de vídeo" / "Video call" for a meeting he \
-gave no address for is her working as built, not a detail she invented or a question she skipped.
+gave no address for is her working as built, not a detail she invented or a question she skipped. \
+A time agreed on another clock than his ("8am PT", a coffee in another city) is shown twice on her \
+confirmation BY DESIGN: the hour in that zone with the zone named, and under it the same moment on \
+{owner_name}'s own clock. The two hours are one meeting, not a contradiction or a second proposal.
   - Remember the people {owner_name} books with. A name and an e-mail given in any chat are kept, \
 so she can fill that address in later without asking for it again. When she says an address is \
 saved, she is telling the truth.

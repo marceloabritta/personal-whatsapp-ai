@@ -19,6 +19,11 @@ _BOOL = {"type": "boolean"}
 # adds nothing to the 24-optional cap (calendar sits at 23).
 _WEEKDAY = {"type": "string", "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
                                        "Saturday", "Sunday"]}
+# The zone the event's time was said in, as an IANA name ("America/Los_Angeles"). Checked in code
+# against the offset in "start" (skills/timezone_check.py); kept on the action only when it is
+# another clock than the owner's, where the card shows both and the event is stored in it.
+# REQUIRED on create and update, like `weekday`, so it adds nothing to the 24-optional cap.
+_ZONE = {"type": "string"}
 _STRARR = {"type": "array", "items": {"type": "string"}}
 
 
@@ -39,11 +44,12 @@ def _verb(required: list[str], properties: dict) -> dict:
 # against the live API, which rejects 25 with "too many optional parameters". duration_min
 # was dropped (use `end`) to keep margin under it; the handler still honours it if present.
 CREATE = _verb(
-    ["title", "start", "weekday"],
+    ["title", "start", "weekday", "timezone"],
     {
         "title": _STR,
         "start": _STR,            # ISO 8601 with offset, resolved by the model
         "weekday": _WEEKDAY,      # the start's weekday; a check, never sent to Google
+        "timezone": _ZONE,        # the zone the time was said in; checked against start's offset
         "end": _STR,              # ISO 8601; omitted -> start + default_meeting_minutes
         "virtual": _BOOL,         # true -> Google Meet link; nulls location (video wins)
         "location": _STR,
@@ -72,10 +78,11 @@ FIND = _verb(
 
 # update — needs a resolved event_id; any create-like field may be patched.
 UPDATE = _verb(
-    ["event_id", "weekday"],
+    ["event_id", "weekday", "timezone"],
     {
         "event_id": _STR,
         "weekday": _WEEKDAY,      # the event's weekday after the change; checked when "start" moves
+        "timezone": _ZONE,        # the zone a new "start" is said in; ignored when it does not move
         "title": _STR,
         "start": _STR,
         "end": _STR,
