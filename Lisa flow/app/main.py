@@ -201,6 +201,26 @@ async def lifespan(app: FastAPI):
             log.warning("session-review disabled: %s", exc)
             reviewer = reaper = None
 
+    # The fix loop's desk (app/fixdesk/): opens a case for each graded session with a mistake in
+    # it, sends him the plans his Mac writes, and reads his "fix it". Best-effort like the review
+    # it listens to, and it calls no model. Off unless FIX_LOOP_ENABLED.
+    fixdesk = None
+    if store is not None and s.fix_loop_enabled:
+        from .fixdesk import FixDesk, FixStore
+
+        fstore = FixStore(s.database_url, schema=s.log_schema)
+        try:
+            await fstore.open()
+            fixdesk = FixDesk(fstore, deps.evolution, s)
+            fixdesk.start()
+            if reviewer is not None:
+                reviewer.on_graded = fixdesk.note_graded
+            log.info('{"boot":"fix-desk","cases_from_review":%s}',
+                     "true" if reviewer is not None else "false")
+        except Exception as exc:  # the desk must never block startup
+            log.warning("fix desk disabled: %s", exc)
+            fixdesk = None
+
     # History search — the index, the voice-note capture and the skill's store (app/history/).
     # Each part is switched on by its own HISTORY_* setting and is best-effort.
     from .history import runtime as history_runtime
@@ -210,6 +230,7 @@ async def lifespan(app: FastAPI):
     app.state.deps = deps
     app.state.logstore = store
     app.state.reaper = reaper
+    app.state.fixdesk = fixdesk
     deps.reaper = reaper  # act_node offers closed loops here; None is a no-op
     app.state.graph = build_graph(deps, checkpointer)
     try:
@@ -223,6 +244,9 @@ async def lifespan(app: FastAPI):
             await deps.directory.aclose()
         if cstore is not None:
             await cstore.aclose()
+        if fixdesk is not None:
+            await fixdesk.aclose()
+            await fixdesk.store.aclose()
         if reaper is not None:
             await reaper.aclose()
             await reviewer.store.aclose()
@@ -287,6 +311,18 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     deps = request.app.state.deps
     thread_id = make_thread_id(deps.settings.evolution_instance, chat_jid)
     background.add_task(_run, request.app, body, thread_id)
+    return Response(status_code=200)
+
+
+@app.post("/fix/reply")
+async def fix_reply(request: Request, background: BackgroundTasks) -> Response:
+    """His answer to a fix plan ("fix it", "skip"), forwarded by the dispatcher. Never the
+    graph: the desk reads it with no model, and drops anything that is not his own answer in
+    his chat with himself. With the fix loop off this answers 200 and does nothing."""
+    body = await request.json()
+    desk = getattr(request.app.state, "fixdesk", None)
+    if desk is not None:
+        background.add_task(desk.handle_reply, body)
     return Response(status_code=200)
 
 

@@ -99,6 +99,9 @@ services:
       # A new flow adds NEW_TAGS + NEW_URL here; @lisa stays untouched.
       LISA_TAGS: "@lisa"
       LISA_URL: http://lisa:8000/webhook
+      # The fix loop: his own untagged "fix it" or "skip", outside any live window, goes to
+      # Lisa's fix desk, which acts only in his chat with himself. Unset = the rule is off.
+      FIX_REPLY_URL: http://lisa:8000/fix/reply
     networks:
       - evolution-net
 
@@ -177,6 +180,12 @@ services:
       REVIEW_SCOPE_VERSION: "2026-11-27-timezone-card"
       REVIEW_JUDGE_VERSION: "v5"
       REVIEW_MODEL: claude-opus-4-8
+      # The fix loop (app/fixdesk/): a session the judge found a mistake in becomes a case; his
+      # Mac investigates it in Claude Code once a day (fixer/ at the repo root); she sends the plan
+      # to his chat with himself; "fix it" there has the Mac make the fix. No model call on this
+      # side. "false" stops all of it: no case, no message, and the Mac's daily run does nothing.
+      FIX_LOOP_ENABLED: "true"
+      FIX_RUN_AT: "08:00"         # when the Mac's daily run starts; only what she tells him
       # Transcription (AssemblyAI).
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
       ASSEMBLYAI_LANGUAGE: auto

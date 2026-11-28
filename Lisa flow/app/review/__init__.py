@@ -32,6 +32,10 @@ class Reviewer:
         self.store = store
         self.judge = judge or Judge(settings)
         self._sem = asyncio.Semaphore(max(1, settings.review_concurrency))
+        # Called with (loop_id, judge_version) once a session has been graded. Set only by the
+        # live process (main.py), never by the backfill CLI: the fix loop opens cases from what is
+        # graded as it happens, not from history being re-scored.
+        self.on_graded = None
 
     async def review_loop(self, loop_id: str) -> dict:
         """Grade every turn in one session. Idempotent per (loop, judge_version).
@@ -63,6 +67,11 @@ class Reviewer:
             await self.store.mark_done(loop_id, judge_version=jv, turns=len(graded), bad=bad)
         except Exception as exc:
             log.warning("review: could not mark %s done: %s", loop_id, exc)
+        if self.on_graded is not None and graded:
+            try:
+                await self.on_graded(loop_id, jv)
+            except Exception as exc:  # whatever listens must never break a review
+                log.warning("review: on_graded failed for %s: %s", loop_id, exc)
         return {"loop_id": loop_id, "turns": len(graded), "bad": bad}
 
     async def _review_turn(self, turn: dict, audio: dict) -> dict:

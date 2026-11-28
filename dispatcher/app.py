@@ -6,6 +6,7 @@ ownership) and forwards the *raw, unmodified* payload to the flow that owns the 
 
     @lisa                              ─▶  Lisa flow   (LangGraph brain, :8000)
     (untagged)                         ─▶  the chat's current owner-flow, if its window is live
+    (his own "fix it" / "skip")        ─▶  FIX_REPLY_URL, if configured and no window is live
     (any voice note)                   ─▶  AUTO_TRANSCRIBE_URL, additionally, if configured
 
 Adding a new experimental flow is one line: drop another (tags, url) route below (or wire it
@@ -38,6 +39,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from typing import Any
@@ -118,6 +120,15 @@ def is_own_message(text: str, owner_name: str) -> bool:
     return any(t.startswith(h) for h in _all_headers(owner_name))
 
 
+# His answer to a fix plan (Lisa flow/app/fixdesk/): "fix it", "Fix it F12", "skip". Only the
+# opening words are read here; the desk reads the rest and decides whether it is an answer.
+_FIX_ANSWER = re.compile(r"^\s*(fix\s+it|skip)\b", re.IGNORECASE)
+
+
+def is_fix_answer(text: str) -> bool:
+    return bool(_FIX_ANSWER.match(text or ""))
+
+
 # ── config ──────────────────────────────────────────────────────────────────
 def _tags(raw: str) -> list[str]:
     return [t.strip().lower() for t in raw.split(",") if t.strip()]
@@ -143,6 +154,13 @@ class Config:
         # forwarded to that flow — which decides for itself whether the chat is enrolled. Leave
         # it unset and the dispatcher behaves exactly as it did before.
         self.auto_transcribe_url = os.getenv("AUTO_TRANSCRIBE_URL") or None
+        # The fix desk. Lisa sends him fix plans in his chat with himself, and he answers with a
+        # plain "fix it" or "skip": no tag, and her own message opens no window, so the rules
+        # below would drop it. When this is set, a message of HIS that opens with one of those
+        # words, and falls under no tag and no live window, is forwarded here. It claims no
+        # window. The desk acts only in his chat with himself; from any other chat the forward
+        # costs one POST and stops there. Unset, the dispatcher behaves exactly as before.
+        self.fix_reply_url = os.getenv("FIX_REPLY_URL") or None
         # How long a forward is tried again while its flow cannot be reached (see Forwarder).
         # It has to outlast a flow's whole restart: up to 120 s finishing the turns it had in
         # flight (stop_grace_period on the lisa service) and about 15 s to boot. "0" tries
@@ -506,6 +524,7 @@ async def health() -> dict:
         "service": "dispatcher",
         "routes": [{"tags": t, "url": u} for t, u in cfg.routes],
         "auto_transcribe_url": cfg.auto_transcribe_url,
+        "fix_reply_url": cfg.fix_reply_url,
         "window_ttl": cfg.window_ttl,
         "max_message_age": cfg.max_message_age,
         "drain": breaker.state(),
@@ -578,7 +597,16 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
         log.info('{"route":"window","jid":"%s","url":"%s"}', jid, url)
         return Response(status_code=200)
 
-    # 3) No tag, no open window → nothing to do (the audio rule above may still have fired).
+    # 3) His answer to a fix plan → the fix desk. After the window rule on purpose: while he is
+    #    talking with a flow in this chat, "fix it" is part of that conversation.
+    if (from_me and cfg.fix_reply_url and is_fix_answer(text)
+            and not is_own_message(text, cfg.owner_name)):
+        if cfg.fix_reply_url not in forwarded:
+            background.add_task(_forward, cfg.fix_reply_url, body)
+        log.info('{"route":"fix","jid":"%s","url":"%s"}', jid, cfg.fix_reply_url)
+        return Response(status_code=200)
+
+    # 4) No tag, no open window → nothing to do (the audio rule above may still have fired).
     if not forwarded:
         log.info('{"route":"drop","jid":"%s","from_me":%s}', jid, str(from_me).lower())
     return Response(status_code=200)

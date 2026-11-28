@@ -192,6 +192,19 @@ class Settings(BaseSettings):
     review_concurrency: int = 4         # parallel judge calls within one loop
     review_max_context_lines: int = 60  # transcript lines shown to the judge; oldest trimmed first
 
+    # The fix loop (app/fixdesk/). A session the judge found a mistake in becomes a case; his Mac
+    # investigates it in Claude Code once a day; she sends him the plan in his chat with himself;
+    # "fix it" there has the Mac make the fix. OFF in code: with it off no case is opened, nothing
+    # is sent and POST /fix/reply answers and does nothing. Needs the session review on.
+    fix_loop_enabled: bool = False
+    fix_daily_cap: int = 5          # plans sent to him per day; the rest wait for tomorrow
+    fix_quiet_from: int = 22        # nothing is sent from this hour (local)...
+    fix_quiet_until: int = 8        # ...until this one
+    fix_desk_seconds: int = 60      # how often the desk looks for something to send
+    fix_expire_days: int = 14       # a plan with no answer for this long is closed
+    fix_run_at: str = "08:00"       # when the Mac's daily run starts; only what she tells him
+    fix_lang: str = "en"            # the header on the desk's messages
+
     # History search (app/history/). Three independent switches, all OFF in code:
     #   history_index_enabled          the indexer mirrors Evolution's "Message" into lisa_search
     #   history_voice_capture_enabled  every voice note in every chat is transcribed on arrival
