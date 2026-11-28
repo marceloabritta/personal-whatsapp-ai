@@ -199,6 +199,11 @@ def unit_checks() -> None:
           fx.pick_gates({"gates": ["live_nope", "live_dates"]}, wt, ["Lisa flow/app/thing.py"]) == ["live_dates.py"])
     check("a dispatcher-only change gets none", fx.pick_gates(PLAN, wt, ["dispatcher/app.py"]) == [])
 
+    from datetime import datetime
+    at = lambda h: datetime(2026, 11, 28, h, 30)  # noqa: E731
+    check("fixes run in the daytime only: the live date check misreads the small hours",
+          [fx.fix_hours(at(h)) for h in (1, 5, 6, 12, 21, 22, 23)] == [False, False, True, True, True, False, False])
+
     print("\nthe queue")
     QUEUE.write_text(json.dumps({"pull": {"ok": True, "enabled": True, "new": [], "approved": [], "recent": []}}))
     QCALLS.write_text("")

@@ -639,6 +639,14 @@ def _fix(cli: str, case: dict, branch: str) -> dict:
             "checks": checks}
 
 
+def fix_hours(now: datetime) -> bool:
+    """May fixes run now? Only from 06:00 to 21:59. The live date check books "two hours from
+    now", and late at night that reads as "3 in the morning?": on 2026-11-28 at 01:00 it scored
+    1/5 on production's own code. A fix judged then would be reported as failed when it is not.
+    Investigations spend no live check and run at any hour."""
+    return 6 <= now.hour < 22
+
+
 # ── one run ──────────────────────────────────────────────────────────────────
 def main(argv: list[str]) -> int:
     dry = "--dry" in argv
@@ -683,7 +691,11 @@ def main(argv: list[str]) -> int:
 
     try:
         git("fetch", "--quiet", "origin")
-        for case in (pulled.get("approved") or [])[: int(CFG["FIXER_MAX_FIX"])]:
+        approved = (pulled.get("approved") or [])[: int(CFG["FIXER_MAX_FIX"])]
+        if approved and not fix_hours(datetime.now()):
+            log("fixes wait for daytime", waiting=len(approved))
+            approved = []
+        for case in approved:
             log("fixing", case=case["id"])
             fix(cli, case)
         recent = pulled.get("recent") or []
