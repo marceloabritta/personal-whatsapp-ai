@@ -16,6 +16,7 @@ import asyncio
 from langchain_core.messages import RemoveMessage
 
 from ..carry import _find_card, carried_yes, kept_on_carry
+from ..fixdesk.text import is_fixdesk_line
 from ..identity import is_own_message
 from ..skills.setup import setup_matcher
 from ..state import MessageState
@@ -389,6 +390,12 @@ async def context_node(
     already = set() if reset else set(state.get("read_ids") or [])
 
     records = await evolution.fetch_history(jid)  # oldest → newest
+    # His chat with himself also carries the fix desk's exchange (app/fixdesk/): her plans and
+    # his "fix it". None of it is conversation with her, so she does not read it as one.
+    if state.get("is_self_chat"):
+        records = [r for r in records
+                   if not is_fixdesk_line(r.get("text"), from_me=bool(r.get("from_me")),
+                                          owner_name=owner)]
     if setup_open:
         new = []  # the race guard below supplies the triggering message itself
     elif reset or not state.get("initialized"):
