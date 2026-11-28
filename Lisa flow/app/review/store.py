@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from .prompt import file_line
+
 log = logging.getLogger("mary.review.store")
 
 _AI = "AI Assistant"
@@ -113,6 +115,10 @@ class ReviewStore:
         last_human: Optional[dict] = None
         last_audio_id: Optional[str] = None
         turns: list[dict] = []
+        # Files sent since the last record. A file has no text, so act_node writes no transcript
+        # line for it, only an `act` event; without a line here the judge read "I am sending it"
+        # with nothing after it and filed a file she had in fact delivered.
+        sent_files: list[dict] = []
 
         for e in events:
             if e["stream"] == "transcript":
@@ -132,10 +138,24 @@ class ReviewStore:
                     last_audio_id = e["wa_message_id"]
                 continue
 
+            if e["label"] == "act":
+                f = e["payload"] or {}
+                if f.get("history_file") and f.get("ok"):  # one that failed to send shows nothing
+                    sent_files.append({
+                        "seq": e["seq"], "who": _AI, "text": file_line(f.get("mimetype")),
+                        "wa_id": f.get("wa_id"), "wa_ts": None, "trace_id": e["trace_id"],
+                        "file": True,
+                    })
+                continue
+
             if e["label"] != "record":
                 continue
 
             p = e["payload"] or {}
+            # The files go out after her message and before the record, so they belong to this
+            # turn: shown to the judge under it, and part of the chat for the turns that follow.
+            files, sent_files = sent_files, []
+            lines.extend(files)
             if _nothing_decided(p):
                 continue
             activation_id = p.get("activation_message_id")
@@ -147,6 +167,7 @@ class ReviewStore:
                 "domain": domain,
                 "ts": e["ts"],
                 "reply_text": p.get("response"),
+                "files": [f["text"] for f in files],
                 "silent": p.get("response") is None,
                 # timing facts
                 "reply_ts": e["ts"].timestamp() if e["ts"] is not None else None,
@@ -167,7 +188,8 @@ class ReviewStore:
                 # activation's trace_id, so dropping the assistant line written by THIS
                 # activation is exact. Human lines from the same activation stay: they are what
                 # she was answering.
-                "lines": _context_for(lines, e["trace_id"], wrote=p.get("response") is not None),
+                "lines": _context_for(lines[:len(lines) - len(files)], e["trace_id"],
+                                      wrote=p.get("response") is not None),
             })
 
         return turns
@@ -333,7 +355,9 @@ def _context_for(lines: list[dict], trace_id: Optional[str], *, wrote: bool = Tr
     own = None
     if wrote:
         for i in range(len(lines) - 1, -1, -1):
-            if lines[i].get("trace_id") == trace_id and not _is_human(lines[i].get("who")):
+            # A file line is hers too, and carries the trace of the reply it followed.
+            if (lines[i].get("trace_id") == trace_id and not _is_human(lines[i].get("who"))
+                    and not lines[i].get("file")):
                 own = i
                 break
     return [dict(ln) for i, ln in enumerate(lines) if i != own]

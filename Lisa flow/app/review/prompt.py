@@ -18,9 +18,21 @@ from .taxonomy import JUDGE_CODES, TASK_CLASSES
 
 SILENT_MARKER = "(stayed silent — sent nothing)"
 
+_FILE_KINDS = {"application/pdf": "PDF"}
+_FILE_FAMILIES = {"image": "image", "audio": "audio", "video": "video"}
+
+
+def file_line(mimetype: str | None = None) -> str:
+    """How a file she sent reads in the judge's transcript: what kind it was, never its name or
+    what it holds (the log keeps neither). The capability card quotes this same line."""
+    mt = (mimetype or "").lower()
+    kind = _FILE_KINDS.get(mt) or _FILE_FAMILIES.get(mt.split("/")[0]) or "document"
+    return f"[sent a file: {kind}]"
+
 
 def build_judge_prompt(owner_name: str = "Marcelo", tag: str = "@lisa",
-                       contacts_skill: bool = False, busy_check: bool = False) -> str:
+                       contacts_skill: bool = False, busy_check: bool = False,
+                       history: bool = False) -> str:
     # Told she can edit contacts while the skill is off, the judge would mark her honest "I can't" a
     # false refusal.
     contacts_can = (f"""  - Google Contacts on {owner_name}'s own account, when he asks: look a person up, save a new one, \
@@ -43,6 +55,20 @@ so telling him to ask for those in his own chat is her working as built, not a r
         f"offering no other time at all are each deliberate. So is settling a new time with the "
         f"other person in the chat, and showing the card after all when {owner_name} says to book "
         f"it anyway.\n" if busy_check else "")
+    # A file has no text, so nothing in the chat's words shows it went. Told she has "no
+    # recollection of what was SAID in other chats" while the history skill is on, the judge filed
+    # "Te mando aqui a versão de 2 páginas" as a file she claimed to send and could not; the PDF
+    # had arrived a second later.
+    history_can = (f"""  - In {owner_name}'s chat with himself, and nowhere else: search and read his WhatsApp \
+history, meaning what was said in his other chats, by him and by the people he talks to, and the \
+files sent there. She can also send a file she found there into this chat. A file has no text, so \
+the transcript shows each one she sent as a line of its own right after her message, like \
+"{file_line("application/pdf")}". When that line is there the file arrived: "te mando aqui" \
+followed by it is a true statement, not a file she claimed to send and could not. The line names \
+only the kind of file, so do not fault her for which file it was.
+""" if history else "")
+    other_chats = ("outside his chat with himself no recollection of what was SAID in other chats"
+                   if history else "no recollection of what was SAID in other chats")
     codes = "\n".join(f"  {code} — {desc}" for code, desc in JUDGE_CODES.items())
     classes = "\n".join(f"  {name} — {desc}" for name, desc in TASK_CLASSES.items())
 
@@ -68,10 +94,10 @@ confirmation BY DESIGN: the hour in that zone with the zone named, and under it 
   - Remember the people {owner_name} books with. A name and an e-mail given in any chat are kept, \
 so she can fill that address in later without asking for it again. When she says an address is \
 saved, she is telling the truth.
-{contacts_can}  - Search and read the web.
+{contacts_can}{history_can}  - Search and read the web.
   - Transcribe WhatsApp voice notes, and read images and PDFs sent in the chat.
   - Talk. That is all. She has no inbox of her own, no phone, no way to message anyone outside \
-the chat she is in, no recollection of what was SAID in other chats, and no access to anything \
+the chat she is in, {other_chats}, and no access to anything \
 not listed here.
 
 SILENCE IS A REAL AND OFTEN CORRECT MOVE. Her own instructions tell her that most messages in a \
@@ -174,14 +200,20 @@ def render_transcript(lines: list[dict], max_lines: int = 60,
     return "\n".join(out)
 
 
-def build_turn_message(transcript: str, reply_text: str | None, when: str = "") -> str:
+def build_turn_message(transcript: str, reply_text: str | None, when: str = "",
+                       files: list[str] | None = None) -> str:
     """The user-turn content: when it happened, the chat, then the one turn under judgment.
+
+    `files` are the lines for the files she sent on this turn (`file_line`), shown under her
+    message as part of the turn. A file sent with no message is the turn, not a silence.
 
     The stamp is the fix for the judge's single most common bad call. Without a clock it cannot
     resolve "amanhã" or check a weekday, so it hedged — and filed `wrong_details` against dates
     that were right, in one case reasoning about the wrong YEAR. It is placed FIRST so it is read
     before the conversation it has to be applied to."""
-    turn = reply_text.strip() if reply_text else SILENT_MARKER
+    sent = [f"AI Assistant: {f}\n" for f in files or []]
+    said = reply_text.strip() if reply_text else ("" if sent else SILENT_MARKER)
+    turn = (f"AI Assistant: {said}\n" if said else "") + "".join(sent)
     head = f"WHEN THIS TURN WAS TAKEN\n------------------------\n{when}\n\n" if when else ""
     return (
         f"{head}"
@@ -190,7 +222,7 @@ def build_turn_message(transcript: str, reply_text: str | None, when: str = "") 
         f"{transcript or '(no earlier messages)'}\n\n"
         "THE TURN YOU ARE JUDGING\n"
         "------------------------\n"
-        f"AI Assistant: {turn}\n"
+        f"{turn}"
     )
 
 

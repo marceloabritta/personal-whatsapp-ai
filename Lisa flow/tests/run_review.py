@@ -398,6 +398,128 @@ async def test_postgres() -> None:
         await store.aclose()
 
 
+def test_sent_files() -> None:
+    """A file she sends has no text, so it left no line in what the judge reads: "Te mando aqui"
+    followed by the PDF was graded as a file she claimed to send and could not. The send is in
+    the log as an `act` event; load_turns turns it into a line."""
+    print("A2. a file she sent is a line the judge reads (no DB, no key)")
+    import datetime as dt
+    import types
+
+    try:
+        import psycopg.rows  # noqa: F401
+    except Exception:  # load_turns imports it for the row factory; the fake pool needs none
+        sys.modules.setdefault("psycopg", types.ModuleType("psycopg"))
+        rows = types.ModuleType("psycopg.rows")
+        rows.dict_row = None
+        sys.modules["psycopg.rows"] = rows
+
+    from app.review.store import ReviewStore, _context_for
+
+    t0 = dt.datetime(2026, 11, 24, 20, 0, tzinfo=dt.timezone.utc)
+
+    def ev(seq, stream, label, *, who=None, text=None, trace="T1", payload=None, wa=None):
+        return {"seq": seq, "ts": t0 + dt.timedelta(seconds=seq), "stream": stream,
+                "label": label, "who": who, "wa_message_id": wa, "text": text,
+                "trace_id": trace, "payload": payload or {}}
+
+    events = [
+        ev(1, "transcript", "Owner", who="Owner", text="@lisa manda o pdf do resumo",
+           payload={"ts": 1795550000}, wa="MSG00001"),
+        ev(2, "transcript", "AI Assistant", who="AI Assistant", text="Te mando aqui o arquivo."),
+        ev(3, "control", "act", payload={"history_file": "FILE00001", "ok": True,
+                                         "mimetype": "application/pdf", "wa_id": "OUT00001"}),
+        ev(4, "control", "record", payload={"response": "Te mando aqui o arquivo.",
+                                            "activation_message_id": "MSG00001"}),
+        ev(5, "transcript", "Owner", who="Owner", text="e a foto?", trace="T2",
+           payload={"ts": 1795550100}, wa="MSG00002"),
+        ev(6, "transcript", "AI Assistant", who="AI Assistant", text="Segue a foto.", trace="T2"),
+        ev(7, "control", "act", trace="T2",
+           payload={"history_file": "FILE00002", "ok": False, "error": "expired"}),
+        ev(8, "control", "record", trace="T2",
+           payload={"response": "Segue a foto.", "activation_message_id": "MSG00002"}),
+    ]
+
+    class _Cur:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, q, params=None):
+            pass
+
+        async def fetchall(self):
+            return events
+
+        async def fetchone(self):
+            return {"chat_id": "5511900000001@s.whatsapp.net", "prompt_version": "p"}
+
+    class _Conn(_Cur):
+        def cursor(self, row_factory=None):
+            return _Cur()
+
+    class _Pool:
+        def connection(self):
+            return _Conn()
+
+    store = ReviewStore("postgresql://unused")
+    store._pool = _Pool()
+    turns = asyncio.run(store.load_turns("loop-test"))
+    check("two turns are read", len(turns) == 2)
+    first, second = (turns + [{}, {}])[:2]
+    check("the turn that sent a PDF carries it", first.get("files") == ["[sent a file: PDF]"])
+    check("its own file is not in the chat above it",
+          not any("sent a file" in (ln.get("text") or "") for ln in first.get("lines") or []))
+    later = [ln.get("text") for ln in second.get("lines") or []]
+    check("the next turn sees the file, right after her message",
+          "[sent a file: PDF]" in later
+          and later.index("[sent a file: PDF]") == later.index("Te mando aqui o arquivo.") + 1)
+    check("a file that failed to send leaves no line", second.get("files") == [])
+    check("the file line does not move the clock's last human message",
+          second.get("last_human_id") == "MSG00002")
+
+    shown = rp.build_turn_message("x", "Te mando aqui o arquivo.", "", first.get("files"))
+    check("the judge is shown the file under the turn it judges",
+          "AI Assistant: Te mando aqui o arquivo.\nAI Assistant: [sent a file: PDF]" in shown)
+    check("a turn with no file reads as it did",
+          rp.build_turn_message("x", "hi") == rp.build_turn_message("x", "hi", "", []))
+    check("a file sent with no message is not shown as silence",
+          rp.SILENT_MARKER not in rp.build_turn_message("x", None, "", ["[sent a file: PDF]"]))
+
+    # Her reply and its file carry one trace id; the reply is still the line taken out.
+    own = [{"who": "Owner", "text": "ask", "trace_id": "T1"},
+           {"who": "AI Assistant", "text": "THE TURN ITSELF", "trace_id": "T1"},
+           {"who": "AI Assistant", "text": "[sent a file: PDF]", "trace_id": "T1", "file": True}]
+    ctx = [ln["text"] for ln in _context_for(own, "T1")]
+    check("a file line never stands in for the reply being judged",
+          "THE TURN ITSELF" not in ctx and "[sent a file: PDF]" in ctx)
+
+    # -- the capability card --
+    off = rp.build_judge_prompt("Marcelo", "@lisa")
+    on = rp.build_judge_prompt("Marcelo", "@lisa", history=True)
+    check("history off: she still has no recollection of other chats",
+          "no recollection of what was SAID in other chats" in off and "sent a file" not in off)
+    check("history on: the card grants the search of his history",
+          "whatsapp history" in on.lower())
+    check("history on: the card says a sent file shows as a line", "[sent a file: PDF]" in on)
+    check("history on: only in his chat with himself", "chat with himself" in on)
+    for forbidden in ("latency", "seconds", "how long it took", "milliseconds"):
+        check(f"history card never mentions {forbidden!r}", forbidden not in on.lower())
+
+    from app.config import Settings
+    from app.review.judge import Judge
+
+    base = dict(ANTHROPIC_API_KEY="sk-ant-prod-x", OWNER_NAME="Marcelo")
+    check("the judge is told about history when the skill is on",
+          "[sent a file: PDF]" in Judge(Settings(**base, HISTORY_ENABLED=True))._system)
+    check("and not when it is off",
+          "[sent a file: PDF]" not in Judge(Settings(**base, HISTORY_ENABLED=False))._system)
+    check("the rubric changed, so its version did",
+          Settings.model_fields["review_judge_version"].default == "v6")
+
+
 def test_judge_key() -> None:
     """The judge bills to its own key when one is set, and to production's when it is not."""
     from app.config import Settings
@@ -412,6 +534,7 @@ def test_judge_key() -> None:
 
 def main() -> int:
     test_pure()
+    test_sent_files()
     test_judge_key()
     test_baseline()
     asyncio.run(test_postgres())

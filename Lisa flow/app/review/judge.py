@@ -29,6 +29,7 @@ class Judge:
             owner_name=settings.owner_name, tag=settings.primary_tag,
             contacts_skill=bool(getattr(settings, "contacts_crud_on", False)),
             busy_check=bool(getattr(settings, "busy_check_enabled", False)),
+            history=bool(getattr(settings, "history_enabled", False)),
         )
 
     def _client_or_make(self):
@@ -43,18 +44,20 @@ class Judge:
                 api_key=key or self.s.anthropic_api_key)
         return self._client
 
-    async def judge(self, *, lines: list[dict], reply_text: Optional[str], turn_ts=None) -> dict:
+    async def judge(self, *, lines: list[dict], reply_text: Optional[str], turn_ts=None,
+                    files: Optional[list[str]] = None) -> dict:
         """Grade one turn from the transcript alone.
 
         `lines` is every transcript line before this turn, oldest first. `reply_text` is what she
         sent, or None when she stayed silent — silence is a decision and is judged too. `turn_ts`
         is when the turn was taken: the judge needs a date to resolve "amanhã" and to check a
-        weekday, and without one it filed wrong_details against dates that were right."""
+        weekday, and without one it filed wrong_details against dates that were right. `files`
+        are the lines for the files she sent on this turn, shown under her message."""
         tz_name = getattr(self.s, "calendar_timezone", "America/Sao_Paulo")
         transcript = render_transcript(lines, max_lines=self.s.review_max_context_lines,
                                        tz_name=tz_name)
         when = format_when(turn_ts, tz_name)
-        content = build_turn_message(transcript, reply_text, when)
+        content = build_turn_message(transcript, reply_text, when, files)
 
         # The judge's instructions are the same for every turn it grades, and a loop's turns are
         # graded together, so all but the first read them back from Anthropic's prompt cache
