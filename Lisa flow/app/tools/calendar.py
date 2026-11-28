@@ -21,6 +21,8 @@ import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from ..zones import is_nobodys_clock, zone_key, zone_of
+
 from .base import ActionResult
 
 log = logging.getLogger("mary.tools.calendar")
@@ -334,6 +336,19 @@ def free_windows(busy: list, lo: datetime, hi: datetime, need: timedelta) -> lis
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
+def _other_clock(view: dict) -> str:
+    """' (08:00 in America/Los_Angeles, the zone it was booked in)' for an event stored on another
+    clock than his, as the MODEL reads it: a new time for that event is said on that clock."""
+    zone = zone_of(view.get("timezone"))
+    if zone is None:
+        return ""
+    try:
+        there = datetime.fromisoformat(view["start"]).astimezone(zone)
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return f" ({there:%a %H:%M} in {view['timezone']}, the zone it was booked in)"
+
+
 DESCRIBE = (
     "Create, find, reschedule or cancel events on {owner_name}'s Google Calendar."
 )
@@ -348,6 +363,8 @@ ALWAYS
 - Resolve every relative time yourself into a full ISO 8601 datetime WITH the offset ("next Friday 3pm" -> 2026-08-07T15:00:00-03:00) — never pass a vague phrase. Read it from the day of the message that says it: every line carries the time it was sent, and the date rule at the end of these instructions applies here too.
 - Every create and update carries "weekday": the weekday of the event's day, in English. Take the date and its weekday together from the table of the days around today; never count days yourself. When someone named a weekday ("quinta", "Thursday"), that weekday is the day they mean. The system checks "weekday" against "start" and sends you back when they disagree. Whenever you write a weekday next to a date in a message, the same rule holds.
 - To create, change or cancel anything, just emit the action and leave "message" null. The system shows {owner_name} a confirmation and runs it for you when he agrees — you never mark anything approved, and you never re-send an action you already sent. Only `list` and `find` run without asking.
+- Every create and update carries "timezone": the IANA name of the time zone the time was said in. {owner_name}'s own clock is {owner_tz}, and that is the answer unless the conversation puts the time on another clock: someone names a zone or a place for it ("8am PT", "10h no horário de Lisboa", "hora local de San Francisco"), he tells you to mind the time zone, or it is an in-person meeting at a place that is plainly somewhere else (a coffee in San Francisco is at San Francisco's time). Then "timezone" is that zone ("America/Los_Angeles" for Pacific time, "America/New_York" for Eastern) and "start" is the clock time they said, with THAT zone's offset on that date, which daylight saving changes: 8am Pacific on 9 December is "start": "2026-12-09T08:00:00-08:00", "timezone": "America/Los_Angeles". Never convert the hour to {owner_name}'s clock yourself: the system checks the offset against the zone, and the card it sends shows the time on both clocks. A new time for an event that was booked in another zone (the search result says which) is on that zone's clock too, unless they say otherwise.
+- When a time in this conversation is on another clock than {owner_name}'s, every hour you write in a message says which clock it is on ("8:30 PT funciona para vocês?"). The times the system gives you, such as his free times, are on his own clock: convert before you offer one.
 - Two kinds of event. Set "all_day": true for whole-day things — birthdays, holidays, travel and trips, time off, a deadline with no hour, "block Thursday". Leave it out for anything with an hour.
 - On an all-day event write "start" as a bare date, "2026-09-14". On a timed one write a full ISO datetime with offset, "2026-09-14T15:00:00-03:00".
 - "end" on an all-day event is the LAST DAY, INCLUSIVE. Away the 14th through the 16th is start "2026-09-14", end "2026-09-16". A single day needs no "end" at all. Never add a day to the end yourself — the system handles how Google stores it.
@@ -363,7 +380,7 @@ CREATE — you only need a title and a start; do not interrogate {owner_name} fo
 - WHERE it happens: set "location" when he says a real-world place ("at the office", "Starbucks Faria Lima", "his apartment"). If he names no place, DO NOT ASK and do not send "virtual" — a timed event with no location automatically gets a Google Meet link, and the confirmation shows him "Video call" so he can correct it. "virtual": true is only worth sending when he explicitly asks for a call/Meet/Zoom.
 - Send "virtual": false for the timed things that are not a call he would dial into and that have no address worth writing: the dentist, the gym, a haircut, a flight, or a block of his own time (focus, lunch, commute). No place named and no Meet either.
 - Vague about the hour? Assume a sensible default (morning ~09:00, lunch ~12:00, afternoon ~14:00, evening ~19:00) — the confirmation shows it so he can fix it.
-- Emit: {{"task": "calendar.create", "title": ..., "start": ...}} with "message": null.
+- Emit: {{"task": "calendar.create", "title": ..., "start": ..., "weekday": ..., "timezone": ...}} with "message": null.
 
 LIST — read-only, no confirmation. Resolve the window from his question (default: what is coming up). Emit `calendar.list` with time_min/time_max; the system formats and sends the agenda.
 
@@ -523,6 +540,18 @@ class GoogleCalendarService:
             # Google's exclusive boundary stops here and goes no further. Above the handler an
             # all-day event ends on its LAST DAY, which is what a person means by "through the 16th".
             e_iso = from_wire_end(e_iso)
+        view = self._view(e, all_day, s_iso, e_iso)
+        # The zone the event is stored in, when it is another than his. That is the clock its
+        # time was agreed on, and the cards show it beside his own. Absent on every event of his
+        # own zone, so those read exactly as they always did; and UTC is what a booking tool
+        # stamps on an event, not anybody's clock.
+        zone = zone_key(start.get("timeZone")) if not all_day else None
+        if zone and zone != zone_key(self.s.calendar_timezone) and not is_nobodys_clock(zone):
+            view["timezone"] = zone
+        return view
+
+    @staticmethod
+    def _view(e: dict, all_day: bool, s_iso, e_iso) -> dict:
         return {
             "event_id": e.get("id"),
             "title": e.get("summary") or "(no title)",
@@ -561,7 +590,7 @@ class GoogleCalendarService:
         if not start:
             return "?"
         if not v.get("all_day", is_date_only(start)):
-            return cls._fmt(start)
+            return cls._fmt(start) + _other_clock(v)
         try:
             first = as_day(start)
             last = as_day(end or start)
@@ -675,6 +704,10 @@ class GoogleCalendarService:
             else:
                 start, end = timed_span(inp, prev, self._default_minutes(),
                                         self.s.default_start_hour)
+                # A time said on another clock is stored in that zone, so Google shows it there
+                # and the next read of this event knows which clock it was agreed on. The field
+                # only reaches here when it names another clock than his (timezone_check.settle).
+                tz = zone_key(inp.get("timezone")) or tz
                 body["start"] = {"dateTime": start, "timeZone": tz, **clear_date}
                 body["end"] = {"dateTime": end, "timeZone": tz, **clear_date}
 
@@ -940,6 +973,7 @@ class GoogleCalendarService:
         return {"ok": True, "summary": f"Cancelled{label}.",
                 "data": {"event_id": eid, "title": view.get("title"), "start": view.get("start"),
                          "end": view.get("end"), "all_day": view.get("all_day"),
+                         "timezone": view.get("timezone"),
                          "days": view.get("days"), "attendees": view.get("attendees"),
                          "had_attendees": bool(view.get("attendees")), "notified": notified}}
 

@@ -11,3 +11,4 @@ structlog>=24.1.0
 google-api-python-client>=2.130.0
 google-auth>=2.30.0
 phonenumbers>=8.13.0
+tzdata>=2024.1

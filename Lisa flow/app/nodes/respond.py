@@ -76,7 +76,8 @@ async def respond_node(
         route = "act"
     elif getattr(policy, "mode", "llm") == "code" and all_ok and lang in LANGS:
         # The owner's date, so the result card names the day the way the confirmation did.
-        card_state = {**state, "owner_today": today_in(settings.calendar_timezone)}
+        card_state = {**state, "owner_today": today_in(settings.calendar_timezone),
+                      "owner_tz": settings.calendar_timezone}
         update["reply_body"] = await policy.assemble(results=results, state=card_state)
         route = "act"
     elif transient and lang in LANGS and hasattr(policy, "assemble_failure"):
