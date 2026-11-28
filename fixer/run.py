@@ -11,8 +11,10 @@ must not depend on the session's judgment:
     run.py plan <id>               hand in the plan written to <checkout>/.fixer/plan.json
     run.py fix <id>                take an approved case: its checkout on branch fix/case-<id>
     run.py ship <id> --summary .. --review ..
-                                   check the change and hand it in: scope, contact data, every
-                                   offline test, the commit, the live checks, the push, the report
+                                   check the change and put it live: scope, contact data, every
+                                   offline test, the commit, the live checks, the merge to main,
+                                   the deploy (with a rollback tag), the report
+    run.py undo <id>               take a fix that went live back out: revert it on main, deploy
     run.py fail <id> --step .. --detail ..     give an approved case up, and say why
     run.py release <id> --error ..             put a case back for the next run
 
@@ -23,10 +25,12 @@ The droplet cannot call a laptop, so the Mac asks: the queue is reached over ssh
 container (`Lisa flow/app/fixdesk/cli.py`). What is said on WhatsApp is not decided here: this
 reports to the queue, and the fix desk inside Lisa sends.
 
-WHAT IS ENFORCED HERE, whatever the session does: a change reaches GitHub only through `ship`,
-and `ship` refuses one that touches anything outside Lisa and the dispatcher, that carries what
-looks like a real person's data, or that fails an offline test or a live check. The session
-never commits or pushes; this does. Nothing is deployed.
+WHAT IS ENFORCED HERE, whatever the session does: a change reaches GitHub and production only
+through `ship`, and `ship` refuses one that touches anything outside Lisa and the dispatcher,
+that carries what looks like a real person's data, or that fails an offline test or a live
+check. The session never commits, pushes or deploys; this does. The deploy keeps the running
+image under a rollback tag, tries the new image before swapping, and puts the old one back if
+the new one does not boot; main is then reverted too, so main and production never disagree.
 
 Standard library only. `fixer/install.sh` copies it to ~/.lisa-fixer/app, outside the repo."""
 from __future__ import annotations
@@ -58,6 +62,7 @@ def _load_config() -> dict:
         "FIXER_MAX_NEW": "5",          # investigations offered per run
         "FIXER_MAX_FIX": "3",          # fixes offered per run
         "FIXER_LIVE_CHECKS": "1",      # "0" = offline tests only (no API spend, not end to end)
+        "FIXER_DEPLOY": "1",           # "0" = stop at a tested, pushed branch
         "FIXER_STALE_HOURS": "6",      # a case taken this long ago and never handed in is put back
     }
     f = STATE / "config.env"
@@ -96,6 +101,16 @@ class Stop(Exception):
         self.step, self.detail = step, detail
 
 
+class Final(Stop):
+    """It failed after reaching main. Main has been put back; the case is over, not retried:
+    a branch whose merge was reverted cannot simply be merged again."""
+
+
+# Changing one of these changes the judge's rubric, so its version has to move.
+JUDGE_FILES = ("Lisa flow/app/review/prompt.py", "Lisa flow/app/review/taxonomy.py",
+               "Lisa flow/app/review/timing.py")
+
+
 # ── logging ─────────────────────────────────────────────────────────────────
 def log(msg: str, **kw: Any) -> None:
     line = json.dumps({"t": datetime.now().isoformat(timespec="seconds"), "msg": msg, **kw}, default=str)
@@ -117,13 +132,23 @@ def sh(cmd: list[str], *, cwd: Optional[Path] = None, stdin: Optional[str] = Non
 
 
 # ── the queue, over SSH ───────────────────────────────────────────────────────
+def _ssh() -> list[str]:
+    return shlex.split(os.environ.get("FIXER_SSH_CMD", "")) or [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30",
+        CFG["FIXER_SSH_HOST"]]
+
+
+def remote_script(name: str, args: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run one of fixer/remote/*.sh on the droplet, fed over ssh."""
+    script = (HERE / "remote" / name).read_text()
+    return sh([*_ssh(), "bash", "-s", "--", *args], stdin=script, timeout=timeout, check=False)
+
+
 def queue(*args: str, stdin: Optional[dict] = None, timeout: float = 120) -> dict:
     """One call to `app.fixdesk.cli` inside the Lisa container. The answer is the last line."""
     remote = "docker exec -i {c} python -m app.fixdesk.cli {a}".format(
         c=shlex.quote(CFG["FIXER_CONTAINER"]), a=" ".join(shlex.quote(a) for a in args))
-    base = shlex.split(os.environ.get("FIXER_SSH_CMD", "")) or [
-        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", CFG["FIXER_SSH_HOST"]]
-    p = sh([*base, remote], stdin=json.dumps(stdin if stdin is not None else {}, default=str),
+    p = sh([*_ssh(), remote], stdin=json.dumps(stdin if stdin is not None else {}, default=str),
            timeout=timeout, check=False)
     lines = [ln for ln in p.stdout.strip().splitlines() if ln.startswith("{")]
     if not lines:
@@ -428,24 +453,164 @@ def pick_gates(plan: dict, wt: Path, paths: list[str]) -> list[str]:
     return gates[:4]
 
 
+# ── putting a change live ─────────────────────────────────────────────────────────
+def _compose_get(text: str, key: str) -> Optional[str]:
+    m = re.search(rf'^\s+{key}:\s*"?([^"\n]+?)"?\s*$', text, re.M)
+    return m.group(1) if m else None
+
+
+def _compose_set(text: str, key: str, value: str) -> str:
+    new, n = re.subn(rf'^(\s+{key}:\s*).*$', lambda m: f'{m.group(1)}"{value}"', text, flags=re.M)
+    if n != 1:
+        raise Stop("the versions", f"evolution/docker-compose.yml has no single {key} line")
+    return new
+
+
+def version_bumps(wt: Path, paths: list[str], prompt_changed: bool, label: str) -> dict:
+    """The version lines this change moves, written into the repo's compose file (the live
+    override gets the same values at deploy). Her prompt version names the code that answered a
+    session, and the judge only grades sessions of the current one, so a change to what she is
+    told starts a new version. The judge's own version moves when its rubric does."""
+    f = wt / "evolution" / "docker-compose.yml"
+    text = f.read_text()
+    out: dict = {"prompt": None, "judge": None}
+    if prompt_changed or any(p.endswith("/prompt.py") and "/review/" not in p for p in paths):
+        out["prompt"] = f"{datetime.now():%Y-%m-%d}-{label}"
+        text = _compose_set(_compose_set(text, "PROMPT_VERSION", out["prompt"]),
+                            "REVIEW_SCOPE_VERSION", out["prompt"])
+    if any(p in JUDGE_FILES for p in paths):
+        cur = _compose_get(text, "REVIEW_JUDGE_VERSION") or "v0"
+        m = re.fullmatch(r"v(\d+)", cur)
+        out["judge"] = f"v{int(m.group(1)) + 1}" if m else f"{cur}-{label}"
+        text = _compose_set(text, "REVIEW_JUDGE_VERSION", out["judge"])
+    if out["prompt"] or out["judge"]:
+        f.write_text(text)
+    return out
+
+
+def services_for(paths: list[str]) -> list[str]:
+    """Which containers a change has to restart. Tests alone restart nothing."""
+    out = []
+    if any(p.startswith("Lisa flow/app/") for p in paths):
+        out.append("lisa")
+    if "dispatcher/app.py" in paths:
+        out.append("dispatcher")
+    return out
+
+
+def remote_deploy(sha: str, tag: str, services: list[str], bumps: dict, drill: bool = False) -> dict:
+    """Put main at `sha` into production (fixer/remote/deploy.sh). `ok` is true only when the
+    new containers are up; otherwise `detail` says why and `state` says what production is on."""
+    args = [sha, tag, ",".join(services) or "-", bumps.get("prompt") or "-", bumps.get("judge") or "-"]
+    if drill:
+        args.append("drill-rollback")
+    try:
+        p = remote_script("deploy.sh", args, timeout=2400)
+        lines = [ln for ln in p.stdout.strip().splitlines() if ln.startswith("{")]
+        out = json.loads(lines[-1]) if lines else {"detail": f"no answer from the server (exit {p.returncode})"}
+    except Exception as exc:
+        out = {"detail": f"the connection to the server failed: {exc}"[:200]}
+    out["ok"] = out.get("ok") in (True, "true")
+    if out["ok"]:
+        return out
+    if out.get("rolled_back") == "true":
+        out["state"] = "Production was put back on the previous image."
+    elif out.get("rolled_back") == "false" and not out.get("swap"):
+        out["state"] = "Production was not touched."
+    else:
+        out["state"] = "Production may be down or half-swapped: it needs a look now."
+    return out
+
+
+def revert_main(wt: Path, commits: list[tuple[str, bool]]) -> bool:
+    """Take what could not be deployed back out of main, so main says what production runs.
+    `commits` are (sha, is_merge), newest first. True when main was put back and the server's
+    checkout followed."""
+    try:
+        git("fetch", "--quiet", "origin", cwd=wt)
+        git("checkout", "-q", "--detach", "origin/main", cwd=wt)
+        for sha, is_merge in commits:
+            git("revert", *(["-m", "1"] if is_merge else []), "--no-edit", sha, cwd=wt)
+        git("push", "-q", "origin", "HEAD:main", cwd=wt, timeout=300)
+        back = git("rev-parse", "HEAD", cwd=wt)
+        remote_script("deploy.sh", [back, "pull", "-", "-", "-"], timeout=300)
+        return True
+    except Exception as exc:
+        log("main could not be put back", commits=[c[0][:7] for c in commits], error=str(exc)[:300])
+        git("revert", "--abort", cwd=wt, check=False)
+        return False
+
+
+def land(wt: Path, branch: str, message: str, paths: list[str], prompt_changed: bool,
+         label: str, tag: str) -> dict:
+    """Merge the checked branch into main, push, and deploy. Before main is pushed a refusal is
+    a Stop (correct it, hand it in again); after, it is Final (main is put back, the case ends)."""
+    git("fetch", "--quiet", "origin", cwd=wt)
+    tested_on = git("merge-base", "origin/main", branch, cwd=wt)
+    moved = git("rev-parse", "origin/main", cwd=wt) != tested_on
+    git("checkout", "-q", "--detach", "origin/main", cwd=wt)
+    try:
+        try:
+            git("merge", "--no-ff", "--no-commit", branch, cwd=wt)
+        except RuntimeError:
+            git("merge", "--abort", cwd=wt, check=False)
+            raise Stop("the merge", "main changed under this fix and the two no longer fit together")
+        git("commit", "-q", "-m", message, cwd=wt)
+        merge = git("rev-parse", "HEAD", cwd=wt)
+        # The version lines go in a commit of their own. They sit next to each other in one file,
+        # so inside the merge they would make every later undo of it a conflict.
+        bumps = version_bumps(wt, paths, prompt_changed, label)
+        landed = [(merge, True)]
+        if bumps["prompt"] or bumps["judge"]:
+            git("add", "-A", cwd=wt)
+            git("commit", "-q", "-m", f"chore(lisa): versions for {label}", cwd=wt)
+            landed.insert(0, (git("rev-parse", "HEAD", cwd=wt), False))
+        if moved:   # the tests ran on yesterday's main: run them on what will actually ship
+            ran, failed = offline_tests(wt)
+            if failed:
+                raise Stop("the offline tests", f"merged with today's main, {len(failed)} of {ran} files fail: "
+                                                f"{', '.join(failed[:3])}")
+        sha = git("rev-parse", "HEAD", cwd=wt)
+        try:
+            git("push", "-q", "origin", "HEAD:main", cwd=wt, timeout=300)
+        except RuntimeError:
+            raise Stop("the merge", "main moved while this was being checked; hand it in again")
+    except Stop:
+        git("checkout", "-q", "--force", branch, cwd=wt, check=False)
+        raise
+
+    services = services_for(paths)
+    out = remote_deploy(sha, tag, services, bumps)
+    if not out["ok"]:
+        back = revert_main(wt, landed)
+        git("checkout", "-q", "--force", branch, cwd=wt, check=False)
+        main_state = "Main was put back too." if back else "MAIN STILL HAS THE CHANGE: revert it by hand."
+        raise Final(str(out.get("step") or "the deploy"),
+                    f"{str(out.get('detail') or 'it did not go live')[:120]}. {out['state']} {main_state}")
+    git("checkout", "-q", "--force", branch, cwd=wt, check=False)
+    return {"commit": merge, "deployed": sha, "services": services, "bumped": bumps,
+            "rollback_tag": tag if services else None, "swap": out.get("swap")}
+
+
 # ── the commands ───────────────────────────────────────────────────────────────
 def cmd_pull(args: argparse.Namespace) -> dict:
     released = release_stale()
     pulled = pull_queue()
     if not pulled.get("enabled"):
-        return {"ok": True, "enabled": False, "approved": [], "new": [],
+        return {"ok": True, "enabled": False, "undo": [], "approved": [], "new": [],
                 "note": "The fix loop is switched off on the droplet. Nothing to do."}
     daytime = fix_hours(datetime.now())
     approved = [{"id": c["id"], "issue": (c.get("plan") or {}).get("issue"), "note": c.get("approval_note")}
                 for c in (pulled.get("approved") or [])[: int(CFG["FIXER_MAX_FIX"])]]
     new = [{"id": c["id"], "codes": c.get("codes")} for c in (pulled.get("new") or [])[: int(CFG["FIXER_MAX_NEW"])]]
-    out = {"ok": True, "enabled": True, "approved": approved if daytime else [], "new": new}
+    undo = [{"id": c["id"], "issue": (c.get("plan") or {}).get("issue")} for c in pulled.get("undo") or []]
+    out = {"ok": True, "enabled": True, "undo": undo, "approved": approved if daytime else [], "new": new}
     if approved and not daytime:
         out["note"] = (f"{len(approved)} approved fix(es) wait for daytime: fixes run only from 06:00 to 21:59, "
                        "when the live date check can be trusted.")
     if released:
         out["put_back"] = released
-    log("pulled", approved=len(out["approved"]), new=len(new), put_back=released)
+    log("pulled", undo=len(undo), approved=len(out["approved"]), new=len(new), put_back=released)
     return out
 
 
@@ -573,13 +738,21 @@ def _ship(cid: int, summary: str, prompt_changed: bool) -> dict:
     elif gates:
         checks += "; live checks are switched off"
     checks += "."
-    if prompt_changed:
+    if prompt_changed and CFG["FIXER_DEPLOY"] != "1":
         checks += " Her prompt changed: bump the prompt version when it ships."
 
     git("push", "--force", "-u", "origin", f"{branch}:{branch}", cwd=wt, timeout=300)
     n = len(paths)
-    return {"status": "ready", "branch": branch, "commit": commit,
-            "summary": f"{summary} {n} file{'s' if n != 1 else ''} changed.".strip(), "checks": checks}
+    said = f"{summary} {n} file{'s' if n != 1 else ''} changed.".strip()
+    if CFG["FIXER_DEPLOY"] != "1":
+        return {"status": "ready", "branch": branch, "commit": commit, "summary": said, "checks": checks}
+
+    landed = land(wt, branch, f"Merge {branch}: {summary[:120]}", paths, prompt_changed,
+                  label=f"fix-case-{cid}", tag=f"pre-fix-case-{cid}")
+    if not landed["services"]:
+        checks += " Tests only: nothing had to restart."
+    checks += f" To take it back, reply undo F{cid}."
+    return {"status": "shipped", "branch": branch, "summary": said, "checks": checks, **landed}
 
 
 def cmd_ship(args: argparse.Namespace) -> dict:
@@ -591,16 +764,86 @@ def cmd_ship(args: argparse.Namespace) -> dict:
         return {"ok": False, "error": "--review is the second reader's one-sentence verdict; get it before shipping"}
     try:
         result = _ship(cid, summary, args.prompt_changed)
+    except Final as stop:   # it reached main and could not go live: over, and he is told
+        log("deploy failed", case=cid, step=stop.step, detail=stop.detail)
+        queue("result", str(cid), stdin={"status": "failed", "failed_step": stop.step, "detail": stop.detail[:240]})
+        _set_claim(cid, None)
+        return {"ok": False, "step": stop.step, "detail": stop.detail, "final": True,
+                "next": "The case is closed as failed and Lisa will tell him. Do not hand it in again."}
     except Stop as stop:
         log("ship refused", case=cid, step=stop.step, detail=stop.detail)
         return {"ok": False, "step": stop.step, "detail": stop.detail,
                 "next": f"Correct it and run ship again, or give the case up with: fail {cid} --step ... --detail ..."}
     out = queue("result", str(cid), stdin=result)
     if not out.get("ok"):
-        return {"ok": False, "error": f"pushed {result['branch']}, but the queue refused the report", **result}
+        return {"ok": False, "error": f"{result['status']} on {result['branch']}, but the queue refused the report", **result}
     _set_claim(cid, None)
-    log("shipped", case=cid, branch=result["branch"], commit=result["commit"][:7])
-    return {"ok": True, **result, "note": "Lisa will tell him. Nothing is deployed."}
+    log(result["status"], case=cid, branch=result["branch"], commit=result["commit"][:7])
+    live = result["status"] == "shipped"
+    return {"ok": True, **result,
+            "note": "It is live. Lisa will tell him." if live else "Lisa will tell him. Nothing is deployed."}
+
+
+def cmd_undo(args: argparse.Namespace) -> dict:
+    """He asked for a fix that went live to be taken back: revert its merge on main, check the
+    result still passes, deploy it. Needs no judgment, so the session only has to run it."""
+    cid = args.id
+    pulled = pull_queue()
+    case = next((c for c in pulled.get("undo") or [] if c["id"] == cid), None)
+    if case is None:
+        return {"ok": False, "error": f"case {cid} is not waiting to be taken back"}
+    result = case.get("result") or {}
+    sha = str(result.get("commit") or "")
+
+    def done(ok: bool, detail: str = "", **kw: Any) -> dict:
+        out = queue("undone", str(cid), stdin={"ok": ok, "detail": detail[:240], **kw})
+        log("undone" if ok else "undo failed", case=cid, detail=detail[:200])
+        return {"ok": ok and bool(out.get("ok")), "detail": detail,
+                "note": "Lisa will tell him it is out of production." if ok else "Lisa will tell him it is still live, and why."}
+
+    if result.get("status") != "shipped" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return done(False, "This fix was not deployed by the loop, so there is no recorded merge to take back.")
+    wt = fresh_worktree(cid)
+    if git("log", "origin/main", "--format=%H", f"--grep=This reverts commit {sha}", cwd=wt):
+        remove_worktree(cid)
+        return done(True, "It had already been reverted on main.")
+    try:
+        git("revert", "-m", "1", "--no-edit", sha, cwd=wt)
+    except RuntimeError:
+        git("revert", "--abort", cwd=wt, check=False)
+        remove_worktree(cid)
+        return done(False, "Later changes touch the same lines, so it has to be taken back by hand.")
+    paths = [p for p in git("diff", "--name-only", "HEAD~1", "HEAD", cwd=wt).splitlines() if p]
+    try:
+        # A version that has been live is never reused: the undo gets versions of its own.
+        bumps = version_bumps(wt, paths, bool((result.get("bumped") or {}).get("prompt")), f"undo-case-{cid}")
+    except Stop as stop:
+        remove_worktree(cid)
+        return done(False, f"{stop.detail}.")
+    landed = [(git("rev-parse", "HEAD", cwd=wt), False)]
+    if bumps["prompt"] or bumps["judge"]:
+        git("add", "-A", cwd=wt)
+        git("commit", "-q", "-m", f"chore(lisa): versions for undo-case-{cid}", cwd=wt)
+        landed.insert(0, (git("rev-parse", "HEAD", cwd=wt), False))
+    ran, failed = offline_tests(wt)
+    if failed:
+        remove_worktree(cid)
+        return done(False, f"With the change taken out, {len(failed)} of {ran} test files fail "
+                           f"({', '.join(failed[:2])}). Nothing was changed.")
+    back = git("rev-parse", "HEAD", cwd=wt)
+    try:
+        git("push", "-q", "origin", "HEAD:main", cwd=wt, timeout=300)
+    except RuntimeError:
+        remove_worktree(cid)
+        return done(False, "Main moved while the undo was being checked. Nothing was changed; it is tried again next run.")
+    out = remote_deploy(back, f"pre-undo-case-{cid}", services_for(paths), bumps)
+    if not out["ok"]:
+        main_back = revert_main(wt, landed)
+        remove_worktree(cid)
+        return done(False, f"The undo did not deploy: {str(out.get('detail'))[:100]}. {out['state']} "
+                           f"{'Main was put back to match.' if main_back else 'MAIN AND PRODUCTION DISAGREE: it needs a look.'}")
+    remove_worktree(cid)
+    return done(True, commit=back, swap=out.get("swap"))
 
 
 def cmd_fail(args: argparse.Namespace) -> dict:
@@ -631,6 +874,9 @@ def main(argv: list[str]) -> int:
         p = sub.add_parser(name)
         p.add_argument("id", type=int)
         p.set_defaults(fn=fn)
+    p = sub.add_parser("undo")
+    p.add_argument("id", type=int)
+    p.set_defaults(fn=cmd_undo)
     p = sub.add_parser("ship")
     p.add_argument("id", type=int)
     p.add_argument("--summary", required=True)

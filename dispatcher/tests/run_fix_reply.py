@@ -48,9 +48,9 @@ def upsert(text: str, from_me: bool = True, jid: str = SELF, age: float = 2) -> 
 def unit_checks() -> None:
     print("is_fix_answer")
     for text in ("fix it", "Fix it", "FIX IT.", "  fix it F12", "fix it, but keep the limit",
-                 "fix  it", "skip", "Skip F3"):
+                 "fix  it", "skip", "Skip F3", "undo", "Undo F12"):
         check(f"yes: {text!r}", is_fix_answer(text))
-    for text in ("", "fixit", "fix its name", "please fix it", "skipping lunch", "skipper",
+    for text in ("", "fixit", "fix its name", "please fix it", "skipping lunch", "skipper", "undone", "undoing it",
                  "@lisa fix it", "fix"):
         check(f"no: {text!r}", not is_fix_answer(text))
 
@@ -87,6 +87,7 @@ async def webhook_checks() -> None:
         check("... with a case tag and a note too",
               await post(client, upsert("Fix it F12, but keep the 5 minute limit")) == [FIX])
         check("his 'skip' goes to the fix desk", await post(client, upsert("skip")) == [FIX])
+        check("his 'undo F12' goes to the fix desk", await post(client, upsert("undo F12")) == [FIX])
         check("... and it opened no window: his next note is dropped",
               await post(client, upsert("comprar leite")) == [])
         check("someone else's 'fix it' is dropped",

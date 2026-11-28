@@ -18,11 +18,12 @@ SUMMARY_MAX = 240   # the one-sentence summary in a result message
 _CASE_TAG = re.compile(r"\(F(\d+)\)\s*$")
 _FIX = re.compile(r"^\s*fix\s+it\b[\s,.;:!\-–—]*(.*)$", re.IGNORECASE | re.DOTALL)
 _SKIP = re.compile(r"^\s*skip\b[\s,.;:!]*(.*)$", re.IGNORECASE | re.DOTALL)
+_UNDO = re.compile(r"^\s*undo\b[\s,.;:!]*(.*)$", re.IGNORECASE | re.DOTALL)
 _ID = re.compile(r"^\(?F(\d+)\)?(?![\w])[\s,.;:]*", re.IGNORECASE)
 
 
 class Command(NamedTuple):
-    kind: str                 # "fix" | "skip"
+    kind: str                 # "fix" | "skip" | "undo"
     case_id: Optional[int]    # the case he named, if he named one
     note: str                 # whatever followed "fix it": passed to the coding agent
 
@@ -36,7 +37,8 @@ def parse_command(text: str | None) -> Optional[Command]:
 
     "fix it", "Fix it F12", "fix it, but keep the 5 minute limit" → fix.
     "skip", "skip F12" → skip. "skip the gym tomorrow" is a note to himself, not an answer: a
-    skip carries a case tag or nothing."""
+    skip carries a case tag or nothing. "undo", "undo F12" → take a shipped fix back, read the
+    same way."""
     t = (text or "").strip()
     m = _FIX.match(t)
     if m:
@@ -47,14 +49,15 @@ def parse_command(text: str | None) -> Optional[Command]:
             case_id = int(mid.group(1))
             rest = rest[mid.end():].strip()
         return Command("fix", case_id, rest[:500])
-    m = _SKIP.match(t)
-    if m:
-        rest = m.group(1).strip()
-        if not rest:
-            return Command("skip", None, "")
-        mid = _ID.match(rest)
-        if mid and not rest[mid.end():].strip():
-            return Command("skip", int(mid.group(1)), "")
+    for kind, pattern in (("skip", _SKIP), ("undo", _UNDO)):
+        m = pattern.match(t)
+        if m:
+            rest = m.group(1).strip()
+            if not rest:
+                return Command(kind, None, "")
+            mid = _ID.match(rest)
+            if mid and not rest[mid.end():].strip():
+                return Command(kind, int(mid.group(1)), "")
     return None
 
 
@@ -106,8 +109,27 @@ def skipped_body(case_id: int) -> str:
     return f"Skipped. {tag(case_id)}"
 
 
+def undo_ack_body(case_id: int) -> str:
+    return ("I will take it back on your Mac's next run. To do it sooner, press Run now on the "
+            f"task in the desktop app. {tag(case_id)}")
+
+
+def undo_already_body(case_id: int, status: str) -> str:
+    if status == "undone":
+        return f"That one has already been taken back. {tag(case_id)}"
+    return f"Already queued to be taken back. {tag(case_id)}"
+
+
 def result_body(case_id: int, result: dict) -> str:
-    """What happened to an approved case. `result` is what the worker on the Mac reported."""
+    """What happened to an approved case. `result` is what the worker on the Mac reported. Once
+    he has asked for a fix to be taken back, `result["undo"]` says how that went, and that is
+    the news."""
+    undo = result.get("undo")
+    if isinstance(undo, dict):
+        if undo.get("ok"):
+            return f"Taken back: that change is out of production. {tag(case_id)}"
+        detail = clean(undo.get("detail"), SUMMARY_MAX)
+        return f"Could not take it back: {detail} It is still live. {tag(case_id)}".replace("  ", " ")
     status = result.get("status")
     summary = clean(result.get("summary"), SUMMARY_MAX)
     checks = clean(result.get("checks"), SUMMARY_MAX)

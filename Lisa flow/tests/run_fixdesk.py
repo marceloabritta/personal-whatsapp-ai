@@ -76,6 +76,10 @@ def text_checks() -> None:
     check("'please fix it' is not an answer", c("please fix it") is None)
     check("'fixit' is not an answer", c("fixit") is None)
     check("nothing is not an answer", c("") is None and c(None) is None)
+    check("undo", c("undo") == T.Command("undo", None, ""))
+    check("Undo F12.", c("Undo F12.") == T.Command("undo", 12, ""))
+    check("'undo that last edit' is a note to himself", c("undo that last edit") is None)
+    check("'undone' is not an answer", c("undone") is None)
 
     print("\nthe plan message")
     body = T.proposal_body(12, PLAN)
@@ -113,6 +117,16 @@ def text_checks() -> None:
     check("failed says which step and that nothing was deployed",
           failed == "Not fixed: the live checks failed. live_dates 3/5 twice. Nothing was deployed. (F9)", failed)
 
+    check("asked to take one back, she says when",
+          T.undo_ack_body(9) == "I will take it back on your Mac's next run. To do it sooner, press Run now on the "
+                                "task in the desktop app. (F9)")
+    live = {"status": "shipped", "summary": "Done.", "checks": "Offline tests pass. To take it back, reply undo F9."}
+    check("live says how to take it back", T.result_body(9, live) == "Live. Done. Offline tests pass. To take it back, reply undo F9. (F9)")
+    check("taken back", T.result_body(9, {**live, "undo": {"ok": True}}) == "Taken back: that change is out of production. (F9)")
+    check("not taken back says why, and that it is still live",
+          T.result_body(9, {**live, "undo": {"ok": False, "detail": "Later changes touch the same lines."}})
+          == "Could not take it back: Later changes touch the same lines. It is still live. (F9)")
+
     print("\nquiet hours (22 to 8)")
     at = lambda h: datetime(2026, 11, 28, h, 30, tzinfo=TZ)  # noqa: E731
     check("21:30 is not quiet", not T.in_quiet_hours(at(21), 22, 8))
@@ -130,6 +144,8 @@ def text_checks() -> None:
     check("her result", line(hdr + T.result_body(12, {"status": "shipped", "summary": "Done."})))
     check("his 'fix it'", line("fix it"))
     check("his 'skip F2'", line("skip F2"))
+    check("his 'undo F2'", line("undo F2"))
+    check("her 'taken back'", line(hdr + T.result_body(2, {"undo": {"ok": True}})))
     check("her ordinary reply stays", not line(hdr + "Marquei para quinta às 15h."))
     check("his ordinary note stays", not line("comprar leite (F12)"))
     check("someone else's 'fix it' stays", not line("fix it", me=False))
@@ -173,7 +189,7 @@ class MemStore:
 
     async def due_results(self):
         return [c for c in self.cases.values()
-                if c["status"] in ("ready", "shipped", "failed") and not c["result_sent_at"] and c["approved_at"]]
+                if c["status"] in ("ready", "shipped", "failed", "undone") and not c["result_sent_at"] and c["approved_at"]]
 
     async def mark_result_sent(self, cid, wa_id):
         self.cases[cid].update(result_sent_at=datetime.now(timezone.utc), result_wa_id=wa_id)
@@ -190,6 +206,23 @@ class MemStore:
             return self.cases.get(case_id)
         waiting = [c for c in self.cases.values() if c["status"] == "proposed"]
         return max(waiting, key=lambda c: c["proposed_at"]) if waiting else None
+
+    async def find_for_undo(self, quoted_id, case_id):
+        if quoted_id:
+            for c in self.cases.values():
+                if quoted_id in (c["proposal_wa_id"], c["result_wa_id"]):
+                    return c
+        if case_id is not None:
+            return self.cases.get(case_id)
+        live = [c for c in self.cases.values() if c["status"] == "shipped"]
+        return live[-1] if live else None
+
+    async def request_undo(self, cid):
+        c = self.cases[cid]
+        if c["status"] != "shipped":
+            return False
+        c["status"] = "undo_requested"
+        return True
 
     async def approve(self, cid, note, wa_id):
         c = self.cases[cid]
@@ -420,6 +453,38 @@ async def desk_checks() -> None:
     await desk.tick()
     check("... and only once", len(wa.sent) == 1 and store.cases[r]["result_sent_at"] is not None)
 
+    print("\ntaking a fix back")
+    store, wa = MemStore(), FakeWhatsApp()
+    desk = FixDesk(store, wa, settings(), clock=noon)
+    check("'undo' with nothing live says nothing", await desk.handle_reply(answer("undo", msg_id="U0")) == "no_case" and wa.sent == [])
+    rdy = store.add("ready", approved_at=datetime.now(timezone.utc), result_sent_at=datetime.now(timezone.utc),
+                    result={"status": "ready"})
+    check("a fix that was never deployed has nothing to take back",
+          await desk.handle_reply(answer(f"undo F{rdy}", msg_id="U1")) == "nothing_to_undo" and wa.sent == [])
+    lv = store.add("shipped", approved_at=datetime.now(timezone.utc), result_sent_at=datetime.now(timezone.utc),
+                   result_wa_id="WA-LIVE", result={"status": "shipped", "summary": "Done.", "checks": "ok."})
+    check("his 'undo' queues the fix that went live last", await desk.handle_reply(answer("undo", msg_id="U2")) == "undo_requested"
+          and store.cases[lv]["status"] == "undo_requested")
+    check("... and she says when it will happen", wa.sent[-1][1].endswith(T.undo_ack_body(lv)), wa.sent[-1][1])
+    check("asked again, she says it is already queued",
+          await desk.handle_reply(answer(f"undo F{lv}", msg_id="U3")) == "undo_already" and "Already queued to be taken back" in wa.sent[-1][1])
+    check("'undo' from someone else, or in another chat, is ignored",
+          await desk.handle_reply(answer("undo", from_me=False, jid=FRIEND_JID, msg_id="U4")) == "not_owner"
+          and await desk.handle_reply(answer("undo", jid=FRIEND_JID, msg_id="U5")) == "not_self_chat")
+    store.cases[lv].update(status="undone", result_sent_at=None,
+                           result={**store.cases[lv]["result"], "undo": {"ok": True}})
+    n = len(wa.sent)
+    await desk.tick()
+    await desk.tick()
+    check("when the Mac has taken it back she says so, once",
+          len(wa.sent) == n + 1 and wa.sent[-1][1].endswith("Taken back: that change is out of production. (F2)"), wa.sent[-1][1])
+    lv2 = store.add("shipped", approved_at=datetime.now(timezone.utc), result_sent_at=datetime.now(timezone.utc),
+                    result_wa_id="WA-LIVE-2", result={"status": "shipped"})
+    store.add("shipped", approved_at=datetime.now(timezone.utc), result_sent_at=datetime.now(timezone.utc), result={"status": "shipped"})
+    check("a reply to an older 'Live' message takes that one back, not the newest",
+          await desk.handle_reply(answer("undo", msg_id="U6", quoted="WA-LIVE-2")) == "undo_requested"
+          and store.cases[lv2]["status"] == "undo_requested")
+
 
 # ── Layer B: the real queue, against a real Postgres ────────────────────────────
 SCHEMA = "fixdesk_test"
@@ -545,6 +610,40 @@ async def store_checks(dsn: str) -> None:
               await store.save_result(c3, {"status": "ready", "branch": "fix/case-3", "commit": "abc"}) == "ready")
         check("... and is due to be reported", [d["id"] for d in await store.due_results()] == [c3])
 
+        print("\ntaking a fix back (Postgres)")
+        check("nothing is live yet to take back", await store.find_for_undo(None, None) is None)
+        await store.claim(c3, "fixing") if False else None
+        await session("L6", [judge_gap])
+        c6 = await store.open_case("L6", "v5", ["wrong_details"])
+        await store.claim(c6, "investigating")
+        await store.save_plan(c6, dict(PLAN), None)
+        await store.mark_proposed(c6, "WA-PLAN-6")
+        await store.approve(c6, "", None)
+        await store.claim(c6, "fixing")
+        check("a shipped result is saved", await store.save_result(
+            c6, {"status": "shipped", "branch": "fix/case-6", "commit": "a" * 40, "services": ["lisa"]}) == "shipped")
+        await store.mark_result_sent(c6, "WA-LIVE-6")
+        check("'undo' with no reply-to and no tag finds the fix that went live last", (await store.find_for_undo(None, None))["id"] == c6)
+        check("a reply to its 'Live' message finds it too", (await store.find_for_undo("WA-LIVE-6", None))["id"] == c6)
+        check("a fix that is only ready cannot be queued for undo", not await store.request_undo(c3))
+        check("the live one can", await store.request_undo(c6))
+        check("... once", not await store.request_undo(c6))
+        pulled = await store.pull()
+        check("pull lists it to be taken back, with the merge to revert",
+              [(c["id"], c["result"]["commit"]) for c in pulled["undo"]] == [(c6, "a" * 40)])
+        check("an undo that failed puts it back as live", await store.save_undo(c6, {"ok": False, "detail": "conflict"}) == "shipped")
+        due = [d for d in await store.due_results() if d["id"] == c6]
+        check("... with the news due, on top of the original result",
+              len(due) == 1 and due[0]["result"]["undo"] == {"ok": False, "detail": "conflict"} and due[0]["result"]["branch"] == "fix/case-6")
+        await store.mark_result_sent(c6, "WA-UNDO-6")
+        check("reporting an undo nobody asked for is refused", await store.save_undo(c6, {"ok": True}) is None)
+        await store.request_undo(c6)
+        check("an undo that worked makes it undone", await store.save_undo(c6, {"ok": True, "commit": "b" * 40}) == "undone")
+        due = [d for d in await store.due_results() if d["id"] == c6]
+        check("... with that news due", len(due) == 1 and due[0]["status"] == "undone" and due[0]["result"]["undo"]["ok"] is True)
+        await store.mark_result_sent(c6, "WA-UNDONE-6")
+        check("an undone fix cannot be queued again", not await store.request_undo(c6))
+
         c2 = await store.open_case("L2", "v5", ["x"])
         await store.claim(c2, "investigating")
         await store.save_plan(c2, dict(PLAN), "s")
@@ -589,6 +688,15 @@ async def store_checks(dsn: str) -> None:
         cli("claim", str(c5), "fixing")
         code, out = cli("result", str(c5), stdin={"status": "ready", "branch": "fix/case-5", "commit": "abc1234"})
         check("result", code == 0 and out["status"] == "ready", str(out))
+        await store.mark_result_sent(c5, "WA-R5")
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"UPDATE {SCHEMA}.fix_cases SET status = 'shipped' WHERE id = %s", (c5,))
+        await store.request_undo(c5)
+        code, out = cli("pull", "mac-cli", stdin={})
+        check("pull lists what waits to be taken back", code == 0 and [c["id"] for c in out["undo"]] == [c5], str(out)[:200])
+        code, out = cli("undone", str(c5), stdin={"ok": True, "commit": "c" * 40})
+        check("undone", code == 0 and out["status"] == "undone", str(out))
+        check("undone twice fails", cli("undone", str(c5), stdin={"ok": True})[0] == 1)
         check("an unknown command fails", cli("dance", "1")[0] == 1)
     finally:
         await store.aclose()
