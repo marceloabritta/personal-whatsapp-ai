@@ -1,44 +1,45 @@
 #!/usr/bin/env python3
-"""The fix loop's worker: runs on his Mac once a day, in Claude Code, on his Claude subscription.
+"""The fix loop's tool on his Mac: what the daily session calls to take work and to hand it in.
 
-    1. asks the droplet what is in the queue        (ssh → app.fixdesk.cli pull)
-    2. for each plan he approved with "fix it":       makes the fix in a worktree, tests it, has the
-                                                      diff read a second time, runs the live checks,
-                                                      pushes the branch, reports
-    3. for each new case the judge opened:            investigates it read-only and reports a plan
+Once a day a scheduled task in the Claude desktop app starts an ordinary Claude Code session
+(`fixer/task-prompt.md` is its prompt). The session does the thinking: it investigates each new
+case and makes each fix he approved. This script is everything around that, and every step that
+must not depend on the session's judgment:
 
-The droplet cannot call a laptop, so the Mac asks. What is said on WhatsApp is not decided here:
-this reports to the queue, and the fix desk inside Lisa (`Lisa flow/app/fixdesk/`) sends.
+    run.py pull                    what is in the queue (and: this Mac is here)
+    run.py investigate <id>        take a new case: its own checkout, the evidence laid out
+    run.py plan <id>               hand in the plan written to <checkout>/.fixer/plan.json
+    run.py fix <id>                take an approved case: its checkout on branch fix/case-<id>
+    run.py ship <id> --summary .. --review ..
+                                   check the change and hand it in: scope, contact data, every
+                                   offline test, the commit, the live checks, the push, the report
+    run.py fail <id> --step .. --detail ..     give an approved case up, and say why
+    run.py release <id> --error ..             put a case back for the next run
 
-BILLING. The model work here must go to the Claude subscription, never to an API key:
-  - every `ANTHROPIC_*` variable is removed from Claude Code's environment (a key there wins over
-    the account sign-in, silently);
-  - `--bare` is never used (it skips the sign-in);
-  - a run stops before its first model call unless `claude auth status` shows the account signed
-    in, and stops mid-start if Claude Code reports any key as its credential.
+Each prints one JSON object. Exit 0 means done; anything else means not done, and the object
+says why.
 
-SAFETY. The investigation can read and nothing else. The fix run can edit files in its own
-worktree and run the offline tests, nothing else: no git writes, no ssh, no network tools. The
-commit, the checks, the push and the report are made by this script, after it has checked that
-the change stays inside Lisa and the dispatcher and carries no contact data.
+The droplet cannot call a laptop, so the Mac asks: the queue is reached over ssh, inside Lisa's
+container (`Lisa flow/app/fixdesk/cli.py`). What is said on WhatsApp is not decided here: this
+reports to the queue, and the fix desk inside Lisa sends.
 
-Standard library only. Installed by `fixer/install.sh` into ~/.lisa-fixer/app and started by
-launchd; `python3 ~/.lisa-fixer/app/run.py` runs it by hand. `--dry` pulls and prints, and does
-nothing else."""
+WHAT IS ENFORCED HERE, whatever the session does: a change reaches GitHub only through `ship`,
+and `ship` refuses one that touches anything outside Lisa and the dispatcher, that carries what
+looks like a real person's data, or that fails an offline test or a live check. The session
+never commits or pushes; this does. Nothing is deployed.
+
+Standard library only. `fixer/install.sh` copies it to ~/.lisa-fixer/app, outside the repo."""
 from __future__ import annotations
 
-import fcntl
+import argparse
 import json
 import os
 import re
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
-import threading
 import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -54,15 +55,10 @@ def _load_config() -> dict:
         "FIXER_SSH_HOST": "secretaria-droplet",
         "FIXER_CONTAINER": "lisa_brain",
         "FIXER_IMAGE": "evolution-lisa",
-        "FIXER_CLAUDE": "",            # path to the claude command; found on PATH when empty
-        "FIXER_MODEL": "",             # empty = the account's default model
-        "FIXER_MAX_NEW": "5",          # investigations per run
-        "FIXER_MAX_FIX": "3",          # fixes per run
-        "FIXER_INVESTIGATE_TIMEOUT": "1800",
-        "FIXER_FIX_TIMEOUT": "3600",
+        "FIXER_MAX_NEW": "5",          # investigations offered per run
+        "FIXER_MAX_FIX": "3",          # fixes offered per run
         "FIXER_LIVE_CHECKS": "1",      # "0" = offline tests only (no API spend, not end to end)
-        "FIXER_DEPLOY": "0",           # the first fixes stop at a tested branch
-        "CLAUDE_CODE_OAUTH_TOKEN": "",  # only if launchd cannot see the sign-in (claude setup-token)
+        "FIXER_STALE_HOURS": "6",      # a case taken this long ago and never handed in is put back
     }
     f = STATE / "config.env"
     if f.exists():
@@ -81,72 +77,28 @@ CFG = _load_config()
 REPO = Path(CFG["FIXER_REPO"]).expanduser()
 VENV_PY = REPO / "Lisa flow" / ".venv" / "bin" / "python"
 OFFLINE_TESTS = STATE / "bin" / "offline-tests"
+LOG_SQL = REPO / ".claude" / "scripts" / "lisa-log-sql"
+EVIDENCE_DIR = ".fixer"   # inside the case's checkout, and ignored by git
 
-# What a change may touch. Anything else fails the run before a test is spent on it.
+# What a change may touch. Anything else is refused before a test is spent on it.
 ALLOWED_PATHS = ("Lisa flow/app/", "Lisa flow/tests/", "dispatcher/app.py", "dispatcher/tests/")
 
-READ_TOOLS = [
-    "Read", "Grep", "Glob",
-    "Bash(git log *)", "Bash(git show *)", "Bash(git diff *)", "Bash(git grep *)",
-    "Bash(git status*)", "Bash(git blame *)",
-    "Bash(.claude/scripts/lisa-log-sql *)",
-]
-FIX_TOOLS = READ_TOOLS + ["Edit", "Write", f"Bash({OFFLINE_TESTS} *)", f"Bash({OFFLINE_TESTS})"]
-
 PLAN_KINDS = ("bug", "judge", "decision", "duplicate", "already_fixed", "no_action")
-PLAN_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "properties": {
-        "kind": {"type": "string", "enum": list(PLAN_KINDS)},
-        "judge_right": {"type": "boolean"},
-        "issue": {"type": "string"},
-        "diagnosis": {"type": "string"},
-        "fix": {"type": "string"},
-        "duplicate_of": {"type": "integer"},
-        "fixed_by": {"type": "string"},
-        "files": {"type": "array", "items": {"type": "string"}},
-        "test": {"type": "string"},
-        "gates": {"type": "array", "items": {"type": "string"}},
-        "prompt_changes": {"type": "boolean"},
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "notes": {"type": "string"},
-    },
-    "required": ["kind", "judge_right", "issue", "diagnosis", "fix", "confidence"],
-}
-FIX_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "properties": {
-        "done": {"type": "boolean"},
-        "summary": {"type": "string"},
-        "test_added": {"type": "string"},
-        "prompt_changed": {"type": "boolean"},
-        "why_not": {"type": "string"},
-    },
-    "required": ["done", "summary"],
-}
-REVIEW_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "properties": {"ok": {"type": "boolean"}, "reason": {"type": "string"}},
-    "required": ["ok", "reason"],
-}
+SENT_KINDS = ("bug", "judge", "decision")   # a plan he is shown
+PARA_MIN, PARA_MAX = 20, 300                # one paragraph on his phone, in characters
 
 
 class Stop(Exception):
-    """This step failed in a way worth telling him: (step, detail)."""
+    """This step said no: (step, detail). The change can be corrected and handed in again."""
 
     def __init__(self, step: str, detail: str) -> None:
         super().__init__(f"{step}: {detail}")
         self.step, self.detail = step, detail
 
 
-class BillingError(Exception):
-    """Claude Code would not run on the subscription. Nothing may be spent."""
-
-
 # ── logging ─────────────────────────────────────────────────────────────────
 def log(msg: str, **kw: Any) -> None:
     line = json.dumps({"t": datetime.now().isoformat(timespec="seconds"), "msg": msg, **kw}, default=str)
-    print(line, flush=True)
     try:
         d = STATE / "logs"
         d.mkdir(parents=True, exist_ok=True)
@@ -179,125 +131,48 @@ def queue(*args: str, stdin: Optional[dict] = None, timeout: float = 120) -> dic
     return json.loads(lines[-1])
 
 
-# ── Claude Code ──────────────────────────────────────────────────────────────
-def find_claude() -> Optional[str]:
-    if CFG["FIXER_CLAUDE"]:
-        return CFG["FIXER_CLAUDE"] if Path(CFG["FIXER_CLAUDE"]).expanduser().exists() else None
-    for cand in (shutil.which("claude"), "~/.local/bin/claude", "/opt/homebrew/bin/claude",
-                 "/usr/local/bin/claude", "~/.claude/local/claude"):
-        if cand and Path(cand).expanduser().exists():
-            return str(Path(cand).expanduser())
-    return None
+def pull_queue() -> dict:
+    info = {"host": socket.gethostname(), "ok": True, "runner": "desktop"}
+    return queue("pull", info["host"], stdin=info)
 
 
-def claude_env() -> dict:
-    """Claude Code's environment: nothing that could put a run on an API key, and nothing a
-    parent Claude session left behind. The one-year subscription token is the only exception."""
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("ANTHROPIC_", "CLAUDE_", "CLAUDECODE", "AWS_BEARER_TOKEN_BEDROCK"))}
-    if CFG["CLAUDE_CODE_OAUTH_TOKEN"]:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = CFG["CLAUDE_CODE_OAUTH_TOKEN"]
-    return env
-
-
-def auth_status(cli: str) -> dict:
-    """Who Claude Code would run as. `ok` only for an account sign-in, never a key."""
+# ── cases this Mac has taken and not yet handed in ───────────────────────────────
+def _claims() -> dict:
     try:
-        p = sh([cli, "auth", "status", "--json"], env=claude_env(), timeout=60, check=False,
-               cwd=Path.home())
-        st = json.loads(p.stdout[p.stdout.index("{"):])
-    except Exception as exc:
-        return {"ok": False, "why": f"could not read the sign-in: {exc}"[:200]}
-    method = str(st.get("authMethod") or "none")
-    out = {"logged_in": bool(st.get("loggedIn")), "auth_method": method,
-           "login_expires": st.get("loginExpiresAt"), "provider": st.get("apiProvider")}
-    if not out["logged_in"]:
-        out.update(ok=False, why="Claude Code is not signed in on this Mac")
-    elif st.get("apiProvider") not in (None, "firstParty") or re.search(r"key|console|helper", method, re.I):
-        out.update(ok=False, why=f"Claude Code is signed in with '{method}', which bills an API key")
+        return json.loads((STATE / "claims.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_claim(case_id: int, phase: Optional[str]) -> None:
+    claims = _claims()
+    if phase is None:
+        claims.pop(str(case_id), None)
     else:
-        out["ok"] = True
-    return out
+        claims[str(case_id)] = {"phase": phase, "at": time.time()}
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "claims.json").write_text(json.dumps(claims))
 
 
-def run_claude(cli: str, prompt: str, *, cwd: Path, mode: str, tools: list[str], schema: dict,
-               add_dirs: list[Path], timeout: float, record: Path,
-               session_id: Optional[str] = None, resume: Optional[str] = None) -> dict:
-    """One headless Claude Code run. Returns its final result message.
-
-    The prompt goes in on stdin. The whole stream is kept in `record` for reading afterwards."""
-    cmd = [cli, "-p", "--output-format", "stream-json", "--verbose",
-           "--permission-mode", mode, "--permission-prompts", "none",
-           "--allowedTools", ",".join(tools),
-           "--json-schema", json.dumps(schema)]
-    for d in add_dirs:
-        cmd += ["--add-dir", str(d)]
-    if resume:
-        cmd += ["--resume", resume]
-    elif session_id:
-        cmd += ["--session-id", session_id]
-    if CFG["FIXER_MODEL"]:
-        cmd += ["--model", CFG["FIXER_MODEL"]]
-
-    proc = subprocess.Popen(cmd, cwd=cwd, env=claude_env(), stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    killed: dict = {}
-
-    def kill(why: str) -> None:
-        killed["why"] = why
-        proc.kill()
-
-    timer = threading.Timer(timeout, kill, args=(f"no answer in {int(timeout)} s",))
-    timer.start()
-    result: Optional[dict] = None
-    try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-        with open(record, "a") as rec:
-            for line in proc.stdout:
-                rec.write(line)
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                if msg.get("type") == "system" and msg.get("subtype") == "init":
-                    src = msg.get("apiKeySource")
-                    if src not in (None, "none"):
-                        kill(f"billing:{src}")
-                elif msg.get("type") == "result":
-                    result = msg
-        proc.wait(timeout=30)
-    finally:
-        timer.cancel()
-        if proc.poll() is None:
-            proc.kill()
-    if str(killed.get("why", "")).startswith("billing:"):
-        raise BillingError(f"Claude Code started with credential '{killed['why'][8:]}', not the account")
-    if killed:
-        raise RuntimeError(killed["why"])
-    if result is None:
-        raise RuntimeError(f"Claude Code ended with no result (exit {proc.returncode}): "
-                           f"{(proc.stderr.read() or '')[-300:]}")
-    if result.get("is_error"):
-        raise RuntimeError(f"Claude Code reported an error: {str(result.get('result'))[:300]}")
-    return result
+def release_stale(now: Optional[float] = None) -> list[int]:
+    """A session that died mid-case leaves the case taken for good: nobody else may touch it.
+    Whatever this Mac took more than FIXER_STALE_HOURS ago and never handed in goes back to the
+    queue, where three such deaths set it aside (and an approved one is reported as failed)."""
+    now = time.time() if now is None else now
+    limit = float(CFG["FIXER_STALE_HOURS"]) * 3600
+    back = []
+    for cid, c in list(_claims().items()):
+        if now - float(c.get("at") or 0) > limit:
+            try:
+                queue("release", cid, stdin={"error": f"the session that took it ({c.get('phase')}) never handed it in"})
+            except Exception:
+                continue
+            _set_claim(int(cid), None)
+            back.append(int(cid))
+    return back
 
 
-def structured(result: dict) -> dict:
-    out = result.get("structured_output")
-    if isinstance(out, dict):
-        return out
-    text = str(result.get("result") or "")
-    m = re.search(r"\{.*\}", text, re.S)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except ValueError:
-            pass
-    raise RuntimeError("Claude Code's answer was not in the asked-for shape")
-
-
-# ── git and the worktree ─────────────────────────────────────────────────────
+# ── git and the case's checkout ────────────────────────────────────────────────
 def git(*args: str, cwd: Optional[Path] = None, check: bool = True, timeout: float = 180) -> str:
     return sh(["git", *args], cwd=cwd or REPO, check=check, timeout=timeout).stdout.strip()
 
@@ -306,13 +181,27 @@ def worktree(case_id: int) -> Path:
     return REPO / ".claude" / "worktrees" / f"fix-case-{case_id}"
 
 
+def _ignore_evidence() -> None:
+    """The evidence folder holds real chat text. It sits in the case's checkout so the session can
+    read it, and git is told, for every checkout of this repository, never to see it."""
+    common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    have = exclude.read_text() if exclude.exists() else ""
+    if f"/{EVIDENCE_DIR}/" not in have.splitlines():
+        exclude.write_text(have + ("" if have.endswith("\n") or not have else "\n") + f"/{EVIDENCE_DIR}/\n")
+
+
 def fresh_worktree(case_id: int) -> Path:
     """The case's own checkout of what is deployed (origin/main), with nothing else in it."""
     wt = worktree(case_id)
     if wt.exists():
         git("worktree", "remove", "--force", str(wt), check=False)
     git("worktree", "prune", check=False)
+    git("fetch", "--quiet", "origin", check=False)
     git("worktree", "add", "--detach", str(wt), "origin/main")
+    _ignore_evidence()
+    (wt / EVIDENCE_DIR).mkdir(exist_ok=True)
     return wt
 
 
@@ -320,17 +209,6 @@ def remove_worktree(case_id: int) -> None:
     wt = worktree(case_id)
     if wt.exists():
         git("worktree", "remove", "--force", str(wt), check=False)
-
-
-def changed_paths(wt: Path) -> list[str]:
-    out = git("status", "--porcelain", "--untracked-files=all", cwd=wt)
-    paths = []
-    for line in out.splitlines():
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        paths.append(path.strip().strip('"'))
-    return paths
 
 
 def outside_scope(paths: list[str]) -> list[str]:
@@ -373,7 +251,105 @@ def chat_names(evidence: dict, owner: str = "Marcelo") -> list[str]:
     return sorted(names)
 
 
-# ── tests and checks ─────────────────────────────────────────────────────────
+# ── the evidence ───────────────────────────────────────────────────────────────
+def render_transcript(evidence: dict) -> str:
+    lines = []
+    for ln in evidence.get("transcript") or []:
+        lines.append(f"[{ln.get('seq')}] {str(ln.get('ts'))[:19]} {ln.get('who')}: {ln.get('text')}")
+    return "\n".join(lines) + "\n"
+
+
+def fetch_evidence(loop_id: str, judge_version: str) -> dict:
+    """A case's evidence, read from the production log through the read-only path. Used when this
+    Mac holds no copy of it: the queue sends evidence with a new case only."""
+    if not re.fullmatch(r"[\w.-]+", loop_id) or not re.fullmatch(r"[\w.-]+", judge_version):
+        return {}
+    q = f"""select json_build_object(
+      'loop', (select row_to_json(l) from (select loop_id, chat_id, started_at, prompt_version, model, lang
+               from lisa_log.loops where loop_id = '{loop_id}') l),
+      'reviews', (select coalesce(json_agg(r order by r.seq), '[]') from (select seq, ts, turn_kind, domain,
+               prompt_version, verdict, confidence, rationale, reply_text from lisa_log.reviews
+               where loop_id = '{loop_id}' and judge_version = '{judge_version}') r),
+      'findings', (select coalesce(json_agg(f), '[]') from (select r.seq, f.code, f.severity, f.evidence, f.harm,
+               f.source from lisa_log.findings f join lisa_log.reviews r on r.id = f.review_id
+               where r.loop_id = '{loop_id}' and r.judge_version = '{judge_version}' order by r.seq, f.id) f),
+      'transcript', (select coalesce(json_agg(t order by t.seq), '[]') from (select seq, ts, who, text
+               from lisa_log.events where loop_id = '{loop_id}' and stream = 'transcript') t))"""
+    try:
+        p = sh([str(LOG_SQL), "-A", "-t", q], timeout=120, check=False)
+        # json_agg breaks its output over several lines: the answer is the whole of stdout.
+        return json.loads(p.stdout.strip()) if p.returncode == 0 else {}
+    except Exception:
+        return {}
+
+
+def lay_out(case: dict, wt: Path, recent: Optional[list] = None) -> dict:
+    """Write the case's evidence into its checkout (and keep a copy outside the repo). Returns
+    the paths the session reads."""
+    cid = case["id"]
+    keep = STATE / "cases" / str(cid)
+    keep.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE / "cases", 0o700)
+    evidence = case.get("evidence")
+    if not evidence and (keep / "evidence.json").exists():
+        evidence = json.loads((keep / "evidence.json").read_text())
+    if not evidence:
+        evidence = fetch_evidence(str(case.get("loop_id") or ""), str(case.get("judge_version") or ""))
+    evidence = evidence or {}
+    d = wt / EVIDENCE_DIR
+    d.mkdir(exist_ok=True)
+    files = {"evidence.json": json.dumps(evidence, indent=1, default=str),
+             "transcript.txt": render_transcript(evidence)}
+    if recent is not None:
+        files["recent-cases.json"] = json.dumps(recent, indent=1, default=str)
+    if case.get("plan"):
+        files["approved-plan.json"] = json.dumps(case["plan"], indent=1, default=str)
+    for name, text in files.items():
+        (d / name).write_text(text)
+        (keep / name).write_text(text)
+    return {name: str(d / name) for name in files}
+
+
+def load_evidence(case_id: int) -> dict:
+    for f in (worktree(case_id) / EVIDENCE_DIR / "evidence.json", STATE / "cases" / str(case_id) / "evidence.json"):
+        if f.exists():
+            try:
+                return json.loads(f.read_text())
+            except ValueError:
+                pass
+    return {}
+
+
+# ── checks ─────────────────────────────────────────────────────────────────────
+def check_plan(plan: dict, recent_ids: set[int]) -> Optional[str]:
+    """Why this plan cannot be handed in, or None."""
+    kind = plan.get("kind")
+    if kind not in PLAN_KINDS:
+        return f"kind must be one of {', '.join(PLAN_KINDS)}; got {kind!r}"
+    if kind == "duplicate":
+        if plan.get("duplicate_of") not in recent_ids:
+            return "duplicate_of must be the id of a case in recent-cases.json"
+        return None
+    if kind == "already_fixed" and not str(plan.get("fixed_by") or "").strip():
+        return "already_fixed needs fixed_by: the short hash of the commit that fixed it"
+    if kind in SENT_KINDS:
+        for field in ("issue", "diagnosis", "fix"):
+            n = len(" ".join(str(plan.get(field) or "").split()))
+            if n < PARA_MIN:
+                return f"{field} is missing or too short"
+            if n > PARA_MAX:
+                return f"{field} is {n} characters; the limit is {PARA_MAX}. It is read on a phone: shorten it"
+    return None
+
+
+def fix_hours(now: datetime) -> bool:
+    """May fixes run now? Only from 06:00 to 21:59. The live date check books "two hours from
+    now", and late at night that reads as "3 in the morning?": on 2026-11-28 at 01:00 it scored
+    1/5 on production's own code. A fix judged then would be reported as failed when it is not.
+    Investigations spend no live check and run at any hour."""
+    return 6 <= now.hour < 22
+
+
 _SUMMARY = re.compile(r"(\d+)\s+passed,\s+(\d+)\s+failed")
 
 
@@ -421,13 +397,14 @@ def live_checks(case_id: int, wt: Path, gates: list[str]) -> str:
                      CFG["FIXER_CONTAINER"], CFG["FIXER_IMAGE"], gate],
                     input=script, capture_output=True, text=True, timeout=2400)
                 ok, bad = parse_gate(p.stdout)
-                best = (ok, bad, p.returncode, p.stdout[-300:] + p.stderr[-200:])
+                failing = "; ".join(ln.strip()[7:90] for ln in p.stdout.splitlines() if ln.strip().startswith("[FAIL]"))
+                best = (ok, bad, p.returncode, failing or (p.stdout[-200:] + p.stderr[-200:]).strip())
                 if bad == 0 and ok > 0 and p.returncode == 0:
                     break
             ok, bad, rc, tail = best
             name = gate.removesuffix(".py")
             if bad or not ok or rc != 0:
-                why = f"{name} {ok}/{ok + bad}, twice" if ok + bad else f"{name} did not run: {tail.strip()[-120:]}"
+                why = f"{name} {ok}/{ok + bad}, twice ({tail[:160]})" if ok + bad else f"{name} did not run: {tail[-160:]}"
                 raise Stop("the live checks", why)
             notes.append(f"{name} {ok}/{ok}")
     finally:
@@ -438,275 +415,245 @@ def live_checks(case_id: int, wt: Path, gates: list[str]) -> str:
 
 def pick_gates(plan: dict, wt: Path, paths: list[str]) -> list[str]:
     """The live checks this change needs: the ones the plan named that exist, and always the
-    date check when Lisa's own code changed. None for a dispatcher-only change."""
+    date check when Lisa's own code changed. None for a change that leaves her code alone."""
     if not any(p.startswith("Lisa flow/app/") for p in paths):
         return []
     have = {t.name for t in (wt / "Lisa flow" / "tests").glob("live_*.py")} - {"live_key.py"}
     gates = [g if g.endswith(".py") else f"{g}.py" for g in (plan.get("gates") or [])]
     gates = [g for g in dict.fromkeys(gates) if g in have]
-    if "live_dates.py" in have and "live_dates.py" not in gates:
+    # The judge's own files reach no live check: they are not on the reply path.
+    reply_path = [p for p in paths if p.startswith("Lisa flow/app/") and not p.startswith("Lisa flow/app/review/")]
+    if reply_path and "live_dates.py" in have and "live_dates.py" not in gates:
         gates.append("live_dates.py")
     return gates[:4]
 
 
-# ── the two jobs ─────────────────────────────────────────────────────────────
-def prompt(name: str, **kw: Any) -> str:
-    text = (HERE / "prompts" / f"{name}.md").read_text()
-    for k, v in kw.items():
-        text = text.replace("{{" + k + "}}", str(v))
-    return text
+# ── the commands ───────────────────────────────────────────────────────────────
+def cmd_pull(args: argparse.Namespace) -> dict:
+    released = release_stale()
+    pulled = pull_queue()
+    if not pulled.get("enabled"):
+        return {"ok": True, "enabled": False, "approved": [], "new": [],
+                "note": "The fix loop is switched off on the droplet. Nothing to do."}
+    daytime = fix_hours(datetime.now())
+    approved = [{"id": c["id"], "issue": (c.get("plan") or {}).get("issue"), "note": c.get("approval_note")}
+                for c in (pulled.get("approved") or [])[: int(CFG["FIXER_MAX_FIX"])]]
+    new = [{"id": c["id"], "codes": c.get("codes")} for c in (pulled.get("new") or [])[: int(CFG["FIXER_MAX_NEW"])]]
+    out = {"ok": True, "enabled": True, "approved": approved if daytime else [], "new": new}
+    if approved and not daytime:
+        out["note"] = (f"{len(approved)} approved fix(es) wait for daytime: fixes run only from 06:00 to 21:59, "
+                       "when the live date check can be trusted.")
+    if released:
+        out["put_back"] = released
+    log("pulled", approved=len(out["approved"]), new=len(new), put_back=released)
+    return out
 
 
-def case_dir(case_id: int) -> Path:
-    d = STATE / "cases" / str(case_id)
-    d.mkdir(parents=True, exist_ok=True)
-    os.chmod(STATE / "cases", 0o700)
-    return d
-
-
-def render_transcript(evidence: dict) -> str:
-    lines = []
-    for ln in evidence.get("transcript") or []:
-        lines.append(f"[{ln.get('seq')}] {str(ln.get('ts'))[:19]} {ln.get('who')}: {ln.get('text')}")
-    return "\n".join(lines) + "\n"
-
-
-def check_plan(plan: dict, recent_ids: set[int]) -> Optional[str]:
-    """Why this plan cannot be used, or None."""
-    kind = plan.get("kind")
-    if kind not in PLAN_KINDS:
-        return f"unknown kind {kind!r}"
-    if kind == "duplicate":
-        if plan.get("duplicate_of") not in recent_ids:
-            return "duplicate_of does not name a recent case"
-        return None
-    if kind in ("bug", "judge", "decision"):
-        for field in ("issue", "diagnosis", "fix"):
-            if len(str(plan.get(field) or "").strip()) < 20:
-                return f"{field} is missing or too short"
-    return None
-
-
-def investigate(cli: str, case: dict, recent: list[dict]) -> str:
-    cid = case["id"]
+def cmd_investigate(args: argparse.Namespace) -> dict:
+    cid = args.id
+    pulled = pull_queue()
+    case = next((c for c in pulled.get("new") or [] if c["id"] == cid), None)
+    if case is None:
+        return {"ok": False, "error": f"case {cid} is not a new case in the queue"}
     if not queue("claim", str(cid), "investigating").get("ok"):
-        return "not_claimed"
+        return {"ok": False, "error": f"case {cid} could not be taken: something else holds it"}
+    _set_claim(cid, "investigating")
     try:
-        d = case_dir(cid)
-        evidence = case.get("evidence") or {}
-        (d / "evidence.json").write_text(json.dumps({k: v for k, v in case.items()}, indent=1, default=str))
-        (d / "transcript.txt").write_text(render_transcript(evidence))
-        (d / "recent-cases.json").write_text(json.dumps(recent, indent=1, default=str))
         wt = fresh_worktree(cid)
-        sid = str(uuid.uuid4())
-        res = run_claude(
-            cli, prompt("investigate", case_id=cid, case_dir=d, loop_id=case.get("loop_id"),
-                        codes=", ".join(case.get("codes") or [])),
-            cwd=wt, mode="dontAsk", tools=READ_TOOLS, schema=PLAN_SCHEMA, add_dirs=[d],
-            timeout=float(CFG["FIXER_INVESTIGATE_TIMEOUT"]), record=d / "investigate.jsonl",
-            session_id=sid)
-        plan = structured(res)
-        bad = check_plan(plan, {r["id"] for r in recent})
-        if bad:
-            raise RuntimeError(f"unusable plan: {bad}")
-        (d / "plan.json").write_text(json.dumps(plan, indent=1))
-        out = queue("plan", str(cid), stdin={"plan": plan, "session_id": sid})
-        if not out.get("ok"):
-            raise RuntimeError(f"the queue refused the plan: {out}")
-        if out.get("status") != "planned":
-            remove_worktree(cid)
-        log("investigated", case=cid, kind=plan.get("kind"), status=out.get("status"),
-            turns=res.get("num_turns"))
-        return str(out.get("status"))
-    except BillingError:
-        queue("release", str(cid), stdin={"error": "billing check"})
-        raise
+        recent = [r for r in pulled.get("recent") or [] if r["id"] != cid]
+        files = lay_out(case, wt, recent)
     except Exception as exc:
-        log("investigation failed", case=cid, error=str(exc)[:400])
-        queue("release", str(cid), stdin={"error": str(exc)[:400]})
-        return "released"
+        queue("release", str(cid), stdin={"error": f"setting up: {exc}"[:300]})
+        _set_claim(cid, None)
+        raise
+    log("investigating", case=cid)
+    return {"ok": True, "case": cid, "loop_id": case.get("loop_id"), "codes": case.get("codes"),
+            "checkout": str(wt), "evidence": files,
+            "write_plan_to": str(wt / EVIDENCE_DIR / "plan.json"),
+            "log_query": f"{LOG_SQL} \"select seq, stream, label, left(coalesce(text, payload::text), 600) "
+                         f"from lisa_log.events where loop_id = '{case.get('loop_id')}' order by seq\""}
 
 
-def fix(cli: str, case: dict) -> str:
-    cid = case["id"]
+def cmd_plan(args: argparse.Namespace) -> dict:
+    cid = args.id
+    d = worktree(cid) / EVIDENCE_DIR
+    try:
+        plan = json.loads((d / "plan.json").read_text())
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"cannot read {d / 'plan.json'}: {exc}"}
+    try:
+        recent_ids = {r["id"] for r in json.loads((d / "recent-cases.json").read_text())}
+    except (OSError, ValueError):
+        recent_ids = set()
+    bad = check_plan(plan, recent_ids)
+    if bad:
+        return {"ok": False, "error": bad, "fix_the_file_and_run_again": True}
+    out = queue("plan", str(cid), stdin={"plan": plan, "session_id": None})
+    if not out.get("ok"):
+        return {"ok": False, "error": f"the queue refused the plan (is case {cid} still being investigated?)"}
+    _set_claim(cid, None)
+    (STATE / "cases" / str(cid)).mkdir(parents=True, exist_ok=True)
+    (STATE / "cases" / str(cid) / "plan.json").write_text(json.dumps(plan, indent=1))
+    remove_worktree(cid)   # a fix starts from a fresh checkout of whatever is deployed by then
+    log("planned", case=cid, kind=plan.get("kind"), status=out.get("status"))
+    sent = out.get("status") == "planned"
+    return {"ok": True, "status": out.get("status"),
+            "note": "Lisa will send him this plan." if sent else "Closed; nothing is sent to him."}
+
+
+def cmd_fix(args: argparse.Namespace) -> dict:
+    cid = args.id
+    if not fix_hours(datetime.now()):
+        return {"ok": False, "wait": True, "error": "Fixes run only from 06:00 to 21:59. Leave it for the next run."}
+    pulled = pull_queue()
+    case = next((c for c in pulled.get("approved") or [] if c["id"] == cid), None)
+    if case is None:
+        return {"ok": False, "error": f"case {cid} is not an approved case in the queue"}
+    if not VENV_PY.exists():
+        return {"ok": False, "error": f"no test environment at {VENV_PY}"}
     if not queue("claim", str(cid), "fixing").get("ok"):
-        return "not_claimed"
+        return {"ok": False, "error": f"case {cid} could not be taken: something else holds it"}
+    _set_claim(cid, "fixing")
     branch = f"fix/case-{cid}"
     try:
-        result = _fix(cli, case, branch)
-    except BillingError:
-        queue("release", str(cid), stdin={"error": "billing check"})
-        raise
-    except Stop as stop:
-        result = {"status": "failed", "failed_step": stop.step, "detail": stop.detail}
-    except Exception as exc:
-        log("fix run died", case=cid, error=str(exc)[:400])
-        queue("release", str(cid), stdin={"error": str(exc)[:400]})
-        return "released"
-    out = queue("result", str(cid), stdin=result)
-    log("fix reported", case=cid, status=result.get("status"), step=result.get("failed_step"),
-        accepted=out.get("ok"))
-    return str(result.get("status"))
-
-
-def _fix(cli: str, case: dict, branch: str) -> dict:
-    cid = case["id"]
-    plan = case.get("plan") or {}
-    d = case_dir(cid)
-    evidence = {}
-    if (d / "evidence.json").exists():
-        evidence = (json.loads((d / "evidence.json").read_text()).get("evidence")) or {}
-    (d / "plan.json").write_text(json.dumps(plan, indent=1))
-
-    # The investigation's own checkout, moved to today's main, so the session can be resumed.
-    wt = worktree(cid)
-    resume = case.get("session_id") if wt.exists() else None
-    if wt.exists():
-        git("checkout", "--force", "--detach", "origin/main", cwd=wt)
-        git("clean", "-fdq", cwd=wt)
-    else:
         wt = fresh_worktree(cid)
-    git("checkout", "-B", branch, "origin/main", cwd=wt)
-
-    text = prompt("fix", case_id=cid, case_dir=d, plan=json.dumps(plan, indent=1),
-                  note=case.get("approval_note") or "(none)", offline_tests=OFFLINE_TESTS)
-    kw = dict(cwd=wt, mode="acceptEdits", tools=FIX_TOOLS, schema=FIX_SCHEMA, add_dirs=[d],
-              timeout=float(CFG["FIXER_FIX_TIMEOUT"]), record=d / "fix.jsonl")
-    try:
-        res = run_claude(cli, text, resume=resume, **kw) if resume else \
-            run_claude(cli, text, session_id=str(uuid.uuid4()), **kw)
-    except BillingError:
+        git("checkout", "-q", "-B", branch, "origin/main", cwd=wt)
+        files = lay_out(case, wt)
+    except Exception as exc:
+        queue("release", str(cid), stdin={"error": f"setting up: {exc}"[:300]})
+        _set_claim(cid, None)
         raise
-    except RuntimeError as exc:
-        if not resume:
-            raise
-        log("resume failed, starting fresh", case=cid, error=str(exc)[:200])
-        git("checkout", "--force", "-B", branch, "origin/main", cwd=wt)
-        git("clean", "-fdq", cwd=wt)
-        res = run_claude(cli, text, session_id=str(uuid.uuid4()), **kw)
-    answer = structured(res)
-    if not answer.get("done"):
-        raise Stop("the change", str(answer.get("why_not") or answer.get("summary") or "it was not made")[:200])
+    log("fixing", case=cid)
+    return {"ok": True, "case": cid, "checkout": str(wt), "branch": branch,
+            "plan": case.get("plan"), "his_note": case.get("approval_note"),
+            "evidence": files, "offline_tests": str(OFFLINE_TESTS),
+            "may_change": list(ALLOWED_PATHS)}
 
-    paths = changed_paths(wt)
+
+def _ship(cid: int, summary: str, prompt_changed: bool) -> dict:
+    wt = worktree(cid)
+    branch = f"fix/case-{cid}"
+    if not wt.exists() or git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt) != branch:
+        raise Stop("the checkout", f"{wt} is not on {branch}; take the case with `fix {cid}` first")
+    plan = {}
+    f = wt / EVIDENCE_DIR / "approved-plan.json"
+    if f.exists():
+        plan = json.loads(f.read_text())
+
+    git("add", "-A", cwd=wt)
+    paths = [p for p in git("diff", "--cached", "--name-only", "origin/main", cwd=wt).splitlines() if p]
     if not paths:
-        raise Stop("the change", "the run ended without changing any file")
+        raise Stop("the change", "no file is changed against production's code")
     stray = outside_scope(paths)
     if stray:
-        raise Stop("the scope check", f"it touched files outside Lisa and the dispatcher: {', '.join(stray[:3])}")
-    git("add", "-A", cwd=wt)
-    added = "\n".join(ln[1:] for ln in git("diff", "--cached", "-U0", cwd=wt).splitlines()
+        raise Stop("the scope check", f"it touches files outside Lisa and the dispatcher: {', '.join(stray[:3])}")
+    added = "\n".join(ln[1:] for ln in git("diff", "--cached", "-U0", "origin/main", cwd=wt).splitlines()
                       if ln.startswith("+") and not ln.startswith("+++"))
-    leaks = contact_data(added, chat_names(evidence))
+    leaks = contact_data(added, chat_names(load_evidence(cid)))
     if leaks:
         raise Stop("the contact-data check", f"the change contains {'; '.join(leaks[:3])}")
+    if not any("/tests/" in p for p in paths):
+        raise Stop("the test check", "no test file is changed: the fix must add a check that reproduces the mistake")
 
     ran, failed = offline_tests(wt)
     if failed:
         raise Stop("the offline tests", f"{len(failed)} of {ran} files fail: {', '.join(failed[:3])}")
 
-    summary = " ".join(str(answer.get("summary") or "").split())[:200]
     git("add", "-A", cwd=wt)
-    git("commit", "-q",
-        "-m", f"fix(lisa): {summary[:100] or f'fix case F{cid}'}",
-        "-m", f"Fix case F{cid} of the improvement loop.\n\n{plan.get('diagnosis', '')}\n\n"
-              "Co-Authored-By: Claude <noreply@anthropic.com>", cwd=wt)
+    if git("diff", "--cached", "--name-only", cwd=wt):
+        git("commit", "-q", "-m", f"fix(lisa): {summary[:100]}",
+            "-m", f"Fix case F{cid} of the improvement loop.\n\n{plan.get('diagnosis', '')}\n\n"
+                  "Co-Authored-By: Claude <noreply@anthropic.com>", cwd=wt)
     commit = git("rev-parse", "HEAD", cwd=wt)
-    stat = git("diff", "--shortstat", "origin/main...HEAD", cwd=wt)
-
-    review = structured(run_claude(
-        cli, prompt("review", plan=json.dumps(plan, indent=1), note=case.get("approval_note") or "(none)"),
-        cwd=wt, mode="dontAsk", tools=READ_TOOLS, schema=REVIEW_SCHEMA, add_dirs=[],
-        timeout=900, record=d / "review.jsonl", session_id=str(uuid.uuid4())))
-    if not review.get("ok"):
-        raise Stop("the second read of the diff", str(review.get("reason"))[:200])
 
     checks = f"Offline tests pass ({ran} files)"
-    gates = pick_gates(plan, wt, [p for p in git("diff", "--name-only", "origin/main...HEAD", cwd=wt).splitlines()])
+    gates = pick_gates(plan, wt, paths)
     if gates and CFG["FIXER_LIVE_CHECKS"] == "1":
         checks += "; live: " + live_checks(cid, wt, gates)
     elif gates:
         checks += "; live checks are switched off"
     checks += "."
-    if answer.get("prompt_changed"):
+    if prompt_changed:
         checks += " Her prompt changed: bump the prompt version when it ships."
 
     git("push", "--force", "-u", "origin", f"{branch}:{branch}", cwd=wt, timeout=300)
-    files = re.search(r"(\d+) files? changed", stat)
-    n = int(files.group(1)) if files else len(paths)
+    n = len(paths)
     return {"status": "ready", "branch": branch, "commit": commit,
-            "summary": f"{summary} {n} file{'s' if n != 1 else ''} changed.".strip(),
-            "checks": checks}
+            "summary": f"{summary} {n} file{'s' if n != 1 else ''} changed.".strip(), "checks": checks}
 
 
-def fix_hours(now: datetime) -> bool:
-    """May fixes run now? Only from 06:00 to 21:59. The live date check books "two hours from
-    now", and late at night that reads as "3 in the morning?": on 2026-11-28 at 01:00 it scored
-    1/5 on production's own code. A fix judged then would be reported as failed when it is not.
-    Investigations spend no live check and run at any hour."""
-    return 6 <= now.hour < 22
+def cmd_ship(args: argparse.Namespace) -> dict:
+    cid = args.id
+    summary = " ".join((args.summary or "").split())
+    if len(summary) < 10 or len(summary) > 160:
+        return {"ok": False, "error": "--summary is one sentence of 10 to 160 characters: what she now does differently"}
+    if len(" ".join((args.review or "").split())) < 10:
+        return {"ok": False, "error": "--review is the second reader's one-sentence verdict; get it before shipping"}
+    try:
+        result = _ship(cid, summary, args.prompt_changed)
+    except Stop as stop:
+        log("ship refused", case=cid, step=stop.step, detail=stop.detail)
+        return {"ok": False, "step": stop.step, "detail": stop.detail,
+                "next": f"Correct it and run ship again, or give the case up with: fail {cid} --step ... --detail ..."}
+    out = queue("result", str(cid), stdin=result)
+    if not out.get("ok"):
+        return {"ok": False, "error": f"pushed {result['branch']}, but the queue refused the report", **result}
+    _set_claim(cid, None)
+    log("shipped", case=cid, branch=result["branch"], commit=result["commit"][:7])
+    return {"ok": True, **result, "note": "Lisa will tell him. Nothing is deployed."}
 
 
-# ── one run ──────────────────────────────────────────────────────────────────
+def cmd_fail(args: argparse.Namespace) -> dict:
+    cid = args.id
+    result = {"status": "failed", "failed_step": " ".join(args.step.split())[:80],
+              "detail": " ".join(args.detail.split())[:240]}
+    out = queue("result", str(cid), stdin=result)
+    if not out.get("ok"):
+        return {"ok": False, "error": f"the queue refused (is case {cid} being fixed?)"}
+    _set_claim(cid, None)
+    log("failed", case=cid, step=result["failed_step"])
+    return {"ok": True, "note": "Lisa will tell him it was not fixed, and why."}
+
+
+def cmd_release(args: argparse.Namespace) -> dict:
+    cid = args.id
+    out = queue("release", str(cid), stdin={"error": args.error[:300]})
+    _set_claim(cid, None)
+    log("released", case=cid, status=out.get("status"))
+    return {"ok": bool(out.get("ok")), "status": out.get("status")}
+
+
 def main(argv: list[str]) -> int:
-    dry = "--dry" in argv
-    STATE.mkdir(parents=True, exist_ok=True)
-    lock = open(STATE / "run.lock", "w")
+    ap = argparse.ArgumentParser(prog="run.py", description="The fix loop's tool on the Mac.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("pull").set_defaults(fn=cmd_pull)
+    for name, fn in (("investigate", cmd_investigate), ("plan", cmd_plan), ("fix", cmd_fix)):
+        p = sub.add_parser(name)
+        p.add_argument("id", type=int)
+        p.set_defaults(fn=fn)
+    p = sub.add_parser("ship")
+    p.add_argument("id", type=int)
+    p.add_argument("--summary", required=True)
+    p.add_argument("--review", required=True)
+    p.add_argument("--prompt-changed", action="store_true")
+    p.set_defaults(fn=cmd_ship)
+    p = sub.add_parser("fail")
+    p.add_argument("id", type=int)
+    p.add_argument("--step", required=True)
+    p.add_argument("--detail", required=True)
+    p.set_defaults(fn=cmd_fail)
+    p = sub.add_parser("release")
+    p.add_argument("id", type=int)
+    p.add_argument("--error", required=True)
+    p.set_defaults(fn=cmd_release)
+    args = ap.parse_args(argv)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        log("another run is going; leaving")
-        return 0
-
-    cli = find_claude()
-    info: dict = {"host": socket.gethostname(), "cli": cli or None}
-    if cli:
-        try:
-            info["cli_version"] = sh([cli, "--version"], env=claude_env(), timeout=30, check=False).stdout.strip()
-        except Exception:
-            pass
-        info.update(auth_status(cli))
-    else:
-        info.update(ok=False, why="the claude command is not installed on this Mac")
-
-    try:
-        pulled = queue("pull", info["host"], stdin=info)
+        out = args.fn(args)
     except Exception as exc:
-        log("could not reach the queue", error=str(exc)[:300])
-        return 1
-    log("pulled", approved=len(pulled.get("approved") or []), new=len(pulled.get("new") or []),
-        enabled=pulled.get("enabled"), signed_in=info.get("ok"), why=info.get("why"))
-    if dry:
-        print(json.dumps({"info": info, "approved": [c["id"] for c in pulled.get("approved") or []],
-                          "new": [c["id"] for c in pulled.get("new") or []]}, indent=1))
-        return 0
-    if not pulled.get("enabled"):
-        return 0
-    if not info.get("ok"):
-        log("stopping before any model work", why=info.get("why"))
-        return 2
-    if not VENV_PY.exists():
-        log("no test environment", path=str(VENV_PY))
-        return 2
-
-    try:
-        git("fetch", "--quiet", "origin")
-        approved = (pulled.get("approved") or [])[: int(CFG["FIXER_MAX_FIX"])]
-        if approved and not fix_hours(datetime.now()):
-            log("fixes wait for daytime", waiting=len(approved))
-            approved = []
-        for case in approved:
-            log("fixing", case=case["id"])
-            fix(cli, case)
-        recent = pulled.get("recent") or []
-        for case in (pulled.get("new") or [])[: int(CFG["FIXER_MAX_NEW"])]:
-            log("investigating", case=case["id"])
-            investigate(cli, case, recent)
-    except BillingError as exc:
-        log("stopped: billing", error=str(exc))
-        return 3
-    log("run finished")
-    return 0
+        log("command failed", cmd=args.cmd, error=str(exc)[:400])
+        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+    print(json.dumps(out, indent=1, default=str))
+    return 0 if out.get("ok") else 1
 
 
 if __name__ == "__main__":

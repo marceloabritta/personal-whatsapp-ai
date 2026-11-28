@@ -1,24 +1,28 @@
-"""The daily worker, driven end to end with nothing real behind it.
+"""The fix loop's tool on the Mac, command by command, with nothing real behind it.
 
-`fixer/run.py` talks to three things: the queue on the droplet (over ssh), Claude Code, and git.
-Here the first two are small scripts that answer from files and write down what they were asked,
-and git is a throwaway repository with a bare "origin" beside it. So this checks what the worker
-does around the model: that Claude Code never starts with an API key in reach, that a run on the
-wrong credential is stopped, that an investigation's plan reaches the queue, and that a fix is
-only reported ready after the scope check, the contact-data check, the tests, the second read
-and the push, and is reported failed, with the step, when any of them says no.
+`fixer/run.py` is what the daily session calls to take a case and to hand its work in. It talks
+to the queue on the droplet (over ssh) and to git. Here the queue is a small script that answers
+from a file and writes down what it was asked, and git is a throwaway repository with a bare
+"origin" beside it. What is checked is everything that must hold whatever the session does: a
+plan too long for a phone is refused before it reaches the queue, and a change is pushed and
+reported ready only after the scope check, the contact-data check, the test check and every
+offline test, and is refused, with the step, when any of them says no.
 
     python3 fixer/tests/run_fixer.py
 Exits non-zero on any failed check. Every name and number here is made up.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
 _checks = {"pass": 0, "fail": 0}
@@ -29,37 +33,11 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     _checks["pass" if cond else "fail"] += 1
 
 
-TMP = Path(tempfile.mkdtemp(prefix="fixer-test-"))
+TMP = Path(tempfile.mkdtemp(prefix="fixer-test-")).resolve()
 STATE, REPO, ORIGIN = TMP / "state", TMP / "repo", TMP / "origin.git"
-FAKE_CLAUDE, FAKE_SSH = TMP / "claude", TMP / "ssh"
-SCRIPT, CALLS, QUEUE = TMP / "claude-script.json", TMP / "claude-calls.jsonl", TMP / "queue.json"
-QCALLS = TMP / "queue-calls.jsonl"
+FAKE_SSH, FAKE_SQL = TMP / "ssh", TMP / "lisa-log-sql"
+QUEUE, QCALLS = TMP / "queue.json", TMP / "queue-calls.jsonl"
 
-FAKE_CLAUDE.write_text(f'''#!{sys.executable}
-import json, os, sys, time
-args = sys.argv[1:]
-script = json.load(open({str(SCRIPT)!r}))
-if args[:2] == ["auth", "status"]:
-    print(json.dumps(script.get("auth", {{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty"}})))
-    sys.exit(0)
-if "--version" in args:
-    print("9.9.9 (stand-in)"); sys.exit(0)
-prompt = sys.stdin.read()
-step = script["runs"].pop(0)
-json.dump(script, open({str(SCRIPT)!r}, "w"))
-with open({str(CALLS)!r}, "a") as f:
-    f.write(json.dumps({{"args": args, "cwd": os.getcwd(), "prompt": prompt[:200],
-                        "env": sorted(k for k in os.environ if k.startswith(("ANTHROPIC", "CLAUDE")))}}) + "\\n")
-print(json.dumps({{"type": "system", "subtype": "init", "apiKeySource": step.get("key_source", "none")}}), flush=True)
-time.sleep(step.get("sleep", 0))
-for path, content in (step.get("edits") or {{}}).items():
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    open(path, "w").write(content)
-if step.get("no_result"):
-    sys.exit(1)
-print(json.dumps({{"type": "result", "is_error": bool(step.get("is_error")), "result": step.get("text", ""),
-                  "structured_output": step.get("structured"), "num_turns": 3}}), flush=True)
-''')
 FAKE_SSH.write_text(f'''#!{sys.executable}
 import json, sys
 remote = sys.argv[-1]
@@ -71,16 +49,22 @@ q = json.load(open({str(QUEUE)!r}))
 print("a line of noise that is not the answer")
 print(json.dumps(q.get(args[0], {{"ok": True}})))
 ''')
-for f in (FAKE_CLAUDE, FAKE_SSH):
+FAKE_SQL.write_text(f'''#!{sys.executable}
+import json
+print(json.dumps({{"transcript": [{{"seq": 1, "ts": "2026-11-24T14:00:00", "who": "Olindina Peçanha", "text": "from the log"}}],
+                  "reviews": [], "findings": [], "loop": {{"loop_id": "loop-7"}}}}))
+''')
+for f in (FAKE_SSH, FAKE_SQL):
     f.chmod(f.stat().st_mode | stat.S_IEXEC)
 
 os.environ.update(FIXER_STATE=str(STATE), FIXER_REPO=str(REPO), FIXER_SSH_CMD=str(FAKE_SSH),
-                  FIXER_CLAUDE=str(FAKE_CLAUDE), FIXER_LIVE_CHECKS="0", FIXER_MODEL="",
-                  ANTHROPIC_API_KEY="sk-must-never-reach-claude", ANTHROPIC_BASE_URL="http://nope",
-                  CLAUDE_CODE_SOMETHING="from a parent session")
-os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+                  FIXER_LIVE_CHECKS="0")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import run as fx  # noqa: E402
+
+fx.VENV_PY = Path(sys.executable)
+fx.LOG_SQL = FAKE_SQL
+DAY, NIGHT = True, False
 
 
 def g(*args: str, cwd: Path = REPO) -> str:
@@ -95,11 +79,13 @@ def make_repo() -> None:
     g("config", "user.name", "Test")
     for path, text in {
         "Lisa flow/app/thing.py": "VALUE = 1\n",
+        "Lisa flow/app/review/prompt.py": "JUDGE = 1\n",
         "Lisa flow/tests/run_thing.py":
             "import sys\nsys.path.insert(0, '.')\nfrom app.thing import VALUE\n"
             "ok = VALUE in (1, 2)\nprint('1 passed, 0 failed' if ok else '0 passed, 1 failed')\n"
             "sys.exit(0 if ok else 1)\n",
         "Lisa flow/tests/live_dates.py": "print('[PASS] x')\n",
+        "Lisa flow/tests/live_busy.py": "print('[PASS] x')\n",
         "dispatcher/app.py": "X = 1\n",
         "dispatcher/tests/run_d.py": "print('1 passed, 0 failed')\n",
         "README.md": "repo\n",
@@ -113,64 +99,59 @@ def make_repo() -> None:
     g("fetch", "-q", "origin")
 
 
-def script(runs: list[dict], auth: dict | None = None) -> None:
-    body: dict = {"runs": runs}
-    if auth is not None:
-        body["auth"] = auth
-    SCRIPT.write_text(json.dumps(body))
-    CALLS.write_text("")
+def queue_says(**answers: dict) -> None:
+    QUEUE.write_text(json.dumps(answers))
     QCALLS.write_text("")
 
 
-def calls(path: Path) -> list[dict]:
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+def asked() -> list[dict]:
+    return [json.loads(ln) for ln in QCALLS.read_text().splitlines() if ln.strip()]
+
+
+def verbs() -> list[str]:
+    return [c["args"][0] for c in asked()]
+
+
+def run(*argv: str, daytime: bool = DAY) -> tuple[int, dict]:
+    """One command, as the session would run it: exit code and the JSON it printed."""
+    fx.fix_hours = lambda now: daytime
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = fx.main(list(argv))
+    return rc, json.loads(buf.getvalue())
 
 
 PLAN = {"kind": "bug", "judge_right": True, "confidence": "high",
         "issue": "Tuesday, in a chat with a supplier, the card showed one hour instead of ninety minutes.",
         "diagnosis": "The end time was in a voice note and the booking step only reads typed text.",
         "fix": "Read the end time from every message of the request before using the default.",
-        "gates": ["live_dates"]}
-CASE = {"id": 7, "loop_id": "loop-7", "codes": ["wrong_details"], "judge_version": "v5",
-        "evidence": {"transcript": [
-            {"seq": 1, "ts": "2026-11-24T14:00:00", "who": "Marcelo", "text": "@lisa marca quinta 15h"},
-            {"seq": 2, "ts": "2026-11-24T14:00:05", "who": "Zuleide Quaresma (voice message — transcribed)",
-             "text": "até 16h30"},
-            {"seq": 3, "ts": "2026-11-24T14:00:09", "who": "AI Assistant", "text": "Marquei 15h–16h."}]}}
+        "gates": ["live_busy"]}
+EVIDENCE = {"transcript": [
+    {"seq": 1, "ts": "2026-11-24T14:00:00", "who": "Marcelo", "text": "@lisa marca quinta 15h"},
+    {"seq": 2, "ts": "2026-11-24T14:00:05", "who": "Zuleide Quaresma (voice message — transcribed)", "text": "até 16h30"},
+    {"seq": 3, "ts": "2026-11-24T14:00:09", "who": "AI Assistant", "text": "Marquei 15h–16h."}],
+    "reviews": [], "findings": [], "loop": {"loop_id": "loop-7"}}
+NEW = {"id": 7, "loop_id": "loop-7", "codes": ["wrong_details"], "judge_version": "v5", "evidence": EVIDENCE}
+RECENT = [{"id": 3, "status": "proposed", "issue": "an older one"}, {"id": 7, "status": "new"}]
+
+
+def approved(case_id: int, **kw) -> dict:
+    return {"id": case_id, "loop_id": f"loop-{case_id}", "judge_version": "v5", "plan": PLAN,
+            "approval_note": "only in groups", **kw}
 
 
 def unit_checks() -> None:
-    print("what Claude Code is started with")
-    env = fx.claude_env()
-    check("no ANTHROPIC_* variable survives", not any(k.startswith("ANTHROPIC") for k in env), str(sorted(env)[:5]))
-    check("nor a parent session's CLAUDE_* variables", not any(k.startswith("CLAUDE") for k in env))
-    check("PATH and HOME do", "PATH" in env and "HOME" in env)
-    fx.CFG["CLAUDE_CODE_OAUTH_TOKEN"] = "tok"
-    check("the subscription token from the settings file is the one exception",
-          fx.claude_env().get("CLAUDE_CODE_OAUTH_TOKEN") == "tok")
-    fx.CFG["CLAUDE_CODE_OAUTH_TOKEN"] = ""
-
-    print("\nwho Claude Code would run as")
-    script([], auth={"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-                     "loginExpiresAt": "2027-01-01"})
-    st = fx.auth_status(str(FAKE_CLAUDE))
-    check("an account sign-in is accepted", st["ok"] is True and st["login_expires"] == "2027-01-01", str(st))
-    script([], auth={"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})
-    st = fx.auth_status(str(FAKE_CLAUDE))
-    check("not signed in is refused, and says so", st["ok"] is False and "not signed in" in st["why"], str(st))
-    script([], auth={"loggedIn": True, "authMethod": "apiKey", "apiProvider": "firstParty"})
-    check("signed in with a key is refused", fx.auth_status(str(FAKE_CLAUDE))["ok"] is False)
-    script([], auth={"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "bedrock"})
-    check("another provider is refused", fx.auth_status(str(FAKE_CLAUDE))["ok"] is False)
-    check("a missing command is refused", fx.auth_status(str(TMP / "nope"))["ok"] is False)
-
-    print("\nplans")
+    print("plans")
     ok = fx.check_plan
     check("a full bug plan passes", ok(PLAN, set()) is None)
     check("a short paragraph is refused", ok({**PLAN, "fix": "do it"}, set()) == "fix is missing or too short")
-    check("an unknown kind is refused", "unknown kind" in ok({**PLAN, "kind": "poem"}, set()))
+    long = ok({**PLAN, "diagnosis": "word " * 80}, set())
+    check("a paragraph too long for a phone is refused, with its length", long and "399 characters; the limit is 300" in long, str(long))
+    check("an unknown kind is refused", "kind must be one of" in ok({**PLAN, "kind": "poem"}, set()))
     check("a duplicate must name a recent case", ok({"kind": "duplicate", "duplicate_of": 3}, {1, 2}) is not None
           and ok({"kind": "duplicate", "duplicate_of": 2}, {1, 2}) is None)
+    check("already_fixed must name the commit", ok({"kind": "already_fixed"}, set()) is not None
+          and ok({"kind": "already_fixed", "fixed_by": "a3f58e0"}, set()) is None)
     check("no_action needs no paragraphs", ok({"kind": "no_action"}, set()) is None)
 
     print("\nwhat a change may touch")
@@ -178,8 +159,9 @@ def unit_checks() -> None:
           fx.outside_scope(["Lisa flow/app/x.py", "Lisa flow/tests/run_x.py", "dispatcher/app.py",
                             "dispatcher/tests/run_y.py"]) == [])
     stray = ["evolution/docker-compose.yml", "fixer/run.py", ".claude/scripts/lisa-log-sql", "Lisa flow/Dockerfile",
-             ".github/workflows/x.yml", "dispatcher/Dockerfile"]
-    check("not the compose file, the worker, the scripts, a Dockerfile or CI", fx.outside_scope(stray) == stray)
+             ".github/workflows/x.yml", "dispatcher/Dockerfile", ".fixer/evidence.json"]
+    check("not the compose file, the tool itself, the scripts, a Dockerfile, CI or the evidence",
+          fx.outside_scope(stray) == stray)
 
     print("\ncontact data")
     cd = fx.contact_data
@@ -189,204 +171,225 @@ def unit_checks() -> None:
     check("the made-up test ids pass", cd('A = "5511900000001@s.whatsapp.net"; B = "5511999990000@s.whatsapp.net"', []) == [])
     check("a name from the chat is caught", cd('who = "Zuleide"', ["Zuleide", "Quaresma"]) != [])
     check("ordinary code passes", cd("def end_time(messages):\n    return messages[-1]", ["Zuleide"]) == [])
-    check("names come from the other speakers only", fx.chat_names(CASE["evidence"]) == ["Quaresma", "Zuleide"],
-          str(fx.chat_names(CASE["evidence"])))
+    check("names come from the other speakers only", fx.chat_names(EVIDENCE) == ["Quaresma", "Zuleide"],
+          str(fx.chat_names(EVIDENCE)))
 
     print("\nlive checks")
     check("verdict lines are counted", fx.parse_gate("[PASS] a\n  [PASS] b\n[FAIL] c\nnoise [PASS]") == (2, 1))
-    wt = REPO
-    check("a change to her code gets the plan's checks, the date check always",
-          fx.pick_gates({"gates": ["live_nope", "live_dates"]}, wt, ["Lisa flow/app/thing.py"]) == ["live_dates.py"])
-    check("a dispatcher-only change gets none", fx.pick_gates(PLAN, wt, ["dispatcher/app.py"]) == [])
-
-    from datetime import datetime
+    pick = fx.pick_gates
+    check("a change to her reply path gets the plan's checks, and the date check always",
+          pick({"gates": ["live_nope", "live_busy"]}, REPO, ["Lisa flow/app/thing.py"]) == ["live_busy.py", "live_dates.py"])
+    check("a change to the judge alone gets no date check: the judge is not on the reply path",
+          pick({"gates": []}, REPO, ["Lisa flow/app/review/prompt.py", "Lisa flow/tests/run_review.py"]) == [])
+    check("a dispatcher-only change gets none", pick(PLAN, REPO, ["dispatcher/app.py"]) == [])
     at = lambda h: datetime(2026, 11, 28, h, 30)  # noqa: E731
     check("fixes run in the daytime only: the live date check misreads the small hours",
           [fx.fix_hours(at(h)) for h in (1, 5, 6, 12, 21, 22, 23)] == [False, False, True, True, True, False, False])
 
     print("\nthe queue")
-    QUEUE.write_text(json.dumps({"pull": {"ok": True, "enabled": True, "new": [], "approved": [], "recent": []}}))
-    QCALLS.write_text("")
-    out = fx.queue("pull", "mac", stdin={"cli": "x"})
+    queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [], "recent": []})
+    out = fx.pull_queue()
     check("the answer is the last JSON line, past any noise", out["enabled"] is True)
-    check("the body goes in on stdin", calls(QCALLS)[0] == {"args": ["pull", "mac"], "body": {"cli": "x"}})
+    c = asked()[0]
+    check("every pull says this Mac is here, running in the desktop app",
+          c["args"][0] == "pull" and c["body"]["ok"] is True and c["body"]["runner"] == "desktop", str(c))
 
 
-def claude_checks() -> None:
-    print("\none Claude Code run")
-    rec = TMP / "rec.jsonl"
-    common = dict(cwd=REPO, mode="dontAsk", tools=fx.READ_TOOLS, schema=fx.PLAN_SCHEMA, add_dirs=[TMP],
-                  timeout=20, record=rec)
-    script([{"structured": {"kind": "no_action"}}])
-    res = fx.run_claude(str(FAKE_CLAUDE), "the prompt", session_id="11111111-1111-1111-1111-111111111111", **common)
-    call = calls(CALLS)[0]
-    check("the result comes back", fx.structured(res) == {"kind": "no_action"})
-    check("the prompt went in on stdin", call["prompt"] == "the prompt")
-    check("no key and no parent-session variable reached it", call["env"] == [], str(call["env"]))
-    a = call["args"]
-    check("headless, with a stream to check", a[:4] == ["-p", "--output-format", "stream-json", "--verbose"])
-    check("nothing may prompt", a[a.index("--permission-prompts") + 1] == "none"
-          and a[a.index("--permission-mode") + 1] == "dontAsk")
-    tools = a[a.index("--allowedTools") + 1]
-    check("an investigation gets no edit tool and no open shell",
-          "Edit" not in tools and "Write" not in tools and "Bash(git log *)" in tools and "Bash(*)" not in tools, tools)
-    check("never --bare", "--bare" not in a)
-    check("the session id is passed", a[a.index("--session-id") + 1].startswith("1111"))
-    check("the stream is kept", '"type": "result"' in rec.read_text())
+def pull_checks() -> None:
+    print("\npull")
+    queue_says(pull={"ok": True, "enabled": False, "new": [NEW], "approved": [approved(4)], "recent": []})
+    rc, out = run("pull")
+    check("switched off on the droplet: nothing is offered", rc == 0 and out["approved"] == [] and out["new"] == []
+          and "switched off" in out["note"], str(out))
+    many = [dict(NEW, id=i) for i in range(10, 20)]
+    queue_says(pull={"ok": True, "enabled": True, "new": many, "recent": [],
+                     "approved": [approved(i) for i in range(1, 6)]})
+    rc, out = run("pull")
+    check("at most 3 fixes and 5 investigations a run",
+          [c["id"] for c in out["approved"]] == [1, 2, 3] and [c["id"] for c in out["new"]] == [10, 11, 12, 13, 14], str(out))
+    check("an approved case comes with its issue and his note",
+          out["approved"][0] == {"id": 1, "issue": PLAN["issue"], "note": "only in groups"}, str(out["approved"][0]))
+    rc, out = run("pull", daytime=NIGHT)
+    check("at night the fixes are held back, with the reason, and investigations are not",
+          out["approved"] == [] and len(out["new"]) == 5 and "wait for daytime" in out["note"], str(out))
 
-    script([{"key_source": "ANTHROPIC_API_KEY", "sleep": 5, "structured": {}}])
-    try:
-        fx.run_claude(str(FAKE_CLAUDE), "p", **common)
-        check("a run that starts on an API key is stopped", False)
-    except fx.BillingError as exc:
-        check("a run that starts on an API key is stopped", "ANTHROPIC_API_KEY" in str(exc))
-    script([{"sleep": 30, "structured": {}}])
-    try:
-        fx.run_claude(str(FAKE_CLAUDE), "p", **{**common, "timeout": 1})
-        check("a run that hangs is cut off", False)
-    except RuntimeError as exc:
-        check("a run that hangs is cut off", "no answer" in str(exc), str(exc))
-    script([{"is_error": True, "text": "limit reached"}])
-    try:
-        fx.run_claude(str(FAKE_CLAUDE), "p", **common)
-        check("an error result raises", False)
-    except RuntimeError as exc:
-        check("an error result raises", "limit reached" in str(exc))
-    script([{"no_result": True}])
-    try:
-        fx.run_claude(str(FAKE_CLAUDE), "p", **common)
-        check("a run with no result raises", False)
-    except RuntimeError:
-        check("a run with no result raises", True)
-    script([{"structured": {"kind": "bug"}}])
-    fx.run_claude(str(FAKE_CLAUDE), "p", resume="abc", **common)
-    a = calls(CALLS)[0]["args"]
-    check("a resumed run names the session and no new id", a[a.index("--resume") + 1] == "abc" and "--session-id" not in a)
+    queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [], "recent": []},
+               release={"ok": True, "status": "new"})
+    fx._set_claim(41, "investigating")
+    fx._set_claim(42, "fixing")
+    claims = fx._claims()
+    claims["41"]["at"] = time.time() - 7 * 3600
+    (STATE / "claims.json").write_text(json.dumps(claims))
+    rc, out = run("pull")
+    rel = [c for c in asked() if c["args"][0] == "release"]
+    check("a case taken seven hours ago and never handed in is put back; a fresh one is left",
+          out.get("put_back") == [41] and [c["args"][1] for c in rel] == ["41"] and list(fx._claims()) == ["42"], str(out))
+    fx._set_claim(42, None)
 
 
-def flow_checks() -> None:
-    cli = str(FAKE_CLAUDE)
-    QUEUE.write_text(json.dumps({"claim": {"ok": True}, "plan": {"ok": True, "status": "planned"},
-                                 "result": {"ok": True, "status": "ready"}, "release": {"ok": True, "status": "new"}}))
+def investigate_checks() -> None:
+    print("\ninvestigate, then plan")
+    queue_says(pull={"ok": True, "enabled": True, "new": [NEW], "approved": [], "recent": RECENT},
+               claim={"ok": True}, plan={"ok": True, "status": "planned"})
+    rc, out = run("investigate", "7")
+    wt = Path(out["checkout"])
+    check("the case is taken", rc == 0 and verbs() == ["pull", "claim"] and asked()[1]["args"] == ["claim", "7", "investigating"])
+    check("it gets a checkout of its own, at production's code",
+          wt == fx.worktree(7) and (wt / "Lisa flow/app/thing.py").read_text() == "VALUE = 1\n")
+    check("the evidence is laid out inside it",
+          "Zuleide" in (wt / ".fixer/transcript.txt").read_text() and (wt / ".fixer/evidence.json").exists())
+    recent = json.loads((wt / ".fixer/recent-cases.json").read_text())
+    check("... with the recent cases, without itself", [r["id"] for r in recent] == [3])
+    check("git does not see the evidence", g("status", "--porcelain", "--untracked-files=all", cwd=wt) == "")
+    check("a copy is kept outside the repository", (STATE / "cases/7/transcript.txt").exists())
+    check("it is told where to write the plan and how to read the log",
+          out["write_plan_to"] == str(wt / ".fixer/plan.json") and "loop-7" in out["log_query"])
+    check("the case is remembered as taken", fx._claims()["7"]["phase"] == "investigating")
 
-    print("\nan investigation")
-    script([{"structured": PLAN}])
-    out = fx.investigate(cli, dict(CASE), recent=[])
-    q = calls(QCALLS)
-    check("claimed, then the plan reported", [c["args"][0] for c in q] == ["claim", "plan"] and out == "planned", str(q))
-    check("the plan and the session to resume are sent", q[1]["body"]["plan"] == PLAN and len(q[1]["body"]["session_id"]) == 36)
-    wt = fx.worktree(7)
-    check("it ran in the case's own checkout", Path(calls(CALLS)[0]["cwd"]).resolve() == wt.resolve())
-    d = fx.case_dir(7)
-    check("the evidence was laid out for it", "Zuleide" in (d / "transcript.txt").read_text()
-          and (d / "evidence.json").exists() and (d / "recent-cases.json").exists())
-    check("the checkout is kept for the fix", wt.exists())
+    rc, out = run("plan", "7")
+    check("no plan file: refused, and the queue is not asked", rc == 1 and "cannot read" in out["error"] and "plan" not in verbs()[2:])
+    (wt / ".fixer/plan.json").write_text(json.dumps({**PLAN, "issue": "word " * 90}))
+    QCALLS.write_text("")
+    rc, out = run("plan", "7")
+    check("a paragraph too long for his phone is refused before it reaches the queue",
+          rc == 1 and "limit is 300" in out["error"] and verbs() == [], str(out))
+    (wt / ".fixer/plan.json").write_text(json.dumps({**PLAN, "kind": "duplicate", "duplicate_of": 99}))
+    rc, out = run("plan", "7")
+    check("a duplicate of a case that is not in the list is refused", rc == 1 and "duplicate_of" in out["error"])
+    (wt / ".fixer/plan.json").write_text(json.dumps(PLAN))
+    rc, out = run("plan", "7")
+    body = asked()[-1]
+    check("a good plan is handed in", rc == 0 and out["status"] == "planned" and body["args"] == ["plan", "7"]
+          and body["body"]["plan"] == PLAN, str(out))
+    check("... and he will be sent it", out["note"] == "Lisa will send him this plan.")
+    check("the checkout is removed and the case no longer counts as taken", not wt.exists() and "7" not in fx._claims())
+    check("the plan is kept on the Mac", json.loads((STATE / "cases/7/plan.json").read_text()) == PLAN)
 
-    script([{"structured": {**PLAN, "kind": "duplicate", "duplicate_of": 99}}])
-    out = fx.investigate(cli, {**CASE, "id": 8}, recent=[{"id": 3}])
-    check("an unusable plan releases the case", out == "released"
-          and [c["args"][0] for c in calls(QCALLS)] == ["claim", "release"])
-    QUEUE.write_text(json.dumps({"claim": {"ok": False}}))
-    script([])
-    check("a case someone else holds is left alone", fx.investigate(cli, {**CASE, "id": 9}, []) == "not_claimed"
-          and calls(CALLS) == [])
-    QUEUE.write_text(json.dumps({"claim": {"ok": True}, "plan": {"ok": True, "status": "duplicate"},
-                                 "result": {"ok": True}, "release": {"ok": True}}))
-    script([{"structured": {"kind": "duplicate", "duplicate_of": 3, "judge_right": True, "issue": "", "diagnosis": "",
-                            "fix": "", "confidence": "high"}}])
-    fx.investigate(cli, {**CASE, "id": 10}, recent=[{"id": 3}])
-    check("a closed case's checkout is removed", not fx.worktree(10).exists())
+    queue_says(pull={"ok": True, "enabled": True, "new": [dict(NEW, id=8)], "approved": [], "recent": RECENT},
+               claim={"ok": True}, plan={"ok": True, "status": "duplicate"})
+    run("investigate", "8")
+    (fx.worktree(8) / ".fixer/plan.json").write_text(json.dumps({"kind": "duplicate", "duplicate_of": 3}))
+    rc, out = run("plan", "8")
+    check("a repeat closes without a message", rc == 0 and out["note"] == "Closed; nothing is sent to him.", str(out))
 
-    print("\na fix")
-    QUEUE.write_text(json.dumps({"claim": {"ok": True}, "result": {"ok": True}, "release": {"ok": True}}))
-    case = {**CASE, "plan": PLAN, "session_id": "sess-7", "approval_note": "only in groups"}
-    good = {"Lisa flow/app/thing.py": "VALUE = 2\n", "Lisa flow/tests/run_thing2.py": "print('1 passed, 0 failed')\n"}
-    script([{"edits": good, "structured": {"done": True, "summary": "She reads the end time from voice notes too."}},
-            {"structured": {"ok": True, "reason": "does what the plan says"}}])
-    out = fx.fix(cli, case)
-    q = calls(QCALLS)
-    res = q[-1]["body"]
-    check("reported ready", out == "ready" and q[-1]["args"] == ["result", "7"], str(q[-1]))
-    check("with the branch and the commit", res["branch"] == "fix/case-7" and len(res["commit"]) == 40)
+    queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [], "recent": []})
+    rc, out = run("investigate", "9")
+    check("a case that is not in the queue is refused", rc == 1 and "not a new case" in out["error"] and verbs() == ["pull"])
+    queue_says(pull={"ok": True, "enabled": True, "new": [dict(NEW, id=9)], "approved": [], "recent": []},
+               claim={"ok": False})
+    rc, out = run("investigate", "9")
+    check("a case something else holds is left alone", rc == 1 and not fx.worktree(9).exists() and "9" not in fx._claims())
+
+
+def fix_checks() -> None:
+    print("\nfix, then ship")
+
+    def take(case_id: int) -> Path:
+        queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [approved(case_id)], "recent": []},
+                   claim={"ok": True}, result={"ok": True}, release={"ok": True, "status": "approved"})
+        rc, out = run("fix", str(case_id))
+        assert rc == 0, out
+        QCALLS.write_text("")
+        return Path(out["checkout"])
+
+    def ship(case_id: int, *extra: str) -> tuple[int, dict]:
+        return run("ship", str(case_id), "--summary", "She reads the end time from voice notes too.",
+                   "--review", "It does what the plan says and nothing else.", *extra)
+
+    queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [approved(7)], "recent": []}, claim={"ok": True})
+    rc, out = run("fix", "7", daytime=NIGHT)
+    check("at night a fix is not started, and the case is not taken", rc == 1 and out.get("wait") is True and verbs() == [])
+    rc, out = run("fix", "7")
+    wt = Path(out["checkout"])
+    check("the case is taken to be fixed", rc == 0 and asked()[1]["args"] == ["claim", "7", "fixing"])
+    check("on a branch of its own, at production's code",
+          out["branch"] == "fix/case-7" and g("rev-parse", "--abbrev-ref", "HEAD", cwd=wt) == "fix/case-7")
+    check("with the plan he approved, his note, and what it may change",
+          out["plan"] == PLAN and out["his_note"] == "only in groups" and "Lisa flow/app/" in out["may_change"])
+    check("the evidence kept from the investigation is laid out again",
+          "Zuleide" in (wt / ".fixer/transcript.txt").read_text() and (wt / ".fixer/approved-plan.json").exists())
+    QCALLS.write_text("")
+
+    rc, out = ship(7)
+    check("nothing changed: refused", rc == 1 and out["step"] == "the change", str(out))
+    (wt / "evolution").mkdir()
+    (wt / "evolution/docker-compose.yml").write_text("x\n")
+    (wt / "Lisa flow/app/thing.py").write_text("VALUE = 2\n")
+    rc, out = ship(7)
+    check("a file outside Lisa and the dispatcher: refused at the scope check",
+          rc == 1 and out["step"] == "the scope check" and "docker-compose" in out["detail"], str(out))
+    (wt / "evolution/docker-compose.yml").unlink()
+    rc, out = ship(7)
+    check("no test changed: refused at the test check", rc == 1 and out["step"] == "the test check", str(out))
+    (wt / "Lisa flow/tests/run_new.py").write_text('JID = "5531987654321@s.whatsapp.net"\nprint("1 passed, 0 failed")\n')
+    rc, out = ship(7)
+    check("a real-looking number: refused at the contact-data check", rc == 1 and out["step"] == "the contact-data check", str(out))
+    (wt / "Lisa flow/tests/run_new.py").write_text('WHO = "Zuleide"\nprint("1 passed, 0 failed")\n')
+    rc, out = ship(7)
+    check("a name from the chat: refused there too", rc == 1 and out["step"] == "the contact-data check", str(out))
+    (wt / "Lisa flow/tests/run_new.py").write_text('print("1 passed, 0 failed")\n')
+    (wt / "Lisa flow/app/thing.py").write_text("VALUE = 3\n")
+    rc, out = ship(7)
+    check("a broken test: refused at the offline tests, naming the file",
+          rc == 1 and out["step"] == "the offline tests" and "run_thing.py" in out["detail"], str(out))
+    check("every refusal says what to do next", "run ship again" in out["next"])
+    check("none of the refusals reached the queue or GitHub",
+          verbs() == [] and g("branch", "--list", "fix/*", cwd=ORIGIN) == "")
+    check("... and the case still counts as taken", fx._claims()["7"]["phase"] == "fixing")
+
+    rc, out = run("ship", "7", "--summary", "short", "--review", "It does what the plan says.")
+    check("a summary that is not a sentence is refused", rc == 1 and "--summary" in out["error"])
+    rc, out = run("ship", "7", "--summary", "She reads the end time from voice notes too.", "--review", "ok")
+    check("no second reader's verdict: refused", rc == 1 and "--review" in out["error"])
+
+    (wt / "Lisa flow/app/thing.py").write_text("VALUE = 2\n")
+    rc, out = ship(7, "--prompt-changed")
+    res = asked()[-1]
+    check("corrected, it ships", rc == 0 and out["status"] == "ready" and res["args"] == ["result", "7"], str(out))
+    check("the report carries the branch and the commit", res["body"]["branch"] == "fix/case-7" and len(res["body"]["commit"]) == 40)
     check("and what changed, in words",
-          res["summary"] == "She reads the end time from voice notes too. 2 files changed.", res["summary"])
-    check("and what was checked", res["checks"] == "Offline tests pass (3 files); live checks are switched off.", res["checks"])
-    c = calls(CALLS)
-    check("the fix run resumed the investigation, in its checkout",
-          c[0]["args"][c[0]["args"].index("--resume") + 1] == "sess-7" and Path(c[0]["cwd"]).resolve() == wt.resolve())
-    tools = c[0]["args"][c[0]["args"].index("--allowedTools") + 1]
-    check("it may edit and run the offline tests, and has no git write, push or ssh",
-          "Edit" in tools and "offline-tests" in tools and "git push" not in tools and "git commit" not in tools
-          and "ssh" not in tools, tools)
-    check("the second read is a fresh, read-only run",
-          "--resume" not in c[1]["args"] and "Edit" not in c[1]["args"][c[1]["args"].index("--allowedTools") + 1])
+          res["body"]["summary"] == "She reads the end time from voice notes too. 2 files changed.", res["body"]["summary"])
+    check("and what was checked",
+          res["body"]["checks"] == "Offline tests pass (3 files); live checks are switched off. "
+                                   "Her prompt changed: bump the prompt version when it ships.", res["body"]["checks"])
     check("the branch is on origin with the change", g("show", "fix/case-7:Lisa flow/app/thing.py", cwd=ORIGIN) == "VALUE = 2")
     check("main is untouched", g("show", "main:Lisa flow/app/thing.py", cwd=ORIGIN) == "VALUE = 1")
     msg = g("log", "-1", "--format=%B", "fix/case-7", cwd=ORIGIN)
     check("the commit says what and which case", msg.startswith("fix(lisa): She reads the end time") and "F7" in msg, msg)
+    check("the evidence did not go with it", ".fixer" not in g("ls-tree", "-r", "--name-only", "fix/case-7", cwd=ORIGIN))
+    check("the case no longer counts as taken", "7" not in fx._claims())
 
-    def failed_fix(case_id: int, runs: list[dict]) -> dict:
-        script(runs)
-        fx.fix(cli, {**case, "id": case_id, "session_id": None})
-        return calls(QCALLS)[-1]["body"]
+    print("\nwithout a copy of the evidence on the Mac")
+    wt = take(12)
+    check("it is read from the log", "from the log" in (wt / ".fixer/transcript.txt").read_text())
+    (wt / "Lisa flow/tests/run_new.py").write_text('WHO = "Olindina"\nprint("1 passed, 0 failed")\n')
+    rc, out = ship(12)
+    check("... and its names are still kept out of commits", rc == 1 and out["step"] == "the contact-data check", str(out))
 
-    done = {"done": True, "summary": "Changed."}
-    r = failed_fix(21, [{"edits": {"evolution/docker-compose.yml": "x\n"}, "structured": done}])
-    check("a change outside Lisa and the dispatcher fails at the scope check",
-          r["status"] == "failed" and r["failed_step"] == "the scope check" and "docker-compose" in r["detail"], str(r))
-    r = failed_fix(22, [{"edits": {"Lisa flow/tests/run_new.py": 'JID = "5531987654321@s.whatsapp.net"\n'}, "structured": done}])
-    check("a real-looking number fails at the contact-data check", r["failed_step"] == "the contact-data check", str(r))
-    r = failed_fix(23, [{"edits": {"Lisa flow/app/thing.py": "VALUE = 3\n"}, "structured": done}])
-    check("a broken test fails at the offline tests, naming the file",
-          r["failed_step"] == "the offline tests" and "run_thing.py" in r["detail"], str(r))
-    r = failed_fix(24, [{"edits": good, "structured": done}, {"structured": {"ok": False, "reason": "adds a network call"}}])
-    check("a refusal from the second read fails there, with its reason",
-          r["failed_step"] == "the second read of the diff" and r["detail"] == "adds a network call", str(r))
-    r = failed_fix(25, [{"structured": {"done": False, "summary": "", "why_not": "the cause is elsewhere"}}])
-    check("a run that declines says why", r["failed_step"] == "the change" and r["detail"] == "the cause is elsewhere", str(r))
-    r = failed_fix(26, [{"structured": done}])
-    check("a run that changed nothing fails", r["failed_step"] == "the change", str(r))
-    branches = g("branch", "--list", "fix/*", cwd=ORIGIN)
-    check("none of the failed ones was pushed", branches.split() == ["fix/case-7"], branches)
-
-    script([{"key_source": "apiKeyHelper", "sleep": 5, "structured": done}])
-    try:
-        fx.fix(cli, {**case, "id": 27, "session_id": None})
-        check("a fix on the wrong credential stops the whole run", False)
-    except fx.BillingError:
-        check("a fix on the wrong credential stops the whole run",
-              [c["args"][0] for c in calls(QCALLS)] == ["claim", "release"])
-
-    print("\none daily run")
-    QUEUE.write_text(json.dumps({"pull": {"ok": True, "enabled": True, "approved": [], "recent": [],
-                                          "new": [{**CASE, "id": 31}]},
-                                 "claim": {"ok": True}, "plan": {"ok": True, "status": "planned"}}))
-    script([{"structured": PLAN}], auth={"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})
-    rc = fx.main([])
-    q = calls(QCALLS)
-    check("not signed in: it checks in and stops before any model work",
-          rc == 2 and [c["args"][0] for c in q] == ["pull"] and calls(CALLS) == [], f"{rc} {q}")
-    check("... and the check-in says why", q[0]["body"]["ok"] is False and "not signed in" in q[0]["body"]["why"])
-    script([{"structured": PLAN}])
-    rc = fx.main(["--dry"])
-    check("--dry asks the queue and does nothing else", rc == 0 and [c["args"][0] for c in calls(QCALLS)] == ["pull"])
-    fx.VENV_PY = Path(sys.executable)
-    script([{"structured": PLAN}])
-    rc = fx.main([])
-    check("signed in: the new case is investigated",
-          rc == 0 and [c["args"][0] for c in calls(QCALLS)] == ["pull", "claim", "plan"])
-    QUEUE.write_text(json.dumps({"pull": {"ok": True, "enabled": False, "approved": [], "recent": [], "new": [CASE]}}))
-    script([])
-    rc = fx.main([])
-    check("switched off on the droplet: nothing runs", rc == 0 and calls(CALLS) == [])
+    print("\ngiving a case up, putting one back")
+    rc, out = run("fail", "12", "--step", "the change", "--detail", "The cause is elsewhere: the card is right.")
+    res = asked()[-1]
+    check("fail reports it, with the step and the reason",
+          rc == 0 and res["args"] == ["result", "12"] and res["body"] == {
+              "status": "failed", "failed_step": "the change", "detail": "The cause is elsewhere: the card is right."}, str(res))
+    check("... and the case no longer counts as taken", "12" not in fx._claims())
+    take(13)
+    rc, out = run("release", "13", "--error", "the server could not be reached")
+    check("release puts it back for the next run", rc == 0 and out["status"] == "approved"
+          and asked()[-1]["args"] == ["release", "13"] and "13" not in fx._claims())
+    rc, out = ship(14)
+    check("shipping a case that was never taken is refused", rc == 1 and out["step"] == "the checkout", str(out))
+    queue_says(pull={"ok": True, "enabled": True, "new": [], "approved": [], "recent": []})
+    rc, out = run("fix", "15")
+    check("a case that is not approved cannot be fixed", rc == 1 and "not an approved case" in out["error"])
 
 
 def main() -> int:
     make_repo()
-    fx.VENV_PY = Path(sys.executable)
     unit_checks()
-    claude_checks()
-    flow_checks()
+    pull_checks()
+    investigate_checks()
+    fix_checks()
     print(f"\n{_checks['pass']} passed, {_checks['fail']} failed")
     return 1 if _checks["fail"] else 0
 
