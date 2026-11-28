@@ -8,6 +8,7 @@ leaving, so the desk in the Lisa process and the worker on the Mac (which reache
 tables through `cli.py`) cannot both act on one case:
 
     new → investigating → planned → proposed → approved → fixing → ready | shipped | failed
+                                              shipped → undo_requested → undone   (he said undo)
                         ↘ duplicate | already_fixed | no_action        (the investigator's call)
                                     ↘ dismissed (he said skip) | expired (no answer)
 """
@@ -26,6 +27,7 @@ TIMING_CODES = ("no_answer_error", "delivery_failed", "window_expired")
 OPEN_KINDS = ("bug", "judge", "decision")                    # a plan he is shown
 CLOSED_KINDS = ("duplicate", "already_fixed", "no_action")   # nothing to show him
 RESULT_STATES = ("ready", "shipped", "failed")
+TOLD_STATES = RESULT_STATES + ("undone",)   # states whose news the desk sends him
 MAX_ATTEMPTS = 3   # runs that may die on one case before it is set aside
 
 
@@ -140,7 +142,7 @@ class FixStore:
             f"""SELECT * FROM {self.schema}.fix_cases
                  WHERE status = ANY(%s) AND result_sent_at IS NULL AND approved_at IS NOT NULL
                  ORDER BY id""",
-            (list(RESULT_STATES),),
+            (list(TOLD_STATES),),
         )
 
     async def mark_result_sent(self, case_id: int, wa_id: str) -> None:
@@ -178,6 +180,27 @@ class FixStore:
         return await self._one(
             f"SELECT * FROM {s}.fix_cases WHERE status = 'proposed' ORDER BY proposed_at DESC LIMIT 1"
         )
+
+    async def find_for_undo(self, quoted_id: Optional[str], case_id: Optional[int]) -> Optional[dict]:
+        """Which fix an "undo" is about: the message he replied to, else the case he named, else
+        the fix that went live last."""
+        s = self.schema
+        if quoted_id:
+            row = await self._one(
+                f"""SELECT * FROM {s}.fix_cases
+                     WHERE proposal_wa_id = %s OR result_wa_id = %s ORDER BY id DESC LIMIT 1""",
+                (quoted_id, quoted_id),
+            )
+            if row:
+                return row
+        if case_id is not None:
+            return await self._one(f"SELECT * FROM {s}.fix_cases WHERE id = %s", (case_id,))
+        return await self._one(
+            f"SELECT * FROM {s}.fix_cases WHERE status = 'shipped' ORDER BY updated_at DESC LIMIT 1"
+        )
+
+    async def request_undo(self, case_id: int) -> bool:
+        return (await self._move(case_id, ("shipped",), "undo_requested")) is not None
 
     async def approve(self, case_id: int, note: str, wa_id: Optional[str]) -> bool:
         row = await self._move(case_id, ("proposed",), "approved",
@@ -220,7 +243,9 @@ class FixStore:
                  WHERE plan IS NOT NULL AND created_at > now() - interval '45 days'
                    AND status NOT IN ('duplicate')
                  ORDER BY id DESC LIMIT 60""")
-        return {"approved": approved, "new": new, "recent": recent}
+        undo = await self._rows(
+            f"SELECT * FROM {s}.fix_cases WHERE status = 'undo_requested' ORDER BY updated_at")
+        return {"approved": approved, "new": new, "recent": recent, "undo": undo}
 
     async def evidence(self, loop_id: str, judge_version: str) -> dict:
         s = self.schema
@@ -302,6 +327,18 @@ class FixStore:
             return None
         row = await self._move(case_id, ("fixing",), to, "result = %s",
                                (json.dumps(result, default=str),))
+        return to if row else None
+
+    async def save_undo(self, case_id: int, undo: dict) -> Optional[str]:
+        """How taking a fix back went. Taken back, the case is `undone`; if it could not be, it
+        is `shipped` again (still live, and he can ask again). Either way the news is due."""
+        to = "undone" if undo.get("ok") else "shipped"
+        row = await self._move(
+            case_id, ("undo_requested",), to,
+            "result = coalesce(result, '{}'::jsonb) || jsonb_build_object('undo', %s::jsonb), "
+            "result_sent_at = NULL",
+            (json.dumps(undo, default=str),),
+        )
         return to if row else None
 
     # -- schema ------------------------------------------------------------------

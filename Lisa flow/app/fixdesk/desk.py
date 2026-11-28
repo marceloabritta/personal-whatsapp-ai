@@ -4,7 +4,7 @@ It does three things, none of them with a model:
 
   opens a case     when the reviewer finishes a session that has a mistake in it;
   sends            each finished plan to his chat with himself, and later what came of it;
-  reads his answer "fix it" or "skip", forwarded here by the dispatcher.
+  reads his answer "fix it", "skip" or "undo", forwarded here by the dispatcher.
 
 The investigating and the fixing happen on his Mac, in Claude Code, once a day (`fixer/` at the
 repo root). That worker and this desk meet only in the queue (`store.py`).
@@ -159,6 +159,8 @@ class FixDesk:
             return "seen"
 
         quoted = get_quoted(data)
+        if cmd.kind == "undo":
+            return await self._undo((quoted or {}).get("id"), cmd.case_id)
         case = await self.store.find_for_reply((quoted or {}).get("id"), cmd.case_id)
         if case is None:
             return "no_case"
@@ -181,6 +183,23 @@ class FixDesk:
             await self._send(T.already_body(cid, status))
             return "already"
         return "closed"
+
+    async def _undo(self, quoted_id: Optional[str], case_id: Optional[int]) -> str:
+        """He wants a fix that went live taken back. The Mac does it on its next run."""
+        case = await self.store.find_for_undo(quoted_id, case_id)
+        if case is None:
+            return "no_case"
+        cid, status = case["id"], case["status"]
+        if status == "shipped":
+            if not await self.store.request_undo(cid):
+                return "lost_race"
+            await self._send(T.undo_ack_body(cid))
+            log.info('{"fix":"undo_requested","id":%d}', cid)
+            return "undo_requested"
+        if status in ("undo_requested", "undone"):
+            await self._send(T.undo_already_body(cid, status))
+            return "undo_already"
+        return "nothing_to_undo"   # never deployed: nothing is live to take back
 
     async def _worker_note(self) -> str:
         """A line for the "On it" message when the Mac has not been heard from."""

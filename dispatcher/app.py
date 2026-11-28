@@ -6,7 +6,7 @@ ownership) and forwards the *raw, unmodified* payload to the flow that owns the 
 
     @lisa                              ─▶  Lisa flow   (LangGraph brain, :8000)
     (untagged)                         ─▶  the chat's current owner-flow, if its window is live
-    (his own "fix it" / "skip")        ─▶  FIX_REPLY_URL, if configured and no window is live
+    (his own "fix it"/"skip"/"undo")   ─▶  FIX_REPLY_URL, if configured and no window is live
     (any voice note)                   ─▶  AUTO_TRANSCRIBE_URL, additionally, if configured
 
 Adding a new experimental flow is one line: drop another (tags, url) route below (or wire it
@@ -120,9 +120,9 @@ def is_own_message(text: str, owner_name: str) -> bool:
     return any(t.startswith(h) for h in _all_headers(owner_name))
 
 
-# His answer to a fix plan (Lisa flow/app/fixdesk/): "fix it", "Fix it F12", "skip". Only the
-# opening words are read here; the desk reads the rest and decides whether it is an answer.
-_FIX_ANSWER = re.compile(r"^\s*(fix\s+it|skip)\b", re.IGNORECASE)
+# His answer to the fix desk (Lisa flow/app/fixdesk/): "fix it", "Fix it F12", "skip", "undo F12".
+# Only the opening words are read here; the desk reads the rest and decides whether it is an answer.
+_FIX_ANSWER = re.compile(r"^\s*(fix\s+it|skip|undo)\b", re.IGNORECASE)
 
 
 def is_fix_answer(text: str) -> bool:
@@ -155,7 +155,7 @@ class Config:
         # it unset and the dispatcher behaves exactly as it did before.
         self.auto_transcribe_url = os.getenv("AUTO_TRANSCRIBE_URL") or None
         # The fix desk. Lisa sends him fix plans in his chat with himself, and he answers with a
-        # plain "fix it" or "skip": no tag, and her own message opens no window, so the rules
+        # plain "fix it", "skip" or "undo": no tag, and her own message opens no window, so the rules
         # below would drop it. When this is set, a message of HIS that opens with one of those
         # words, and falls under no tag and no live window, is forwarded here. It claims no
         # window. The desk acts only in his chat with himself; from any other chat the forward

@@ -8,6 +8,7 @@ SSH, inside the running container, where the database address already is:
     docker exec -i lisa_brain python -m app.fixdesk.cli plan   <id>        < plan.json
     docker exec -i lisa_brain python -m app.fixdesk.cli result <id>        < result.json
     docker exec -i lisa_brain python -m app.fixdesk.cli release <id>       < {"error": "..."}
+    docker exec -i lisa_brain python -m app.fixdesk.cli undone <id>        < {"ok": true, ...}
 
 Each prints one JSON object on stdout and exits 0; anything else is a failure. Nothing is sent
 from here: the desk in the Lisa process sends what the queue says is due."""
@@ -28,7 +29,7 @@ def _stdin_json() -> dict:
 
 async def _run(argv: list[str]) -> dict:
     if not argv:
-        return {"ok": False, "error": "usage: cli pull|claim|plan|result|release ..."}
+        return {"ok": False, "error": "usage: cli pull|claim|plan|result|release|undone ..."}
     s = load_settings()
     store = FixStore(s.database_url, schema=s.log_schema)
     await store.open()
@@ -51,6 +52,9 @@ async def _run(argv: list[str]) -> dict:
             return {"ok": to is not None, "status": to}
         if cmd == "release":
             to = await store.release(case_id, str(_stdin_json().get("error") or "unknown"))
+            return {"ok": to is not None, "status": to}
+        if cmd == "undone":
+            to = await store.save_undo(case_id, _stdin_json())
             return {"ok": to is not None, "status": to}
         return {"ok": False, "error": f"unknown command {cmd}"}
     finally:
